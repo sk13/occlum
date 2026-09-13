@@ -1,0 +1,18 @@
+diff --git a/sefs-cli/app/Cargo.toml b/sefs-cli/app/Cargo.toml
+index c39f2d7..38e646a 100644
+--- a/sefs-cli/app/Cargo.toml
++++ b/sefs-cli/app/Cargo.toml
+@@ -14,6 +14,13 @@ libc = "0.2"
+ ctrlc = "=3.1.6"
+ structopt = "0.3"
+ env_logger = "0.7"
++# Transitive deps whose newer releases require a newer rustc than the
++# nightly-2022-10-22 toolchain pinned by rust-toolchain. Pin them to the
++# last versions that still support this toolchain.
++proc-macro2 = "=1.0.47"
++quote = "=1.0.21"
++unicode-ident = "=1.0.5"
++unicode-segmentation = "=1.10.0"
+ rcore-fs-cli = { path = "../../rcore-fs-cli", features = ["use_fuse"] }
+ rcore-fs-sefs = { path = "../../rcore-fs-sefs", features = ["create_image"] }
+ rcore-fs-unionfs = { path = "../../rcore-fs-unionfs" }

@@ -75,6 +75,7 @@ init-submodule:
 	cd deps/ringbuf && git apply ../ringbuf.patch >/dev/null 2>&1 || git apply ../ringbuf.patch -R --check
 	cd deps/resolv-conf && git apply ../resolv-conf.patch >/dev/null 2>&1 || git apply ../resolv-conf.patch -R --check
 	cd deps/mlsdisk && git apply ../mlsdisk.patch >/dev/null 2>&1 || git apply ../mlsdisk.patch -R --check
+	cd deps/sefs && git apply ../sefs-cli.patch >/dev/null 2>&1 || git apply ../sefs-cli.patch -R --check
 
 src:
 	@$(MAKE) --no-print-directory -C src
