@@ -26,3 +26,68 @@ index c1e1746..20b896f 100644
  jinux = []
  
  
+diff --git a/core/src/layers/3-log/raw_log.rs b/core/src/layers/3-log/raw_log.rs
+index edd8730..3f76a88 100644
+--- a/core/src/layers/3-log/raw_log.rs
++++ b/core/src/layers/3-log/raw_log.rs
+@@ -614,7 +614,7 @@ impl<'a> RawLogHeadRef<'a> {
+         // Batch read
+         // Note that `prepared_blocks` are not always sorted
+         let mut offset = 0;
+-        for consecutive_blocks in prepared_blocks.group_by(|b1, b2| b2.saturating_sub(*b1) == 1) {
++        for consecutive_blocks in prepared_blocks.chunk_by(|b1, b2| b2.saturating_sub(*b1) == 1) {
+             let len = consecutive_blocks.len();
+             let first_bid = *consecutive_blocks.first().unwrap();
+             let buf_slice =
+@@ -690,7 +690,7 @@ impl<'a> RawLogTailRef<'a> {
+         // Batch read
+         // Note that `prepared_blocks` are not always sorted
+         let mut offset = 0;
+-        for consecutive_blocks in prepared_blocks.group_by(|b1, b2| b2.saturating_sub(*b1) == 1) {
++        for consecutive_blocks in prepared_blocks.chunk_by(|b1, b2| b2.saturating_sub(*b1) == 1) {
+             let len = consecutive_blocks.len();
+             let first_bid = *consecutive_blocks.first().unwrap();
+             let buf_slice =
+@@ -711,7 +711,7 @@ impl<'a> RawLogTailRef<'a> {
+         // Batch write
+         // Note that `prepared_blocks` are not always sorted
+         let mut offset = 0;
+-        for consecutive_blocks in prepared_blocks.group_by(|b1, b2| b2.saturating_sub(*b1) == 1) {
++        for consecutive_blocks in prepared_blocks.chunk_by(|b1, b2| b2.saturating_sub(*b1) == 1) {
+             let len = consecutive_blocks.len();
+             let first_bid = *consecutive_blocks.first().unwrap();
+             let buf_slice = &buf.as_slice()[offset * BLOCK_SIZE..(offset + len) * BLOCK_SIZE];
+diff --git a/core/src/layers/5-disk/sworndisk.rs b/core/src/layers/5-disk/sworndisk.rs
+index 128d911..6f7e47d 100644
+--- a/core/src/layers/5-disk/sworndisk.rs
++++ b/core/src/layers/5-disk/sworndisk.rs
+@@ -332,7 +332,7 @@ impl<D: BlockSet + 'static> DiskInner<D> {
+         let mut res = range_query_ctx.into_results();
+         let record_batches = {
+             res.sort_by(|(_, v1), (_, v2)| v1.hba.cmp(&v2.hba));
+-            res.group_by(|(_, v1), (_, v2)| v2.hba - v1.hba == 1)
++            res.chunk_by(|(_, v1), (_, v2)| v2.hba - v1.hba == 1)
+         };
+ 
+         // Perform disk read in batches and decryption
+@@ -412,7 +412,7 @@ impl<D: BlockSet + 'static> DiskInner<D> {
+             .block_validity_table
+             .alloc_batch(NonZeroUsize::new(num_write).unwrap())?;
+         debug_assert_eq!(hbas.len(), num_write);
+-        let hba_batches = hbas.group_by(|hba1, hba2| hba2 - hba1 == 1);
++        let hba_batches = hbas.chunk_by(|hba1, hba2| hba2 - hba1 == 1);
+ 
+         // Perform encryption and batch disk write
+         let mut cipher_buf = Buf::alloc(num_write)?;
+diff --git a/core/src/lib.rs b/core/src/lib.rs
+index 4b45c8f..feb4127 100644
+--- a/core/src/lib.rs
++++ b/core/src/lib.rs
+@@ -12,7 +12,6 @@
+ #![feature(new_uninit)]
+ #![feature(receiver_trait)]
+ #![feature(slice_concat_trait)]
+-#![feature(slice_group_by)]
+ #![feature(tuple_trait)]
+ #![feature(unboxed_closures)]
+ #![feature(unsize)]

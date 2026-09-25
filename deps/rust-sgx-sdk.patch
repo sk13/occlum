@@ -42,8 +42,21 @@ index ec182b39..15708b80 100644
                  .flatten()
          })
      }
+diff --git a/sgx_tstd/src/io/readbuf.rs b/sgx_tstd/src/io/readbuf.rs
+index 5889ee95..574a67cd 100644
+--- a/sgx_tstd/src/io/readbuf.rs
++++ b/sgx_tstd/src/io/readbuf.rs
+@@ -298,7 +298,7 @@ impl<'a> BorrowedCursor<'a> {
+ 
+         // SAFETY: we do not de-initialize any of the elements of the slice
+         unsafe {
+-            MaybeUninit::write_slice(&mut self.as_mut()[..buf.len()], buf);
++            MaybeUninit::copy_from_slice(&mut self.as_mut()[..buf.len()], buf);
+         }
+ 
+         // SAFETY: We just added the entire contents of buf to the filled section.
 diff --git a/sgx_tstd/src/lib.rs b/sgx_tstd/src/lib.rs
-index 774e14db..af8f6e08 100644
+index 774e14db..ce340b3d 100644
 --- a/sgx_tstd/src/lib.rs
 +++ b/sgx_tstd/src/lib.rs
 @@ -63,7 +63,6 @@
@@ -71,14 +84,37 @@ index 774e14db..af8f6e08 100644
  #![feature(linked_list_remove)]
  #![feature(maybe_uninit_slice)]
  #![feature(maybe_uninit_write_slice)]
-@@ -107,7 +103,6 @@
+@@ -107,9 +103,7 @@
  #![feature(panic_info_message)]
  #![feature(panic_internals)]
  #![feature(prelude_2024)]
 -#![feature(provide_any)]
  #![feature(ptr_as_uninit)]
- #![feature(raw_os_nonzero)]
+-#![feature(raw_os_nonzero)]
  #![feature(slice_internals)]
+ #![feature(std_internals)]
+ #![feature(str_internals)]
+@@ -137,7 +131,6 @@
+ #![feature(cfg_eval)]
+ #![feature(concat_bytes)]
+ #![feature(const_format_args)]
+-#![feature(core_panic)]
+ #![feature(custom_test_frameworks)]
+ #![feature(edition_panic)]
+ #![feature(format_args_nl)]
+diff --git a/sgx_tstd/src/net/display_buffer.rs b/sgx_tstd/src/net/display_buffer.rs
+index 278d6313..c3ac6aac 100644
+--- a/sgx_tstd/src/net/display_buffer.rs
++++ b/sgx_tstd/src/net/display_buffer.rs
+@@ -47,7 +47,7 @@ impl<const SIZE: usize> fmt::Write for DisplayBuffer<SIZE> {
+         let bytes = s.as_bytes();
+ 
+         if let Some(buf) = self.buf.get_mut(self.len..(self.len + bytes.len())) {
+-            MaybeUninit::write_slice(buf, bytes);
++            MaybeUninit::copy_from_slice(buf, bytes);
+             self.len += bytes.len();
+             Ok(())
+         } else {
 diff --git a/sgx_tstd/src/net/ip_addr.rs b/sgx_tstd/src/net/ip_addr.rs
 index e11e95c5..a8952d59 100644
 --- a/sgx_tstd/src/net/ip_addr.rs
@@ -107,8 +143,21 @@ index e11e95c5..a8952d59 100644
  pub struct Ipv6Addr {
      octets: [u8; 16],
  }
+diff --git a/sgx_tstd/src/panic.rs b/sgx_tstd/src/panic.rs
+index cca723ae..46bea403 100644
+--- a/sgx_tstd/src/panic.rs
++++ b/sgx_tstd/src/panic.rs
+@@ -26,7 +26,7 @@ use crate::sync::{SgxMutex, SgxRwLock};
+ use crate::thread::Result;
+ 
+ #[doc(hidden)]
+-#[allow_internal_unstable(libstd_sys_internals, const_format_args, core_panic)]
++#[allow_internal_unstable(libstd_sys_internals, const_format_args, panic_internals)]
+ #[cfg_attr(not(test), rustc_diagnostic_item = "std_panic_2015_macro")]
+ #[rustc_macro_transparency = "semitransparent"]
+ pub macro panic_2015 {
 diff --git a/sgx_tstd/src/panicking.rs b/sgx_tstd/src/panicking.rs
-index b6f55d89..aba3da57 100644
+index b6f55d89..b6b8f058 100644
 --- a/sgx_tstd/src/panicking.rs
 +++ b/sgx_tstd/src/panicking.rs
 @@ -26,7 +26,7 @@
@@ -120,6 +169,21 @@ index b6f55d89..aba3da57 100644
  
  use crate::any::Any;
  use crate::fmt;
+@@ -453,12 +453,12 @@ pub unsafe fn r#try<R, F: FnOnce() -> R>(f: F) -> Result<R, Box<dyn Any + Send>>
+     // Access to the union's fields: this is `std` and we know that the `r#try`
+     // intrinsic fills in the `r` or `p` union field based on its return value.
+     //
+-    // The call to `intrinsics::r#try` is made safe by:
++    // The call to `intrinsics::catch_unwind` is made safe by:
+     // - `do_call`, the first argument, can be called with the initial `data_ptr`.
+     // - `do_catch`, the second argument, can be called with the `data_ptr` as well.
+     // See their safety preconditions for more information
+     unsafe {
+-        return if intrinsics::r#try(do_call::<F, R>, data_ptr, do_catch::<F, R>) == 0 {
++        return if intrinsics::catch_unwind(do_call::<F, R>, data_ptr, do_catch::<F, R>) == 0 {
+             Ok(ManuallyDrop::into_inner(data.r))
+         } else {
+             Err(ManuallyDrop::into_inner(data.p))
 @@ -697,13 +697,13 @@ fn rust_panic_with_hook(
          } else {
              // Unfortunately, this does not print a backtrace, because creating
@@ -149,6 +213,23 @@ index 15504121..00d0bd49 100644
      }
  }
  
+diff --git a/sgx_tstd/src/sync/mpsc/oneshot.rs b/sgx_tstd/src/sync/mpsc/oneshot.rs
+index 9050ddf3..2ca25f57 100644
+--- a/sgx_tstd/src/sync/mpsc/oneshot.rs
++++ b/sgx_tstd/src/sync/mpsc/oneshot.rs
+@@ -50,9 +50,9 @@ use crate::sync::mpsc::Receiver;
+ use crate::time::Instant;
+ 
+ // Various states you can find a port in.
+-const EMPTY: *mut u8 = ptr::invalid_mut::<u8>(0); // initial state: no data, no blocked receiver
+-const DATA: *mut u8 = ptr::invalid_mut::<u8>(1); // data ready for receiver to take
+-const DISCONNECTED: *mut u8 = ptr::invalid_mut::<u8>(2); // channel is disconnected OR upgraded
++const EMPTY: *mut u8 = ptr::without_provenance_mut::<u8>(0); // initial state: no data, no blocked receiver
++const DATA: *mut u8 = ptr::without_provenance_mut::<u8>(1); // data ready for receiver to take
++const DISCONNECTED: *mut u8 = ptr::without_provenance_mut::<u8>(2); // channel is disconnected OR upgraded
+ // Any other value represents a pointer to a SignalToken value. The
+ // protocol ensures that when the state moves *to* a pointer,
+ // ownership of the token is given to the packet, and when the state
 diff --git a/sgx_tstd/src/sync/mpsc/spsc_queue.rs b/sgx_tstd/src/sync/mpsc/spsc_queue.rs
 index 2766c51a..bb816896 100644
 --- a/sgx_tstd/src/sync/mpsc/spsc_queue.rs
@@ -206,6 +287,53 @@ index db0aac0d..2789fc7c 100644
          QUEUE = Box::into_raw(state);
      } else if QUEUE == DONE {
          // can't re-init after a cleanup
+diff --git a/sgx_tstd/src/sys_common/once/generic.rs b/sgx_tstd/src/sys_common/once/generic.rs
+index ed170b3a..cafc44ac 100644
+--- a/sgx_tstd/src/sys_common/once/generic.rs
++++ b/sgx_tstd/src/sys_common/once/generic.rs
+@@ -125,7 +125,7 @@ struct WaiterQueue<'a> {
+ impl Once {
+     #[inline]
+     pub const fn new() -> Once {
+-        Once { state_and_queue: AtomicPtr::new(ptr::invalid_mut(INCOMPLETE)) }
++        Once { state_and_queue: AtomicPtr::new(ptr::without_provenance_mut(INCOMPLETE)) }
+     }
+ 
+     #[inline]
+@@ -163,7 +163,7 @@ impl Once {
+                     // Try to register this thread as the one RUNNING.
+                     let exchange_result = self.state_and_queue.compare_exchange(
+                         state_and_queue,
+-                        ptr::invalid_mut(RUNNING),
++                        ptr::without_provenance_mut(RUNNING),
+                         Ordering::Acquire,
+                         Ordering::Acquire,
+                     );
+@@ -175,14 +175,14 @@ impl Once {
+                     // wake them up on drop.
+                     let mut waiter_queue = WaiterQueue {
+                         state_and_queue: &self.state_and_queue,
+-                        set_state_on_drop_to: ptr::invalid_mut(POISONED),
++                        set_state_on_drop_to: ptr::without_provenance_mut(POISONED),
+                     };
+                     // Run the initialization function, letting it know if we're
+                     // poisoned or not.
+                     let init_state = public::OnceState {
+                         inner: OnceState {
+                             poisoned: state_and_queue.addr() == POISONED,
+-                            set_state_on_drop_to: Cell::new(ptr::invalid_mut(COMPLETE)),
++                            set_state_on_drop_to: Cell::new(ptr::without_provenance_mut(COMPLETE)),
+                         },
+                     };
+                     init(&init_state);
+@@ -293,6 +293,6 @@ impl OnceState {
+ 
+     #[inline]
+     pub fn poison(&self) {
+-        self.set_state_on_drop_to.set(ptr::invalid_mut(POISONED));
++        self.set_state_on_drop_to.set(ptr::without_provenance_mut(POISONED));
+     }
+ }
 diff --git a/sgx_tstd/src/sys_common/thread_local_dtor.rs b/sgx_tstd/src/sys_common/thread_local_dtor.rs
 index 867be833..bfceceeb 100644
 --- a/sgx_tstd/src/sys_common/thread_local_dtor.rs
@@ -220,7 +348,7 @@ index 867be833..bfceceeb 100644
      }
      let list: &mut List = &mut *(DTORS.get() as *mut List);
 diff --git a/sgx_tstd/src/thread/local.rs b/sgx_tstd/src/thread/local.rs
-index b214350d..29844d6b 100644
+index b214350d..70351184 100644
 --- a/sgx_tstd/src/thread/local.rs
 +++ b/sgx_tstd/src/thread/local.rs
 @@ -1111,7 +1111,7 @@ pub mod os {
@@ -232,6 +360,15 @@ index b214350d..29844d6b 100644
                  let ptr = Box::into_raw(ptr);
                  // SAFETY: At this point we are sure there is no value inside
                  // ptr so setting it will not affect anyone else.
+@@ -1140,7 +1140,7 @@ pub mod os {
+         // before we return from the destructor ourselves.
+         let ptr = Box::from_raw(ptr as *mut Value<T>);
+         let key = ptr.key;
+-        key.os.set(ptr::invalid_mut(1));
++        key.os.set(ptr::without_provenance_mut(1));
+         drop(ptr);
+         key.os.set(ptr::null_mut());
+     }
 diff --git a/sgx_tstd/src/time.rs b/sgx_tstd/src/time.rs
 index 2c9ebf75..2afa741b 100644
 --- a/sgx_tstd/src/time.rs
