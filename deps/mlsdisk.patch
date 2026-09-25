@@ -38,9 +38,56 @@ index c1e1746..b962900 100644
  
  
 diff --git a/core/src/layers/3-log/raw_log.rs b/core/src/layers/3-log/raw_log.rs
-index edd8730..3f76a88 100644
+index edd8730..ae262e9 100644
 --- a/core/src/layers/3-log/raw_log.rs
 +++ b/core/src/layers/3-log/raw_log.rs
+@@ -510,17 +510,17 @@ impl<'a, D: BlockSet> RawLogRef<'a, D> {
+         let disk = &self.log_store.disk;
+         // Read from the head if possible and necessary
+         let head_opt = &self.log_head;
+-        if let Some(head) = head_opt
+-            && pos < head_len
+-        {
+-            let num_read = nblocks.min(head_len - pos);
++        if let Some(head) = head_opt {
++            if pos < head_len {
++                let num_read = nblocks.min(head_len - pos);
+ 
+-            let read_buf = BufMut::try_from(&mut buf_slice[..num_read * BLOCK_SIZE])?;
+-            head.read(pos, read_buf, &disk)?;
++                let read_buf = BufMut::try_from(&mut buf_slice[..num_read * BLOCK_SIZE])?;
++                head.read(pos, read_buf, &disk)?;
+ 
+-            pos += num_read;
+-            nblocks -= num_read;
+-            buf_slice = &mut buf_slice[num_read * BLOCK_SIZE..];
++                pos += num_read;
++                nblocks -= num_read;
++                buf_slice = &mut buf_slice[num_read * BLOCK_SIZE..];
++            }
+         }
+         if nblocks == 0 {
+             return Ok(());
+@@ -528,13 +528,13 @@ impl<'a, D: BlockSet> RawLogRef<'a, D> {
+ 
+         // Read from the tail if possible and necessary
+         let tail_opt = &self.log_tail;
+-        if let Some(tail) = tail_opt
+-            && pos >= head_len
+-        {
+-            let num_read = nblocks.min(total_len - pos);
+-            let read_buf = BufMut::try_from(&mut buf_slice[..num_read * BLOCK_SIZE])?;
++        if let Some(tail) = tail_opt {
++            if pos >= head_len {
++                let num_read = nblocks.min(total_len - pos);
++                let read_buf = BufMut::try_from(&mut buf_slice[..num_read * BLOCK_SIZE])?;
+ 
+-            tail.read(pos - head_len, read_buf, &disk)?;
++                tail.read(pos - head_len, read_buf, &disk)?;
++            }
+         }
+         Ok(())
+     }
 @@ -614,7 +614,7 @@ impl<'a> RawLogHeadRef<'a> {
          // Batch read
          // Note that `prepared_blocks` are not always sorted
@@ -68,11 +115,85 @@ index edd8730..3f76a88 100644
              let len = consecutive_blocks.len();
              let first_bid = *consecutive_blocks.first().unwrap();
              let buf_slice = &buf.as_slice()[offset * BLOCK_SIZE..(offset + len) * BLOCK_SIZE];
+diff --git a/core/src/layers/4-lsm/tx_lsm_tree.rs b/core/src/layers/4-lsm/tx_lsm_tree.rs
+index 6cfb26d..f2428b3 100644
+--- a/core/src/layers/4-lsm/tx_lsm_tree.rs
++++ b/core/src/layers/4-lsm/tx_lsm_tree.rs
+@@ -305,9 +305,7 @@ impl<K: RecordKey<K>, V: RecordValue, D: BlockSet + 'static> TreeInner<K, V, D>
+         let mut tx = tx_log_store.new_tx();
+         let res: Result<_> = tx.context(|| {
+             let wal_res = tx_log_store.open_log_in(BUCKET_WAL);
+-            if let Err(e) = &wal_res
+-                && e.errno() == NotFound
+-            {
++            if matches!(&wal_res, Err(e) if e.errno() == NotFound) {
+                 return Ok((vec![], 0));
+             }
+             let wal = wal_res?;
+@@ -348,9 +346,7 @@ impl<K: RecordKey<K>, V: RecordValue, D: BlockSet + 'static> TreeInner<K, V, D>
+         let res: Result<_> = tx.context(|| {
+             for (level, bucket) in LsmLevel::iter() {
+                 let log_ids = tx_log_store.list_logs_in(bucket);
+-                if let Err(e) = &log_ids
+-                    && e.errno() == NotFound
+-                {
++                if matches!(&log_ids, Err(e) if e.errno() == NotFound) {
+                     continue;
+                 }
+ 
+diff --git a/core/src/layers/5-disk/block_alloc.rs b/core/src/layers/5-disk/block_alloc.rs
+index 795ef23..3417392 100644
+--- a/core/src/layers/5-disk/block_alloc.rs
++++ b/core/src/layers/5-disk/block_alloc.rs
+@@ -156,9 +156,7 @@ impl AllocTable {
+ 
+             // Iterate each `BAL` log and apply each diff, from older to newer
+             let bal_log_ids_res = store.list_logs_in(BUCKET_BLOCK_ALLOC_LOG);
+-            if let Err(e) = &bal_log_ids_res
+-                && e.errno() == NotFound
+-            {
++            if matches!(&bal_log_ids_res, Err(e) if e.errno() == NotFound) {
+                 let next_avail = bitmap.first_one(0).unwrap_or(0);
+                 let num_free = bitmap.count_ones();
+                 return Ok(Self {
+@@ -175,9 +173,7 @@ impl AllocTable {
+ 
+             for bal_log_id in bal_log_ids {
+                 let bal_log_res = store.open_log(bal_log_id, false);
+-                if let Err(e) = &bal_log_res
+-                    && e.errno() == NotFound
+-                {
++                if matches!(&bal_log_res, Err(e) if e.errno() == NotFound) {
+                     continue;
+                 }
+                 let bal_log = bal_log_res?;
 diff --git a/core/src/layers/5-disk/sworndisk.rs b/core/src/layers/5-disk/sworndisk.rs
-index 128d911..6f7e47d 100644
+index 128d911..c22ed9e 100644
 --- a/core/src/layers/5-disk/sworndisk.rs
 +++ b/core/src/layers/5-disk/sworndisk.rs
-@@ -332,7 +332,7 @@ impl<D: BlockSet + 'static> DiskInner<D> {
+@@ -252,9 +252,7 @@ impl<D: BlockSet + 'static> DiskInner<D> {
+         };
+ 
+         // Allow empty read
+-        if let Err(e) = &res
+-            && e.errno() == NotFound
+-        {
++        if matches!(&res, Err(e) if e.errno() == NotFound) {
+             #[cfg(not(feature = "linux"))]
+             warn!("[SwornDisk] read contains empty read on lba {lba}");
+             return Ok(());
+@@ -268,9 +266,7 @@ impl<D: BlockSet + 'static> DiskInner<D> {
+         let res = self.read_multi_blocks(lba, bufs);
+ 
+         // Allow empty read
+-        if let Err(e) = &res
+-            && e.errno() == NotFound
+-        {
++        if matches!(&res, Err(e) if e.errno() == NotFound) {
+             #[cfg(not(feature = "linux"))]
+             warn!("[SwornDisk] readv contains empty read on lba {lba}");
+             return Ok(());
+@@ -332,7 +328,7 @@ impl<D: BlockSet + 'static> DiskInner<D> {
          let mut res = range_query_ctx.into_results();
          let record_batches = {
              res.sort_by(|(_, v1), (_, v2)| v1.hba.cmp(&v2.hba));
@@ -81,7 +202,7 @@ index 128d911..6f7e47d 100644
          };
  
          // Perform disk read in batches and decryption
-@@ -412,7 +412,7 @@ impl<D: BlockSet + 'static> DiskInner<D> {
+@@ -412,7 +408,7 @@ impl<D: BlockSet + 'static> DiskInner<D> {
              .block_validity_table
              .alloc_batch(NonZeroUsize::new(num_write).unwrap())?;
          debug_assert_eq!(hbas.len(), num_write);

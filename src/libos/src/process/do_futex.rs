@@ -1,7 +1,6 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::intrinsics::atomic_load_seqcst;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
 use crate::prelude::*;
 use crate::time::{timespec_t, ClockId};
@@ -258,7 +257,7 @@ impl FutexKey {
     }
 
     pub fn load_val(&self) -> i32 {
-        unsafe { atomic_load_seqcst(self.0 as *const i32) }
+        unsafe { AtomicI32::from_ptr(self.0 as *mut i32).load(Ordering::SeqCst) }
     }
 
     pub fn addr(&self) -> usize {

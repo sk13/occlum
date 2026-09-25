@@ -1,13 +1,15 @@
 diff --git a/sefs-cli/Makefile b/sefs-cli/Makefile
-index f0eeb8c..8b16672 100644
+index f0eeb8c..56ccab9 100644
 --- a/sefs-cli/Makefile
 +++ b/sefs-cli/Makefile
-@@ -118,7 +118,7 @@ $(App_Enclave_u_Object): app/Enclave_u.o
+@@ -118,7 +118,9 @@ $(App_Enclave_u_Object): app/Enclave_u.o
  	cp $(App_Enclave_u_Object) ./lib
  
  $(App_Name): $(App_Enclave_u_Object) $(App_SRC_Files)
 -	@cd app && SGX_SDK=$(SGX_SDK) cargo build $(App_Rust_Flags)
-+	@cd app && SGX_SDK=$(SGX_SDK) RUSTC_BOOTSTRAP=1 cargo build $(App_Rust_Flags)
++	@# Link with the system linker instead of rust-lld (the default since Rust 1.90):
++	@# rust-lld rejects the duplicate __morestack symbol of libgcc and libsgx_urts_sim.
++	@cd app && SGX_SDK=$(SGX_SDK) RUSTC_BOOTSTRAP=1 RUSTFLAGS="-C linker-features=-lld" cargo build $(App_Rust_Flags)
  	@echo "Cargo  =>  $@"
  	@mkdir -p ./bin
  	cp $(App_Rust_Path)/sefs-cli $@
@@ -24,9 +26,9 @@ index 979ee76..7bc8573 100644
  	cp ./target/release/libsefsclienclave.a ../lib/libenclave.a
  endif
 diff --git a/sefs-cli/rust-toolchain b/sefs-cli/rust-toolchain
-index cd5e8eb..59be592 100644
+index cd5e8eb..8d39474 100644
 --- a/sefs-cli/rust-toolchain
 +++ b/sefs-cli/rust-toolchain
 @@ -1 +1 @@
 -nightly-2022-10-22
-+1.88.0
++1.91.1

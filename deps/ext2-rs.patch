@@ -1,5 +1,5 @@
 diff --git a/src/block_group.rs b/src/block_group.rs
-index 5ae57c2..de1eb84 100644
+index 5ae57c2..8fb3ece 100644
 --- a/src/block_group.rs
 +++ b/src/block_group.rs
 @@ -241,7 +241,7 @@ impl BlockGroup {
@@ -7,7 +7,7 @@ index 5ae57c2..de1eb84 100644
              .upgrade()
              .inode_cache
 -            .drain_filter(|_, inode| Arc::strong_count(inode) == 1)
-+            .extract_if(|_, inode| Arc::strong_count(inode) == 1)
++            .extract_if(.., |_, inode| Arc::strong_count(inode) == 1)
              .map(|(_, inode)| inode)
              .collect();
  

@@ -37,17 +37,24 @@ index 6d0ba761..3747741f 100644
  }
  
 diff --git a/sgx_tstd/src/alloc.rs b/sgx_tstd/src/alloc.rs
-index 240b2bab..aa383132 100644
+index 240b2bab..278fffff 100644
 --- a/sgx_tstd/src/alloc.rs
 +++ b/sgx_tstd/src/alloc.rs
-@@ -123,6 +123,7 @@ fn default_alloc_error_hook(layout: Layout) {
+@@ -123,11 +123,12 @@ fn default_alloc_error_hook(layout: Layout) {
      extern "Rust" {
          // This symbol is emitted by rustc next to __rust_alloc_error_handler.
          // Its value depends on the -Zoom={panic,abort} compiler option.
+-        static __rust_alloc_error_handler_should_panic: u8;
 +        #[rustc_std_internal_symbol]
-         static __rust_alloc_error_handler_should_panic: u8;
++        fn __rust_alloc_error_handler_should_panic_v2() -> u8;
      }
  
+     #[allow(unused_unsafe)]
+-    if unsafe { __rust_alloc_error_handler_should_panic != 0 } {
++    if unsafe { __rust_alloc_error_handler_should_panic_v2() != 0 } {
+         panic!("memory allocation of {} bytes failed\n", layout.size());
+     } else {
+         rtprintpanic!("memory allocation of {} bytes failed\n", layout.size());
 diff --git a/sgx_tstd/src/error.rs b/sgx_tstd/src/error.rs
 index ec182b39..15708b80 100644
 --- a/sgx_tstd/src/error.rs
@@ -236,32 +243,74 @@ index b9c31894..18d34c94 100644
      /// Fused multiply-add. Computes `(self * a) + b` with only one rounding
      /// error, yielding a more accurate result than an unfused multiply-add.
      ///
+diff --git a/sgx_tstd/src/io/buffered/bufreader/buffer.rs b/sgx_tstd/src/io/buffered/bufreader/buffer.rs
+index d3293bab..2489b265 100644
+--- a/sgx_tstd/src/io/buffered/bufreader/buffer.rs
++++ b/sgx_tstd/src/io/buffered/bufreader/buffer.rs
+@@ -56,7 +56,7 @@ impl Buffer {
+     pub fn buffer(&self) -> &[u8] {
+         // SAFETY: self.pos and self.cap are valid, and self.cap => self.pos, and
+         // that region is initialized because those are all invariants of this type.
+-        unsafe { MaybeUninit::slice_assume_init_ref(self.buf.get_unchecked(self.pos..self.filled)) }
++        unsafe { self.buf.get_unchecked(self.pos..self.filled).assume_init_ref() }
+     }
+ 
+     #[inline]
 diff --git a/sgx_tstd/src/io/readbuf.rs b/sgx_tstd/src/io/readbuf.rs
-index 5889ee95..574a67cd 100644
+index 5889ee95..810b4a8b 100644
 --- a/sgx_tstd/src/io/readbuf.rs
 +++ b/sgx_tstd/src/io/readbuf.rs
+@@ -108,7 +108,7 @@ impl<'data> BorrowedBuf<'data> {
+     #[inline]
+     pub fn filled(&self) -> &[u8] {
+         // SAFETY: We only slice the filled part of the buffer, which is always valid
+-        unsafe { MaybeUninit::slice_assume_init_ref(&self.buf[0..self.filled]) }
++        unsafe { self.buf[0..self.filled].assume_init_ref() }
+     }
+ 
+     /// Returns a cursor over the unfilled part of the buffer.
+@@ -212,7 +212,7 @@ impl<'a> BorrowedCursor<'a> {
+     #[inline]
+     pub fn init_ref(&self) -> &[u8] {
+         // SAFETY: We only slice the initialized part of the buffer, which is always valid
+-        unsafe { MaybeUninit::slice_assume_init_ref(&self.buf.buf[self.buf.filled..self.buf.init]) }
++        unsafe { self.buf.buf[self.buf.filled..self.buf.init].assume_init_ref() }
+     }
+ 
+     /// Returns a mutable reference to the initialized portion of the cursor.
+@@ -220,7 +220,7 @@ impl<'a> BorrowedCursor<'a> {
+     pub fn init_mut(&mut self) -> &mut [u8] {
+         // SAFETY: We only slice the initialized part of the buffer, which is always valid
+         unsafe {
+-            MaybeUninit::slice_assume_init_mut(&mut self.buf.buf[self.buf.filled..self.buf.init])
++            self.buf.buf[self.buf.filled..self.buf.init].assume_init_mut()
+         }
+     }
+ 
 @@ -298,7 +298,7 @@ impl<'a> BorrowedCursor<'a> {
  
          // SAFETY: we do not de-initialize any of the elements of the slice
          unsafe {
 -            MaybeUninit::write_slice(&mut self.as_mut()[..buf.len()], buf);
-+            MaybeUninit::copy_from_slice(&mut self.as_mut()[..buf.len()], buf);
++            self.as_mut()[..buf.len()].write_copy_of_slice(buf);
          }
  
          // SAFETY: We just added the entire contents of buf to the filled section.
 diff --git a/sgx_tstd/src/lib.rs b/sgx_tstd/src/lib.rs
-index 774e14db..d912243c 100644
+index 774e14db..d2fbf4ff 100644
 --- a/sgx_tstd/src/lib.rs
 +++ b/sgx_tstd/src/lib.rs
-@@ -63,7 +63,6 @@
+@@ -63,9 +63,7 @@
  #![feature(allocator_internals)]
  #![feature(allow_internal_unsafe)]
  #![feature(allow_internal_unstable)]
 -#![feature(box_syntax)]
  #![feature(c_unwind)]
- #![feature(concat_idents)]
+-#![feature(concat_idents)]
  #![feature(const_mut_refs)]
-@@ -85,8 +84,6 @@
+ #![feature(const_trait_impl)]
+ #![feature(decl_macro)]
+@@ -85,8 +83,6 @@
  #![feature(utf8_chunks)]
  //
  // Library features (core):
@@ -270,7 +319,7 @@ index 774e14db..d912243c 100644
  #![feature(char_internals)]
  #![feature(core_intrinsics)]
  #![feature(duration_checked_float)]
-@@ -99,7 +96,6 @@
+@@ -99,7 +95,6 @@
  #![feature(float_minimum_maximum)]
  #![feature(hasher_prefixfree_extras)]
  #![feature(hashmap_internals)]
@@ -278,7 +327,7 @@ index 774e14db..d912243c 100644
  #![feature(linked_list_remove)]
  #![feature(maybe_uninit_slice)]
  #![feature(maybe_uninit_write_slice)]
-@@ -107,15 +103,11 @@
+@@ -107,15 +102,11 @@
  #![feature(panic_info_message)]
  #![feature(panic_internals)]
  #![feature(prelude_2024)]
@@ -294,7 +343,7 @@ index 774e14db..d912243c 100644
  //
  // Library features (alloc):
  #![feature(allocator_api)]
-@@ -137,7 +129,6 @@
+@@ -137,7 +128,6 @@
  #![feature(cfg_eval)]
  #![feature(concat_bytes)]
  #![feature(const_format_args)]
@@ -302,8 +351,42 @@ index 774e14db..d912243c 100644
  #![feature(custom_test_frameworks)]
  #![feature(edition_panic)]
  #![feature(format_args_nl)]
+@@ -152,11 +142,6 @@
+ //
+ #![default_lib_allocator]
+ 
+-// Explicitly import the prelude. The compiler uses this same unstable attribute
+-// to import the prelude implicitly when building crates that depend on std.
+-#[prelude_import]
+-#[allow(unused)]
+-use prelude::rust_2021::*;
+ 
+ extern crate hashbrown;
+ 
+@@ -200,6 +185,12 @@ pub mod rt;
+ // The Rust prelude
+ pub mod prelude;
+ 
++// Explicitly import the prelude. The compiler uses this same unstable attribute
++// to import the prelude implicitly when building crates that depend on std.
++#[prelude_import]
++#[allow(unused)]
++use prelude::rust_2021::*;
++
+ // Public module declarations and re-exports
+ pub use alloc_crate::borrow;
+ pub use alloc_crate::boxed;
+@@ -320,7 +311,7 @@ pub use core::{
+ // Re-export built-in macros defined through libcore.
+ #[allow(deprecated)]
+ pub use core::{
+-    assert, assert_matches, cfg, column, compile_error, concat, concat_idents, const_format_args,
++    assert, assert_matches, cfg, column, compile_error, concat, const_format_args,
+     env, file, format_args, format_args_nl, include, include_bytes, include_str, line, log_syntax,
+     module_path, option_env, stringify, trace_macros,
+ };
 diff --git a/sgx_tstd/src/net/display_buffer.rs b/sgx_tstd/src/net/display_buffer.rs
-index 278d6313..1a29eefe 100644
+index 278d6313..e9381f43 100644
 --- a/sgx_tstd/src/net/display_buffer.rs
 +++ b/sgx_tstd/src/net/display_buffer.rs
 @@ -28,7 +28,7 @@ pub struct DisplayBuffer<const SIZE: usize> {
@@ -315,12 +398,21 @@ index 278d6313..1a29eefe 100644
      }
  
      #[inline]
+@@ -36,7 +36,7 @@ impl<const SIZE: usize> DisplayBuffer<SIZE> {
+         // SAFETY: `buf` is only written to by the `fmt::Write::write_str` implementation
+         // which writes a valid UTF-8 string to `buf` and correctly sets `len`.
+         unsafe {
+-            let s = MaybeUninit::slice_assume_init_ref(&self.buf[..self.len]);
++            let s = self.buf[..self.len].assume_init_ref();
+             str::from_utf8_unchecked(s)
+         }
+     }
 @@ -47,7 +47,7 @@ impl<const SIZE: usize> fmt::Write for DisplayBuffer<SIZE> {
          let bytes = s.as_bytes();
  
          if let Some(buf) = self.buf.get_mut(self.len..(self.len + bytes.len())) {
 -            MaybeUninit::write_slice(buf, bytes);
-+            MaybeUninit::copy_from_slice(buf, bytes);
++            buf.write_copy_of_slice(bytes);
              self.len += bytes.len();
              Ok(())
          } else {
@@ -789,9 +881,18 @@ index b6f55d89..394d9598 100644
  /// yer breakpoints.
  #[inline(never)]
 diff --git a/sgx_tstd/src/prelude/v1.rs b/sgx_tstd/src/prelude/v1.rs
-index 756a2c2e..64dd0cf7 100644
+index 756a2c2e..db48c96e 100644
 --- a/sgx_tstd/src/prelude/v1.rs
 +++ b/sgx_tstd/src/prelude/v1.rs
+@@ -45,7 +45,7 @@ pub use crate::result::Result::{self, Err, Ok};
+ #[allow(deprecated)]
+ #[doc(no_inline)]
+ pub use core::prelude::v1::{
+-    assert, cfg, column, compile_error, concat, concat_idents, env, file, format_args,
++    assert, cfg, column, compile_error, concat, env, file, format_args,
+     format_args_nl, include, include_bytes, include_str, line, log_syntax, module_path, option_env,
+     stringify, trace_macros, Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd,
+ };
 @@ -53,9 +53,6 @@ pub use core::prelude::v1::{
  #[doc(no_inline)]
  pub use core::prelude::v1::concat_bytes;

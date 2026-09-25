@@ -4,8 +4,7 @@ use crate::fs::IoctlCmd;
 macro_rules! return_op_unsupported_error {
     ($op_name: expr, $errno: expr) => {{
         let errno = $errno;
-        // FIXME: use the safe core::any::type_name when we upgrade to Rust 1.38 or above
-        let type_name = unsafe { core::intrinsics::type_name::<Self>() };
+        let type_name = core::any::type_name::<Self>();
         let op_name = $op_name;
         let error = FileOpNotSupportedError::new(errno, type_name, op_name);
         return_errno!(error)

@@ -1031,7 +1031,7 @@ impl InternalVMManager {
 
     pub fn clean_single_vma_chunks(&mut self) {
         self.chunks
-            .extract_if(|chunk| chunk.is_single_vma_chunk_should_be_removed())
+            .extract_if(.., |chunk| chunk.is_single_vma_chunk_should_be_removed())
             .collect::<BTreeSet<Arc<Chunk>>>();
     }
 

@@ -7,7 +7,6 @@
 #![feature(core_intrinsics)]
 #![feature(stmt_expr_attributes)]
 #![feature(alloc_layout_extra)]
-#![feature(concat_idents)]
 #![feature(trace_macros)]
 // for !Send in rw_lock
 #![feature(negative_impls)]
