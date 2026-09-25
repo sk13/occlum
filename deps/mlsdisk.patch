@@ -80,7 +80,7 @@ index 128d911..6f7e47d 100644
          // Perform encryption and batch disk write
          let mut cipher_buf = Buf::alloc(num_write)?;
 diff --git a/core/src/lib.rs b/core/src/lib.rs
-index 4b45c8f..9573e52 100644
+index 4b45c8f..57df1ab 100644
 --- a/core/src/lib.rs
 +++ b/core/src/lib.rs
 @@ -9,10 +9,9 @@
@@ -88,10 +88,33 @@ index 4b45c8f..9573e52 100644
  #![feature(let_chains)]
  #![feature(negative_impls)]
 -#![feature(new_uninit)]
+-#![feature(receiver_trait)]
 +#![feature(new_zeroed_alloc)]
- #![feature(receiver_trait)]
++#![feature(legacy_receiver_trait)]
  #![feature(slice_concat_trait)]
 -#![feature(slice_group_by)]
  #![feature(tuple_trait)]
  #![feature(unboxed_closures)]
  #![feature(unsize)]
+diff --git a/core/src/os/linux/mod.rs b/core/src/os/linux/mod.rs
+index bd72e68..31f5574 100644
+--- a/core/src/os/linux/mod.rs
++++ b/core/src/os/linux/mod.rs
+@@ -13,7 +13,7 @@ use core::{
+     fmt,
+     hash::Hash,
+     marker::{PhantomData, Tuple, Unsize},
+-    ops::{CoerceUnsized, Deref, DerefMut, DispatchFromDyn, Receiver},
++    ops::{CoerceUnsized, Deref, DerefMut, DispatchFromDyn, LegacyReceiver},
+     pin::Pin,
+     ptr::NonNull,
+     result, slice,
+@@ -121,7 +121,7 @@ impl<T: fmt::Debug + ?Sized> fmt::Debug for Box<T> {
+     }
+ }
+ 
+-impl<T: ?Sized> Receiver for Box<T> {}
++impl<T: ?Sized> LegacyReceiver for Box<T> {}
+ 
+ impl<T: ?Sized + Unsize<U>, U: ?Sized> CoerceUnsized<Box<U>> for Box<T> {}
+ 
