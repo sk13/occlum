@@ -1,3 +1,25 @@
+diff --git a/sgx_alloc/src/system.rs b/sgx_alloc/src/system.rs
+index bc7881f1..91e85af1 100644
+--- a/sgx_alloc/src/system.rs
++++ b/sgx_alloc/src/system.rs
+@@ -43,7 +43,7 @@ impl System {
+     #[inline]
+     fn alloc_impl(&self, layout: Layout, zeroed: bool) -> Result<NonNull<[u8]>, AllocError> {
+         match layout.size() {
+-            0 => Ok(NonNull::slice_from_raw_parts(layout.dangling(), 0)),
++            0 => Ok(NonNull::slice_from_raw_parts(layout.dangling_ptr(), 0)),
+             // SAFETY: `layout` is non-zero in size,
+             size => unsafe {
+                 let raw_ptr = if zeroed {
+@@ -166,7 +166,7 @@ unsafe impl Allocator for System {
+             // SAFETY: conditions must be upheld by the caller
+             0 => {
+                 Allocator::deallocate(&self, ptr, old_layout);
+-                Ok(NonNull::slice_from_raw_parts(new_layout.dangling(), 0))
++                Ok(NonNull::slice_from_raw_parts(new_layout.dangling_ptr(), 0))
+             }
+ 
+             // SAFETY: `new_size` is non-zero. Other conditions must be upheld by the caller
 diff --git a/sgx_panic_abort/src/lib.rs b/sgx_panic_abort/src/lib.rs
 index b4b90016..54a46722 100644
 --- a/sgx_panic_abort/src/lib.rs
@@ -36,25 +58,58 @@ index 6d0ba761..3747741f 100644
      fn __rust_foreign_exception() -> !;
  }
  
+diff --git a/sgx_tstd/hashbrown/src/lib.rs b/sgx_tstd/hashbrown/src/lib.rs
+index 701b6ea6..6ca6fce3 100644
+--- a/sgx_tstd/hashbrown/src/lib.rs
++++ b/sgx_tstd/hashbrown/src/lib.rs
+@@ -17,6 +17,7 @@
+         core_intrinsics,
+         dropck_eyepatch,
+         min_specialization,
++        trivial_clone,
+         extend_one,
+         allocator_api,
+         slice_ptr_get,
+diff --git a/sgx_tstd/hashbrown/src/raw/mod.rs b/sgx_tstd/hashbrown/src/raw/mod.rs
+index fce54d9f..c00c829a 100644
+--- a/sgx_tstd/hashbrown/src/raw/mod.rs
++++ b/sgx_tstd/hashbrown/src/raw/mod.rs
+@@ -1680,7 +1680,7 @@ impl<T: Clone, A: Allocator + Clone> RawTableClone for RawTable<T, A> {
+     }
+ }
+ #[cfg(feature = "nightly")]
+-impl<T: Copy, A: Allocator + Clone> RawTableClone for RawTable<T, A> {
++impl<T: core::clone::TrivialClone, A: Allocator + Clone> RawTableClone for RawTable<T, A> {
+     #[cfg_attr(feature = "inline-more", inline)]
+     unsafe fn clone_from_spec(&mut self, source: &Self, _on_panic: impl FnMut(&mut Self)) {
+         source
 diff --git a/sgx_tstd/src/alloc.rs b/sgx_tstd/src/alloc.rs
-index 240b2bab..278fffff 100644
+index 240b2bab..f9af0661 100644
 --- a/sgx_tstd/src/alloc.rs
 +++ b/sgx_tstd/src/alloc.rs
-@@ -123,11 +123,12 @@ fn default_alloc_error_hook(layout: Layout) {
-     extern "Rust" {
-         // This symbol is emitted by rustc next to __rust_alloc_error_handler.
-         // Its value depends on the -Zoom={panic,abort} compiler option.
--        static __rust_alloc_error_handler_should_panic: u8;
-+        #[rustc_std_internal_symbol]
-+        fn __rust_alloc_error_handler_should_panic_v2() -> u8;
-     }
+@@ -120,18 +120,10 @@ pub fn take_alloc_error_hook() -> fn(Layout) {
+ }
  
-     #[allow(unused_unsafe)]
+ fn default_alloc_error_hook(layout: Layout) {
+-    extern "Rust" {
+-        // This symbol is emitted by rustc next to __rust_alloc_error_handler.
+-        // Its value depends on the -Zoom={panic,abort} compiler option.
+-        static __rust_alloc_error_handler_should_panic: u8;
+-    }
+-
+-    #[allow(unused_unsafe)]
 -    if unsafe { __rust_alloc_error_handler_should_panic != 0 } {
-+    if unsafe { __rust_alloc_error_handler_should_panic_v2() != 0 } {
-         panic!("memory allocation of {} bytes failed\n", layout.size());
-     } else {
-         rtprintpanic!("memory allocation of {} bytes failed\n", layout.size());
+-        panic!("memory allocation of {} bytes failed\n", layout.size());
+-    } else {
+-        rtprintpanic!("memory allocation of {} bytes failed\n", layout.size());
+-    }
++    // Rust 1.95 removed the -Zoom={panic,abort} option (and with it the
++    // __rust_alloc_error_handler_should_panic flag symbol): as in std, the
++    // default hook only prints the error, and rust_oom then aborts.
++    rtprintpanic!("memory allocation of {} bytes failed\n", layout.size());
+ }
+ 
+ #[doc(hidden)]
 diff --git a/sgx_tstd/src/error.rs b/sgx_tstd/src/error.rs
 index ec182b39..15708b80 100644
 --- a/sgx_tstd/src/error.rs
@@ -243,6 +298,18 @@ index b9c31894..18d34c94 100644
      /// Fused multiply-add. Computes `(self * a) + b` with only one rounding
      /// error, yielding a more accurate result than an unfused multiply-add.
      ///
+diff --git a/sgx_tstd/src/ffi/mod.rs b/sgx_tstd/src/ffi/mod.rs
+index 7e72f121..a85b418e 100644
+--- a/sgx_tstd/src/ffi/mod.rs
++++ b/sgx_tstd/src/ffi/mod.rs
+@@ -173,6 +173,6 @@ pub use core::ffi::{
+ 
+ pub use core::ffi::c_void;
+ 
+-pub use core::ffi::{VaList, VaListImpl};
++pub use core::ffi::{VaArgSafe, VaList};
+ 
+ mod os_str;
 diff --git a/sgx_tstd/src/io/buffered/bufreader/buffer.rs b/sgx_tstd/src/io/buffered/bufreader/buffer.rs
 index d3293bab..2489b265 100644
 --- a/sgx_tstd/src/io/buffered/bufreader/buffer.rs
@@ -445,7 +512,7 @@ index e11e95c5..a8952d59 100644
      octets: [u8; 16],
  }
 diff --git a/sgx_tstd/src/panic.rs b/sgx_tstd/src/panic.rs
-index cca723ae..a4e3c5ba 100644
+index cca723ae..f108ad21 100644
 --- a/sgx_tstd/src/panic.rs
 +++ b/sgx_tstd/src/panic.rs
 @@ -19,6 +19,7 @@
@@ -456,15 +523,18 @@ index cca723ae..a4e3c5ba 100644
  use crate::panicking;
  #[cfg(feature = "backtrace")]
  use crate::sync::atomic::{AtomicUsize, Ordering};
-@@ -26,7 +27,7 @@ use crate::sync::{SgxMutex, SgxRwLock};
+@@ -26,9 +27,9 @@ use crate::sync::{SgxMutex, SgxRwLock};
  use crate::thread::Result;
  
  #[doc(hidden)]
 -#[allow_internal_unstable(libstd_sys_internals, const_format_args, core_panic)]
 +#[allow_internal_unstable(libstd_sys_internals, const_format_args, panic_internals)]
  #[cfg_attr(not(test), rustc_diagnostic_item = "std_panic_2015_macro")]
- #[rustc_macro_transparency = "semitransparent"]
+-#[rustc_macro_transparency = "semitransparent"]
++#[rustc_macro_transparency = "semiopaque"]
  pub macro panic_2015 {
+     () => ({
+         $crate::rt::begin_panic("explicit panic")
 @@ -52,10 +53,100 @@ pub use crate::panicking::{set_hook, take_hook};
  
  pub use crate::panicking::update_hook;
@@ -881,19 +951,20 @@ index b6f55d89..394d9598 100644
  /// yer breakpoints.
  #[inline(never)]
 diff --git a/sgx_tstd/src/prelude/v1.rs b/sgx_tstd/src/prelude/v1.rs
-index 756a2c2e..db48c96e 100644
+index 756a2c2e..4b9f00a5 100644
 --- a/sgx_tstd/src/prelude/v1.rs
 +++ b/sgx_tstd/src/prelude/v1.rs
-@@ -45,7 +45,7 @@ pub use crate::result::Result::{self, Err, Ok};
+@@ -45,17 +45,14 @@ pub use crate::result::Result::{self, Err, Ok};
  #[allow(deprecated)]
  #[doc(no_inline)]
  pub use core::prelude::v1::{
 -    assert, cfg, column, compile_error, concat, concat_idents, env, file, format_args,
+-    format_args_nl, include, include_bytes, include_str, line, log_syntax, module_path, option_env,
 +    assert, cfg, column, compile_error, concat, env, file, format_args,
-     format_args_nl, include, include_bytes, include_str, line, log_syntax, module_path, option_env,
++    include, include_bytes, include_str, line, log_syntax, module_path, option_env,
      stringify, trace_macros, Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd,
  };
-@@ -53,9 +53,6 @@ pub use core::prelude::v1::{
+ 
  #[doc(no_inline)]
  pub use core::prelude::v1::concat_bytes;
  
