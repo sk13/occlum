@@ -20,3 +20,15 @@ index 4f2e678..7cd6e8e 100644
 +
 +[features]
 +std = []
+diff --git a/rcore-fs-unionfs/src/lib.rs b/rcore-fs-unionfs/src/lib.rs
+index 2b556a1..b2ebf5e 100644
+--- a/rcore-fs-unionfs/src/lib.rs
++++ b/rcore-fs-unionfs/src/lib.rs
+@@ -2,7 +2,6 @@
+ #![deny(warnings)]
+ #![cfg_attr(test, allow(unused_imports))]
+ #![feature(get_mut_unchecked)]
+-#![feature(new_uninit)]
+ 
+ extern crate alloc;
+ //#[macro_use]

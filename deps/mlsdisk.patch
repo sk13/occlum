@@ -80,11 +80,15 @@ index 128d911..6f7e47d 100644
          // Perform encryption and batch disk write
          let mut cipher_buf = Buf::alloc(num_write)?;
 diff --git a/core/src/lib.rs b/core/src/lib.rs
-index 4b45c8f..feb4127 100644
+index 4b45c8f..9573e52 100644
 --- a/core/src/lib.rs
 +++ b/core/src/lib.rs
-@@ -12,7 +12,6 @@
- #![feature(new_uninit)]
+@@ -9,10 +9,9 @@
+ #![feature(is_sorted)]
+ #![feature(let_chains)]
+ #![feature(negative_impls)]
+-#![feature(new_uninit)]
++#![feature(new_zeroed_alloc)]
  #![feature(receiver_trait)]
  #![feature(slice_concat_trait)]
 -#![feature(slice_group_by)]

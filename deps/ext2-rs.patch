@@ -12,14 +12,16 @@ index 5ae57c2..de1eb84 100644
              .collect();
  
 diff --git a/src/lib.rs b/src/lib.rs
-index 433ea2c..1bcb020 100644
+index 433ea2c..ee2cb4e 100644
 --- a/src/lib.rs
 +++ b/src/lib.rs
-@@ -25,7 +25,7 @@
+@@ -24,8 +24,8 @@
+ 
  #![cfg_attr(not(test), no_std)]
  #![feature(int_roundings)]
- #![feature(new_uninit)]
+-#![feature(new_uninit)]
 -#![feature(btree_drain_filter)]
++#![feature(new_zeroed_alloc)]
 +#![feature(btree_extract_if)]
  #![feature(let_chains)]
  #![allow(dead_code)]
