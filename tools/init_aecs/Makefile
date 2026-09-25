@@ -8,7 +8,7 @@ TARGET_BINARY := $(RUST_OUT_DIR)/init_aecs
 .PHONY: all clean
 
 all: $(SRC_FILES)
-	@RUSTC_BOOTSTRAP=1 cargo build --release --target-dir=$(RUST_TARGET_DIR) -Z unstable-options --out-dir=$(RUST_OUT_DIR)
+	@RUSTC_BOOTSTRAP=1 cargo build --release --target-dir=$(RUST_TARGET_DIR) -Z unstable-options --artifact-dir=$(RUST_OUT_DIR)
 	@echo "CARGO (release) => init_aecs"
 
 clean:

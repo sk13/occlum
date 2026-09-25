@@ -14,10 +14,10 @@ endif
 
 all: $(SRC_FILES)
 ifeq ($(OCCLUM_RELEASE_BUILD), 1)
-	@RUSTC_BOOTSTRAP=1 cargo build --release --target-dir=$(RUST_TARGET_DIR) -Z unstable-options --out-dir=$(RUST_OUT_DIR) --features "$(CONF_FEATURES)"
+	@RUSTC_BOOTSTRAP=1 cargo build --release --target-dir=$(RUST_TARGET_DIR) -Z unstable-options --artifact-dir=$(RUST_OUT_DIR) --features "$(CONF_FEATURES)"
 	@echo "CARGO (release) => gen_internal_conf"
 else
-	@RUSTC_BOOTSTRAP=1 cargo build --target-dir=$(RUST_TARGET_DIR) -Z unstable-options --out-dir=$(RUST_OUT_DIR) --features "$(CONF_FEATURES)"
+	@RUSTC_BOOTSTRAP=1 cargo build --target-dir=$(RUST_TARGET_DIR) -Z unstable-options --artifact-dir=$(RUST_OUT_DIR) --features "$(CONF_FEATURES)"
 	@echo "CARGO (debug) => gen_internal_conf"
 endif
 
