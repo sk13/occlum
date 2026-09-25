@@ -1,3 +1,29 @@
+diff --git a/sgx_panic_abort/src/lib.rs b/sgx_panic_abort/src/lib.rs
+index b4b90016..54a46722 100644
+--- a/sgx_panic_abort/src/lib.rs
++++ b/sgx_panic_abort/src/lib.rs
+@@ -15,7 +15,7 @@
+ #![feature(c_unwind)]
+ 
+ use core::any::Any;
+-use core::panic::BoxMeUp;
++use core::panic::PanicPayload as BoxMeUp;
+ 
+ /// # Safety
+ #[rustc_std_internal_symbol]
+diff --git a/sgx_panic_unwind/src/lib.rs b/sgx_panic_unwind/src/lib.rs
+index 6d0ba761..25f37e7e 100644
+--- a/sgx_panic_unwind/src/lib.rs
++++ b/sgx_panic_unwind/src/lib.rs
+@@ -34,7 +34,7 @@ extern crate sgx_unwind;
+ 
+ use alloc::boxed::Box;
+ use core::any::Any;
+-use core::panic::BoxMeUp;
++use core::panic::PanicPayload as BoxMeUp;
+ 
+ #[path = "gcc.rs"]
+ mod imp;
 diff --git a/sgx_tstd/src/error.rs b/sgx_tstd/src/error.rs
 index ec182b39..15708b80 100644
 --- a/sgx_tstd/src/error.rs
@@ -81,6 +107,35 @@ index e11e95c5..a8952d59 100644
  pub struct Ipv6Addr {
      octets: [u8; 16],
  }
+diff --git a/sgx_tstd/src/panicking.rs b/sgx_tstd/src/panicking.rs
+index b6f55d89..aba3da57 100644
+--- a/sgx_tstd/src/panicking.rs
++++ b/sgx_tstd/src/panicking.rs
+@@ -26,7 +26,7 @@
+ 
+ #[cfg(feature = "backtrace")]
+ use crate::panic::BacktraceStyle;
+-use core::panic::{BoxMeUp, Location, PanicInfo};
++use core::panic::{Location, PanicInfo, PanicPayload as BoxMeUp};
+ 
+ use crate::any::Any;
+ use crate::fmt;
+@@ -697,13 +697,13 @@ fn rust_panic_with_hook(
+         } else {
+             // Unfortunately, this does not print a backtrace, because creating
+             // a `Backtrace` will allocate, which we must to avoid here.
+-            let panicinfo = PanicInfo::internal_constructor(message, location, can_unwind);
++            let panicinfo = PanicInfo::internal_constructor(message, location, can_unwind, false);
+             rtprintpanic!("{panicinfo}\npanicked after panic::always_abort(), aborting.\n");
+         }
+         rsgx_abort()
+     }
+ 
+-    let mut info = PanicInfo::internal_constructor(message, location, can_unwind);
++    let mut info = PanicInfo::internal_constructor(message, location, can_unwind, false);
+     let hook = HOOK.read().unwrap_or_else(PoisonError::into_inner);
+     match *hook {
+         // Some platforms (like wasm) know that printing to stderr won't ever actually
 diff --git a/sgx_tstd/src/sync/mpsc/mpsc_queue.rs b/sgx_tstd/src/sync/mpsc/mpsc_queue.rs
 index 15504121..00d0bd49 100644
 --- a/sgx_tstd/src/sync/mpsc/mpsc_queue.rs

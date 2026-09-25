@@ -1,0 +1,12 @@
+diff --git a/serde/src/lib.rs b/serde/src/lib.rs
+index 366f1b8a..96302a7c 100644
+--- a/serde/src/lib.rs
++++ b/serde/src/lib.rs
+@@ -213,6 +213,7 @@ mod lib {
+     #[cfg(all(feature = "std", not(feature = "mesalock_sgx")))]
+     pub use std::sync::{Mutex, RwLock};
+     #[cfg(all(feature = "std", feature = "mesalock_sgx"))]
++    #[allow(unused_imports)]
+     pub use std::sync::{SgxMutex as Mutex, SgxRwLock as RwLock};
+     #[cfg(feature = "std")]
+     pub use std::time::{SystemTime, UNIX_EPOCH};
