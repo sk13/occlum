@@ -77,7 +77,9 @@ trait DirentSerializer: Sync + Send {
 }
 
 /// Same with struct linux_dirent64
-#[repr(packed)] // Don't use 'C'. Or its size will align up to 8 bytes.
+// Use 'C' to keep the declared field order (the Linux ABI), and 'packed' so
+// that the size is not aligned up to 8 bytes.
+#[repr(C, packed)]
 #[derive(Debug, Clone, Copy)]
 struct LinuxDirent64 {
     /// Inode number
@@ -125,7 +127,9 @@ impl DirentSerializer for LinuxDirent64 {
 }
 
 /// Same with struct linux_dirent
-#[repr(packed)] // Don't use 'C'. Or its size will align up to 8 bytes.
+// Use 'C' to keep the declared field order (the Linux ABI), and 'packed' so
+// that the size is not aligned up to 8 bytes.
+#[repr(C, packed)]
 #[derive(Debug, Clone, Copy)]
 struct LinuxDirent {
     /// Inode number

@@ -34,6 +34,7 @@ pub struct Kiocb {
 }
 
 #[allow(non_camel_case_types)]
+#[repr(C)]
 pub struct iovec_t {
     base: *const c_void,
     len: size_t,

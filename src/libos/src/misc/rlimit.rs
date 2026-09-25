@@ -49,6 +49,7 @@ impl Default for ResourceLimits {
 
 #[derive(Debug, Copy, Clone)]
 #[allow(non_camel_case_types)]
+#[repr(C)]
 pub struct rlimit_t {
     cur: u64,
     max: u64,
