@@ -20,7 +20,7 @@ index c39f2d7..5580ab7 100644
  structopt = "0.3"
  env_logger = "0.7"
 +# Transitive dep whose newer releases require a newer rustc than the
-+# toolchain pinned by rust-toolchain (1.71.1). Pin it to a version that still
++# toolchain pinned by rust-toolchain (1.73.0). Pin it to a version that still
 +# supports this toolchain.
 +unicode-segmentation = "=1.12.0"
  rcore-fs-cli = { path = "../../rcore-fs-cli", features = ["use_fuse"] }
@@ -44,4 +44,4 @@ index cd5e8eb..68bc7ff 100644
 +++ b/sefs-cli/rust-toolchain
 @@ -1 +1 @@
 -nightly-2022-10-22
-+1.71.1
++1.73.0

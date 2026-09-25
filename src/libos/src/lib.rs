@@ -9,7 +9,6 @@
 #![feature(alloc_layout_extra)]
 #![feature(concat_idents)]
 #![feature(trace_macros)]
-#![feature(drain_filter)]
 // for !Send in rw_lock
 #![feature(negative_impls)]
 // for may_dangle in rw_lock
@@ -20,7 +19,7 @@
 // for std::hint::black_box
 #![feature(test)]
 #![feature(atomic_from_mut)]
-#![feature(btree_drain_filter)]
+#![feature(btree_extract_if)]
 #![feature(arbitrary_enum_discriminant)]
 // for core::ptr::non_null::NonNull addr() method
 #![feature(strict_provenance)]

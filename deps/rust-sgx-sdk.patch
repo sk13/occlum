@@ -1,5 +1,23 @@
+diff --git a/sgx_tstd/src/error.rs b/sgx_tstd/src/error.rs
+index ec182b39..15708b80 100644
+--- a/sgx_tstd/src/error.rs
++++ b/sgx_tstd/src/error.rs
+@@ -471,11 +471,11 @@ where
+     fn backtrace(&self) -> Option<&Backtrace> {
+         // have to grab the backtrace on the first error directly since that error may not be
+         // 'static
+-        let backtrace = (&self.error as &dyn Error).request_ref();
++        let backtrace = core::error::request_ref(&self.error);
+         backtrace.or_else(|| {
+             self.error
+                 .source()
+-                .map(|source| source.sources().find_map(|source| source.request_ref()))
++                .map(|source| source.sources().find_map(|source| core::error::request_ref(source)))
+                 .flatten()
+         })
+     }
 diff --git a/sgx_tstd/src/lib.rs b/sgx_tstd/src/lib.rs
-index 774e14db..0dc32458 100644
+index 774e14db..af8f6e08 100644
 --- a/sgx_tstd/src/lib.rs
 +++ b/sgx_tstd/src/lib.rs
 @@ -63,7 +63,6 @@
@@ -27,6 +45,14 @@ index 774e14db..0dc32458 100644
  #![feature(linked_list_remove)]
  #![feature(maybe_uninit_slice)]
  #![feature(maybe_uninit_write_slice)]
+@@ -107,7 +103,6 @@
+ #![feature(panic_info_message)]
+ #![feature(panic_internals)]
+ #![feature(prelude_2024)]
+-#![feature(provide_any)]
+ #![feature(ptr_as_uninit)]
+ #![feature(raw_os_nonzero)]
+ #![feature(slice_internals)]
 diff --git a/sgx_tstd/src/net/ip_addr.rs b/sgx_tstd/src/net/ip_addr.rs
 index e11e95c5..a8952d59 100644
 --- a/sgx_tstd/src/net/ip_addr.rs

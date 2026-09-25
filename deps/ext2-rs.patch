@@ -1,0 +1,26 @@
+diff --git a/src/block_group.rs b/src/block_group.rs
+index 5ae57c2..de1eb84 100644
+--- a/src/block_group.rs
++++ b/src/block_group.rs
+@@ -241,7 +241,7 @@ impl BlockGroup {
+             .upgradeable_read()
+             .upgrade()
+             .inode_cache
+-            .drain_filter(|_, inode| Arc::strong_count(inode) == 1)
++            .extract_if(|_, inode| Arc::strong_count(inode) == 1)
+             .map(|(_, inode)| inode)
+             .collect();
+ 
+diff --git a/src/lib.rs b/src/lib.rs
+index 433ea2c..1bcb020 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -25,7 +25,7 @@
+ #![cfg_attr(not(test), no_std)]
+ #![feature(int_roundings)]
+ #![feature(new_uninit)]
+-#![feature(btree_drain_filter)]
++#![feature(btree_extract_if)]
+ #![feature(let_chains)]
+ #![allow(dead_code)]
+ 
