@@ -56,7 +56,7 @@ index 5889ee95..574a67cd 100644
  
          // SAFETY: We just added the entire contents of buf to the filled section.
 diff --git a/sgx_tstd/src/lib.rs b/sgx_tstd/src/lib.rs
-index 774e14db..ce340b3d 100644
+index 774e14db..3e91b1c9 100644
 --- a/sgx_tstd/src/lib.rs
 +++ b/sgx_tstd/src/lib.rs
 @@ -63,7 +63,6 @@
@@ -67,7 +67,13 @@ index 774e14db..ce340b3d 100644
  #![feature(c_unwind)]
  #![feature(concat_idents)]
  #![feature(const_mut_refs)]
-@@ -85,8 +84,6 @@
+@@ -80,13 +79,12 @@
+ #![feature(never_type)]
+ #![feature(prelude_import)]
+ #![feature(rustc_attrs)]
++#![feature(rustc_encodable_decodable)]
+ #![feature(thread_local)]
+ #![feature(try_blocks)]
  #![feature(utf8_chunks)]
  //
  // Library features (core):
@@ -76,7 +82,7 @@ index 774e14db..ce340b3d 100644
  #![feature(char_internals)]
  #![feature(core_intrinsics)]
  #![feature(duration_checked_float)]
-@@ -99,7 +96,6 @@
+@@ -99,7 +97,6 @@
  #![feature(float_minimum_maximum)]
  #![feature(hasher_prefixfree_extras)]
  #![feature(hashmap_internals)]
@@ -84,7 +90,7 @@ index 774e14db..ce340b3d 100644
  #![feature(linked_list_remove)]
  #![feature(maybe_uninit_slice)]
  #![feature(maybe_uninit_write_slice)]
-@@ -107,9 +103,7 @@
+@@ -107,9 +104,7 @@
  #![feature(panic_info_message)]
  #![feature(panic_internals)]
  #![feature(prelude_2024)]
@@ -94,7 +100,7 @@ index 774e14db..ce340b3d 100644
  #![feature(slice_internals)]
  #![feature(std_internals)]
  #![feature(str_internals)]
-@@ -137,7 +131,6 @@
+@@ -137,7 +132,6 @@
  #![feature(cfg_eval)]
  #![feature(concat_bytes)]
  #![feature(const_format_args)]
@@ -261,6 +267,36 @@ index 221b5751..93594d87 100644
      /// Creates a new empty cell.
      ///
      /// # Example
+diff --git a/sgx_tstd/src/sys/os_str.rs b/sgx_tstd/src/sys/os_str.rs
+index c8ecad4a..992840d9 100644
+--- a/sgx_tstd/src/sys/os_str.rs
++++ b/sgx_tstd/src/sys/os_str.rs
+@@ -28,7 +28,6 @@ use crate::str;
+ use crate::sync::Arc;
+ use crate::sys_common::{AsInner, IntoInner};
+ 
+-use core::str::Utf8Chunks;
+ 
+ #[derive(Hash)]
+ #[repr(transparent)]
+@@ -43,7 +42,7 @@ pub struct Slice {
+ 
+ impl fmt::Debug for Slice {
+     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+-        fmt::Debug::fmt(&Utf8Chunks::new(&self.inner).debug(), f)
++        fmt::Debug::fmt(&self.inner.utf8_chunks().debug(), f)
+     }
+ }
+ 
+@@ -55,7 +54,7 @@ impl fmt::Display for Slice {
+             return "".fmt(f);
+         }
+ 
+-        for chunk in Utf8Chunks::new(&self.inner) {
++        for chunk in self.inner.utf8_chunks() {
+             let valid = chunk.valid();
+             // If we successfully decoded the whole chunk as a valid string then
+             // we can return a direct formatting of the string which will also
 diff --git a/sgx_tstd/src/sys/thread.rs b/sgx_tstd/src/sys/thread.rs
 index 538995b9..868280f2 100644
 --- a/sgx_tstd/src/sys/thread.rs

@@ -1,0 +1,22 @@
+diff --git a/rcore-fs-ramfs/Cargo.toml b/rcore-fs-ramfs/Cargo.toml
+index 3e8b715..03fb334 100644
+--- a/rcore-fs-ramfs/Cargo.toml
++++ b/rcore-fs-ramfs/Cargo.toml
+@@ -8,3 +8,6 @@ edition = "2021"
+ rcore-fs = { path = "../rcore-fs" }
+ spin = "0.5"
+ log = "=0.4.17"
++
++[features]
++std = []
+diff --git a/rcore-fs-unionfs/Cargo.toml b/rcore-fs-unionfs/Cargo.toml
+index 4f2e678..7cd6e8e 100644
+--- a/rcore-fs-unionfs/Cargo.toml
++++ b/rcore-fs-unionfs/Cargo.toml
+@@ -13,3 +13,6 @@ rcore-fs = { path = "../rcore-fs" }
+ 
+ [dev-dependencies]
+ rcore-fs-ramfs = { path = "../rcore-fs-ramfs" }
++
++[features]
++std = []
