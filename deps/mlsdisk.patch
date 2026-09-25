@@ -1,8 +1,19 @@
 diff --git a/core/Cargo.toml b/core/Cargo.toml
-index c1e1746..20b896f 100644
+index c1e1746..b962900 100644
 --- a/core/Cargo.toml
 +++ b/core/Cargo.toml
-@@ -22,16 +22,18 @@ serde = { version = "=1.0.188", default-features = false, features = ["alloc", "
+@@ -8,7 +8,9 @@ bindings = { path = "../linux/bindings", optional = true }
+ inherit-methods-macro = {git = "https://github.com/asterinas/inherit-methods-macro", rev = "98f7e3e"}
+ pod = { git = "https://github.com/asterinas/pod", rev = "d7dba56" }
+ 
+-anymap = { git = "https://github.com/lucassong-mh/anymap", branch = "1.0.0-beta.2-patched", default-features = false, features = ["hashbrown"] }
++# anymap3 is a maintained fork of anymap with a fix for rustc >= 1.88, which
++# rejects adding auto traits to a dyn type via a pointer cast (E0804).
++anymap = { package = "anymap3", version = "1.0.1", default-features = false, features = ["hashbrown"] }
+ array-init = "2.1.0"
+ bittle = "0.5.6"
+ crossbeam-queue = { version = "=0.3.11", default-features = false, features = ["alloc"] }
+@@ -22,16 +24,18 @@ serde = { version = "=1.0.188", default-features = false, features = ["alloc", "
  spin = { version = "0.9.8", optional = true }
  static_assertions = "1.1.0"
  

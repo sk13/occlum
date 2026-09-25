@@ -12,7 +12,7 @@ index b4b90016..54a46722 100644
  /// # Safety
  #[rustc_std_internal_symbol]
 diff --git a/sgx_panic_unwind/src/lib.rs b/sgx_panic_unwind/src/lib.rs
-index 6d0ba761..25f37e7e 100644
+index 6d0ba761..3747741f 100644
 --- a/sgx_panic_unwind/src/lib.rs
 +++ b/sgx_panic_unwind/src/lib.rs
 @@ -34,7 +34,7 @@ extern crate sgx_unwind;
@@ -24,6 +24,30 @@ index 6d0ba761..25f37e7e 100644
  
  #[path = "gcc.rs"]
  mod imp;
+@@ -42,9 +42,11 @@ mod imp;
+ extern "C" {
+     /// Handler in libstd called when a panic object is dropped outside of
+     /// `catch_unwind`.
++    #[rustc_std_internal_symbol]
+     fn __rust_drop_panic() -> !;
+ 
+     /// Handler in libstd called when a foreign exception is caught.
++    #[rustc_std_internal_symbol]
+     fn __rust_foreign_exception() -> !;
+ }
+ 
+diff --git a/sgx_tstd/src/alloc.rs b/sgx_tstd/src/alloc.rs
+index 240b2bab..aa383132 100644
+--- a/sgx_tstd/src/alloc.rs
++++ b/sgx_tstd/src/alloc.rs
+@@ -123,6 +123,7 @@ fn default_alloc_error_hook(layout: Layout) {
+     extern "Rust" {
+         // This symbol is emitted by rustc next to __rust_alloc_error_handler.
+         // Its value depends on the -Zoom={panic,abort} compiler option.
++        #[rustc_std_internal_symbol]
+         static __rust_alloc_error_handler_should_panic: u8;
+     }
+ 
 diff --git a/sgx_tstd/src/error.rs b/sgx_tstd/src/error.rs
 index ec182b39..15708b80 100644
 --- a/sgx_tstd/src/error.rs
@@ -226,7 +250,7 @@ index 5889ee95..574a67cd 100644
  
          // SAFETY: We just added the entire contents of buf to the filled section.
 diff --git a/sgx_tstd/src/lib.rs b/sgx_tstd/src/lib.rs
-index 774e14db..0095c31d 100644
+index 774e14db..d912243c 100644
 --- a/sgx_tstd/src/lib.rs
 +++ b/sgx_tstd/src/lib.rs
 @@ -63,7 +63,6 @@
@@ -237,13 +261,7 @@ index 774e14db..0095c31d 100644
  #![feature(c_unwind)]
  #![feature(concat_idents)]
  #![feature(const_mut_refs)]
-@@ -80,13 +79,12 @@
- #![feature(never_type)]
- #![feature(prelude_import)]
- #![feature(rustc_attrs)]
-+#![feature(rustc_encodable_decodable)]
- #![feature(thread_local)]
- #![feature(try_blocks)]
+@@ -85,8 +84,6 @@
  #![feature(utf8_chunks)]
  //
  // Library features (core):
@@ -252,7 +270,7 @@ index 774e14db..0095c31d 100644
  #![feature(char_internals)]
  #![feature(core_intrinsics)]
  #![feature(duration_checked_float)]
-@@ -99,7 +97,6 @@
+@@ -99,7 +96,6 @@
  #![feature(float_minimum_maximum)]
  #![feature(hasher_prefixfree_extras)]
  #![feature(hashmap_internals)]
@@ -260,7 +278,7 @@ index 774e14db..0095c31d 100644
  #![feature(linked_list_remove)]
  #![feature(maybe_uninit_slice)]
  #![feature(maybe_uninit_write_slice)]
-@@ -107,15 +104,12 @@
+@@ -107,15 +103,11 @@
  #![feature(panic_info_message)]
  #![feature(panic_internals)]
  #![feature(prelude_2024)]
@@ -271,12 +289,12 @@ index 774e14db..0095c31d 100644
  #![feature(std_internals)]
  #![feature(str_internals)]
  #![feature(strict_provenance)]
- #![feature(maybe_uninit_uninit_array)]
+-#![feature(maybe_uninit_uninit_array)]
 -#![feature(const_maybe_uninit_uninit_array)]
  //
  // Library features (alloc):
  #![feature(allocator_api)]
-@@ -137,7 +131,6 @@
+@@ -137,7 +129,6 @@
  #![feature(cfg_eval)]
  #![feature(concat_bytes)]
  #![feature(const_format_args)]
@@ -285,9 +303,18 @@ index 774e14db..0095c31d 100644
  #![feature(edition_panic)]
  #![feature(format_args_nl)]
 diff --git a/sgx_tstd/src/net/display_buffer.rs b/sgx_tstd/src/net/display_buffer.rs
-index 278d6313..c3ac6aac 100644
+index 278d6313..1a29eefe 100644
 --- a/sgx_tstd/src/net/display_buffer.rs
 +++ b/sgx_tstd/src/net/display_buffer.rs
+@@ -28,7 +28,7 @@ pub struct DisplayBuffer<const SIZE: usize> {
+ impl<const SIZE: usize> DisplayBuffer<SIZE> {
+     #[inline]
+     pub const fn new() -> Self {
+-        Self { buf: MaybeUninit::uninit_array(), len: 0 }
++        Self { buf: [const { MaybeUninit::uninit() }; SIZE], len: 0 }
+     }
+ 
+     #[inline]
 @@ -47,7 +47,7 @@ impl<const SIZE: usize> fmt::Write for DisplayBuffer<SIZE> {
          let bytes = s.as_bytes();
  
@@ -449,7 +476,7 @@ index cca723ae..a4e3c5ba 100644
  ///
  /// The message can be of any (`Any + Send`) type, not just strings.
 diff --git a/sgx_tstd/src/panicking.rs b/sgx_tstd/src/panicking.rs
-index b6f55d89..14deb90c 100644
+index b6f55d89..394d9598 100644
 --- a/sgx_tstd/src/panicking.rs
 +++ b/sgx_tstd/src/panicking.rs
 @@ -26,7 +26,8 @@
@@ -462,7 +489,23 @@ index b6f55d89..14deb90c 100644
  
  use crate::any::Any;
  use crate::fmt;
-@@ -87,12 +88,12 @@ extern "C" fn __rust_foreign_exception() -> ! {
+@@ -59,6 +60,7 @@ use sgx_trts::trts::rsgx_abort;
+ // hook up these functions, but it is not this day!
+ #[allow(improper_ctypes)]
+ extern "C" {
++    #[rustc_std_internal_symbol]
+     fn __rust_panic_cleanup(payload: *mut u8) -> *mut (dyn Any + Send + 'static);
+ }
+ 
+@@ -67,6 +69,7 @@ extern "Rust" {
+     /// `payload` is passed through another layer of raw pointers as `&mut dyn Trait` is not
+     /// FFI-safe. `BoxMeUp` lazily performs allocation only when needed (this avoids allocations
+     /// when using the "abort" panic runtime).
++    #[rustc_std_internal_symbol]
+     fn __rust_start_panic(payload: *mut &mut dyn BoxMeUp) -> u32;
+ }
+ 
+@@ -87,12 +90,12 @@ extern "C" fn __rust_foreign_exception() -> ! {
  
  enum Hook {
      Default,
@@ -477,7 +520,7 @@ index b6f55d89..14deb90c 100644
          match self {
              Hook::Default => Box::new(default_hook),
              Hook::Custom(hook) => hook,
-@@ -142,7 +143,7 @@ static HOOK: RwLock<Hook> = RwLock::new(Hook::Default);
+@@ -142,7 +145,7 @@ static HOOK: RwLock<Hook> = RwLock::new(Hook::Default);
  ///
  /// panic!("Normal panic");
  /// ```
@@ -486,7 +529,7 @@ index b6f55d89..14deb90c 100644
      if thread::panicking() {
          panic!("cannot modify the panic hook from a panicking thread");
      }
-@@ -184,7 +185,7 @@ pub fn set_hook(hook: Box<dyn Fn(&PanicInfo<'_>) + 'static + Sync + Send>) {
+@@ -184,7 +187,7 @@ pub fn set_hook(hook: Box<dyn Fn(&PanicInfo<'_>) + 'static + Sync + Send>) {
  /// panic!("Normal panic");
  /// ```
  #[must_use]
@@ -495,7 +538,7 @@ index b6f55d89..14deb90c 100644
      if thread::panicking() {
          panic!("cannot modify the panic hook from a panicking thread");
      }
-@@ -229,7 +230,7 @@ pub fn take_hook() -> Box<dyn Fn(&PanicInfo<'_>) + 'static + Sync + Send> {
+@@ -229,7 +232,7 @@ pub fn take_hook() -> Box<dyn Fn(&PanicInfo<'_>) + 'static + Sync + Send> {
  /// ```
  pub fn update_hook<F>(hook_fn: F)
  where
@@ -504,7 +547,7 @@ index b6f55d89..14deb90c 100644
          + Sync
          + Send
          + 'static,
-@@ -244,10 +245,10 @@ where
+@@ -244,10 +247,10 @@ where
  }
  
  #[cfg(not(feature = "stdio"))]
@@ -517,7 +560,7 @@ index b6f55d89..14deb90c 100644
      // If this is a double panic, make sure that we print a backtrace
      // for this panic. Otherwise only print it if logging is enabled.
      #[cfg(feature = "backtrace")]
-@@ -453,12 +454,12 @@ pub unsafe fn r#try<R, F: FnOnce() -> R>(f: F) -> Result<R, Box<dyn Any + Send>>
+@@ -453,12 +456,12 @@ pub unsafe fn r#try<R, F: FnOnce() -> R>(f: F) -> Result<R, Box<dyn Any + Send>>
      // Access to the union's fields: this is `std` and we know that the `r#try`
      // intrinsic fills in the `r` or `p` union field based on its return value.
      //
@@ -532,7 +575,7 @@ index b6f55d89..14deb90c 100644
              Ok(ManuallyDrop::into_inner(data.r))
          } else {
              Err(ManuallyDrop::into_inner(data.p))
-@@ -535,16 +536,15 @@ pub fn panicking() -> bool {
+@@ -535,16 +538,15 @@ pub fn panicking() -> bool {
  #[panic_handler]
  pub fn begin_panic_handler(info: &PanicInfo<'_>) -> ! {
      struct PanicPayload<'a> {
@@ -551,7 +594,7 @@ index b6f55d89..14deb90c 100644
          fn fill(&mut self) -> &mut String {
              use crate::fmt::Write;
  
-@@ -552,12 +552,22 @@ pub fn begin_panic_handler(info: &PanicInfo<'_>) -> ! {
+@@ -552,12 +554,22 @@ pub fn begin_panic_handler(info: &PanicInfo<'_>) -> ! {
              // Lazily, the first time this gets called, run the actual string formatting.
              self.string.get_or_insert_with(|| {
                  let mut s = String::new();
@@ -575,7 +618,7 @@ index b6f55d89..14deb90c 100644
      unsafe impl<'a> BoxMeUp for PanicPayload<'a> {
          fn take_box(&mut self) -> *mut (dyn Any + Send) {
              // We do two allocations here, unfortunately. But (a) they're required with the current
-@@ -582,35 +592,55 @@ pub fn begin_panic_handler(info: &PanicInfo<'_>) -> ! {
+@@ -582,35 +594,55 @@ pub fn begin_panic_handler(info: &PanicInfo<'_>) -> ! {
          fn get(&mut self) -> &(dyn Any + Send) {
              &self.0
          }
@@ -640,7 +683,7 @@ index b6f55d89..14deb90c 100644
              );
          }
      }
-@@ -660,14 +690,23 @@ pub const fn begin_panic<M: Any + Send>(msg: M) -> ! {
+@@ -660,14 +692,23 @@ pub const fn begin_panic<M: Any + Send>(msg: M) -> ! {
          }
      }
  
@@ -666,7 +709,7 @@ index b6f55d89..14deb90c 100644
      }
  }
  
-@@ -678,9 +717,9 @@ pub const fn begin_panic<M: Any + Send>(msg: M) -> ! {
+@@ -678,9 +719,9 @@ pub const fn begin_panic<M: Any + Send>(msg: M) -> ! {
  /// abort or unwind.
  fn rust_panic_with_hook(
      payload: &mut dyn BoxMeUp,
@@ -677,7 +720,7 @@ index b6f55d89..14deb90c 100644
  ) -> ! {
      let (must_abort, panics) = panic_count::increase();
  
-@@ -697,13 +736,13 @@ fn rust_panic_with_hook(
+@@ -697,13 +738,13 @@ fn rust_panic_with_hook(
          } else {
              // Unfortunately, this does not print a backtrace, because creating
              // a `Backtrace` will allocate, which we must to avoid here.
@@ -694,7 +737,7 @@ index b6f55d89..14deb90c 100644
      let hook = HOOK.read().unwrap_or_else(PoisonError::into_inner);
      match *hook {
          // Some platforms (like wasm) know that printing to stderr won't ever actually
-@@ -715,12 +754,20 @@ fn rust_panic_with_hook(
+@@ -715,12 +756,20 @@ fn rust_panic_with_hook(
          #[cfg(feature = "stdio")]
          Hook::Default if panic_output().is_none() => {}
          Hook::Default => {
@@ -719,7 +762,7 @@ index b6f55d89..14deb90c 100644
          }
      };
      drop(hook);
-@@ -754,9 +801,25 @@ pub fn rust_panic_without_hook(payload: Box<dyn Any + Send>) -> ! {
+@@ -754,9 +803,25 @@ pub fn rust_panic_without_hook(payload: Box<dyn Any + Send>) -> ! {
          }
      }
  
@@ -745,6 +788,20 @@ index b6f55d89..14deb90c 100644
  /// An unmangled function (through `rustc_std_internal_symbol`) on which to slap
  /// yer breakpoints.
  #[inline(never)]
+diff --git a/sgx_tstd/src/prelude/v1.rs b/sgx_tstd/src/prelude/v1.rs
+index 756a2c2e..64dd0cf7 100644
+--- a/sgx_tstd/src/prelude/v1.rs
++++ b/sgx_tstd/src/prelude/v1.rs
+@@ -53,9 +53,6 @@ pub use core::prelude::v1::{
+ #[doc(no_inline)]
+ pub use core::prelude::v1::concat_bytes;
+ 
+-#[allow(deprecated)]
+-pub use core::prelude::v1::{RustcDecodable, RustcEncodable};
+-
+ // Do not `doc(no_inline)` so that they become doc items on their own
+ // (no public module for them to be re-exported from).
+ pub use core::prelude::v1::{derive, global_allocator, test, test_case};
 diff --git a/sgx_tstd/src/sync/mpsc/mpsc_queue.rs b/sgx_tstd/src/sync/mpsc/mpsc_queue.rs
 index 15504121..00d0bd49 100644
 --- a/sgx_tstd/src/sync/mpsc/mpsc_queue.rs
