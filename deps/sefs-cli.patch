@@ -1,18 +1,47 @@
+diff --git a/sefs-cli/Makefile b/sefs-cli/Makefile
+index f0eeb8c..8b16672 100644
+--- a/sefs-cli/Makefile
++++ b/sefs-cli/Makefile
+@@ -118,7 +118,7 @@ $(App_Enclave_u_Object): app/Enclave_u.o
+ 	cp $(App_Enclave_u_Object) ./lib
+ 
+ $(App_Name): $(App_Enclave_u_Object) $(App_SRC_Files)
+-	@cd app && SGX_SDK=$(SGX_SDK) cargo build $(App_Rust_Flags)
++	@cd app && SGX_SDK=$(SGX_SDK) RUSTC_BOOTSTRAP=1 cargo build $(App_Rust_Flags)
+ 	@echo "Cargo  =>  $@"
+ 	@mkdir -p ./bin
+ 	cp $(App_Rust_Path)/sefs-cli $@
 diff --git a/sefs-cli/app/Cargo.toml b/sefs-cli/app/Cargo.toml
-index c39f2d7..38e646a 100644
+index c39f2d7..5580ab7 100644
 --- a/sefs-cli/app/Cargo.toml
 +++ b/sefs-cli/app/Cargo.toml
-@@ -14,6 +14,13 @@ libc = "0.2"
+@@ -14,6 +14,10 @@ libc = "0.2"
  ctrlc = "=3.1.6"
  structopt = "0.3"
  env_logger = "0.7"
-+# Transitive deps whose newer releases require a newer rustc than the
-+# nightly-2022-10-22 toolchain pinned by rust-toolchain. Pin them to the
-+# last versions that still support this toolchain.
-+proc-macro2 = "=1.0.47"
-+quote = "=1.0.21"
-+unicode-ident = "=1.0.5"
-+unicode-segmentation = "=1.10.0"
++# Transitive dep whose newer releases require a newer rustc than the
++# toolchain pinned by rust-toolchain (1.71.1). Pin it to a version that still
++# supports this toolchain.
++unicode-segmentation = "=1.12.0"
  rcore-fs-cli = { path = "../../rcore-fs-cli", features = ["use_fuse"] }
  rcore-fs-sefs = { path = "../../rcore-fs-sefs", features = ["create_image"] }
  rcore-fs-unionfs = { path = "../../rcore-fs-unionfs" }
+diff --git a/sefs-cli/enclave/Makefile b/sefs-cli/enclave/Makefile
+index 979ee76..7bc8573 100644
+--- a/sefs-cli/enclave/Makefile
++++ b/sefs-cli/enclave/Makefile
+@@ -11,6 +11,6 @@ ifeq ($(XARGO_SGX), 1)
+ 	RUST_TARGET_PATH=$(Rust_Target_Path) xargo build --target x86_64-unknown-linux-sgx --release
+ 	cp ./target/x86_64-unknown-linux-sgx/release/libsefsclienclave.a ../lib/libenclave.a
+ else
+-	cargo build --release
++	RUSTC_BOOTSTRAP=1 cargo build --release
+ 	cp ./target/release/libsefsclienclave.a ../lib/libenclave.a
+ endif
+diff --git a/sefs-cli/rust-toolchain b/sefs-cli/rust-toolchain
+index cd5e8eb..68bc7ff 100644
+--- a/sefs-cli/rust-toolchain
++++ b/sefs-cli/rust-toolchain
+@@ -1 +1 @@
+-nightly-2022-10-22
++1.71.1

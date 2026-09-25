@@ -1,0 +1,166 @@
+diff --git a/sgx_tstd/src/lib.rs b/sgx_tstd/src/lib.rs
+index 774e14db..0dc32458 100644
+--- a/sgx_tstd/src/lib.rs
++++ b/sgx_tstd/src/lib.rs
+@@ -63,7 +63,6 @@
+ #![feature(allocator_internals)]
+ #![feature(allow_internal_unsafe)]
+ #![feature(allow_internal_unstable)]
+-#![feature(box_syntax)]
+ #![feature(c_unwind)]
+ #![feature(concat_idents)]
+ #![feature(const_mut_refs)]
+@@ -85,8 +84,6 @@
+ #![feature(utf8_chunks)]
+ //
+ // Library features (core):
+-#![feature(array_error_internals)]
+-#![feature(char_error_internals)]
+ #![feature(char_internals)]
+ #![feature(core_intrinsics)]
+ #![feature(duration_checked_float)]
+@@ -99,7 +96,6 @@
+ #![feature(float_minimum_maximum)]
+ #![feature(hasher_prefixfree_extras)]
+ #![feature(hashmap_internals)]
+-#![feature(int_error_internals)]
+ #![feature(linked_list_remove)]
+ #![feature(maybe_uninit_slice)]
+ #![feature(maybe_uninit_write_slice)]
+diff --git a/sgx_tstd/src/net/ip_addr.rs b/sgx_tstd/src/net/ip_addr.rs
+index e11e95c5..a8952d59 100644
+--- a/sgx_tstd/src/net/ip_addr.rs
++++ b/sgx_tstd/src/net/ip_addr.rs
+@@ -43,7 +43,6 @@ use sgx_libc as c;
+ /// assert_eq!(localhost_v4.is_ipv6(), false);
+ /// assert_eq!(localhost_v4.is_ipv4(), true);
+ /// ```
+-#[cfg_attr(not(test), rustc_diagnostic_item = "IpAddr")]
+ #[derive(Copy, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
+ pub enum IpAddr {
+     /// An IPv4 address.
+@@ -84,7 +83,6 @@ pub enum IpAddr {
+ /// assert!("0xcb.0x0.0x71.0x00".parse::<Ipv4Addr>().is_err()); // all octets are in hex
+ /// ```
+ #[derive(Copy, Clone, PartialEq, Eq, Hash)]
+-#[cfg_attr(not(test), rustc_diagnostic_item = "Ipv4Addr")]
+ pub struct Ipv4Addr {
+     octets: [u8; 4],
+ }
+@@ -166,7 +164,6 @@ pub struct Ipv4Addr {
+ /// assert_eq!(localhost.is_loopback(), true);
+ /// ```
+ #[derive(Copy, Clone, PartialEq, Eq, Hash)]
+-#[cfg_attr(not(test), rustc_diagnostic_item = "Ipv6Addr")]
+ pub struct Ipv6Addr {
+     octets: [u8; 16],
+ }
+diff --git a/sgx_tstd/src/sync/mpsc/mpsc_queue.rs b/sgx_tstd/src/sync/mpsc/mpsc_queue.rs
+index 15504121..00d0bd49 100644
+--- a/sgx_tstd/src/sync/mpsc/mpsc_queue.rs
++++ b/sgx_tstd/src/sync/mpsc/mpsc_queue.rs
+@@ -68,7 +68,7 @@ unsafe impl<T: Send> Sync for Queue<T> {}
+ 
+ impl<T> Node<T> {
+     unsafe fn new(v: Option<T>) -> *mut Node<T> {
+-        Box::into_raw(box Node { next: AtomicPtr::new(ptr::null_mut()), value: v })
++        Box::into_raw(Box::new(Node { next: AtomicPtr::new(ptr::null_mut()), value: v }))
+     }
+ }
+ 
+diff --git a/sgx_tstd/src/sync/mpsc/spsc_queue.rs b/sgx_tstd/src/sync/mpsc/spsc_queue.rs
+index 2766c51a..bb816896 100644
+--- a/sgx_tstd/src/sync/mpsc/spsc_queue.rs
++++ b/sgx_tstd/src/sync/mpsc/spsc_queue.rs
+@@ -74,11 +74,11 @@ unsafe impl<T: Send, P: Send + Sync, C: Send + Sync> Sync for Queue<T, P, C> {}
+ 
+ impl<T> Node<T> {
+     fn new() -> *mut Node<T> {
+-        Box::into_raw(box Node {
++        Box::into_raw(Box::new(Node {
+             value: None,
+             cached: false,
+             next: AtomicPtr::new(ptr::null_mut::<Node<T>>()),
+-        })
++        }))
+     }
+ }
+ 
+diff --git a/sgx_tstd/src/sync/once_lock.rs b/sgx_tstd/src/sync/once_lock.rs
+index 221b5751..93594d87 100644
+--- a/sgx_tstd/src/sync/once_lock.rs
++++ b/sgx_tstd/src/sync/once_lock.rs
+@@ -349,7 +349,7 @@ unsafe impl<T: Send> Send for OnceLock<T> {}
+ impl<T: RefUnwindSafe + UnwindSafe> RefUnwindSafe for OnceLock<T> {}
+ impl<T: UnwindSafe> UnwindSafe for OnceLock<T> {}
+ 
+-impl<T> const Default for OnceLock<T> {
++impl<T> Default for OnceLock<T> {
+     /// Creates a new empty cell.
+     ///
+     /// # Example
+diff --git a/sgx_tstd/src/sys/thread.rs b/sgx_tstd/src/sys/thread.rs
+index 538995b9..868280f2 100644
+--- a/sgx_tstd/src/sys/thread.rs
++++ b/sgx_tstd/src/sys/thread.rs
+@@ -38,7 +38,7 @@ unsafe impl Sync for Thread {}
+ impl Thread {
+     // unsafe: see thread::Builder::spawn_unchecked for safety requirements
+     pub unsafe fn new(p: Box<dyn FnOnce()>) -> io::Result<Thread> {
+-        let p = Box::into_raw(box p);
++        let p = Box::into_raw(Box::new(p));
+         let mut native: libc::pthread_t = mem::zeroed();
+         let attr: libc::pthread_attr_t = mem::zeroed();
+         let ret = libc::pthread_create(&mut native, &attr, thread_start, p as *mut _);
+diff --git a/sgx_tstd/src/sys_common/at_exit_imp.rs b/sgx_tstd/src/sys_common/at_exit_imp.rs
+index db0aac0d..2789fc7c 100644
+--- a/sgx_tstd/src/sys_common/at_exit_imp.rs
++++ b/sgx_tstd/src/sys_common/at_exit_imp.rs
+@@ -43,7 +43,7 @@ const ITERS: usize = 10;
+ 
+ unsafe fn init() -> bool {
+     if QUEUE.is_null() {
+-        let state: Box<Queue> = box Vec::new();
++        let state: Box<Queue> = Box::new(Vec::new());
+         QUEUE = Box::into_raw(state);
+     } else if QUEUE == DONE {
+         // can't re-init after a cleanup
+diff --git a/sgx_tstd/src/sys_common/thread_local_dtor.rs b/sgx_tstd/src/sys_common/thread_local_dtor.rs
+index 867be833..bfceceeb 100644
+--- a/sgx_tstd/src/sys_common/thread_local_dtor.rs
++++ b/sgx_tstd/src/sys_common/thread_local_dtor.rs
+@@ -46,7 +46,7 @@ pub unsafe fn register_dtor_fallback(t: *mut u8, dtor: unsafe extern "C" fn(*mut
+     static DTORS: StaticKey = StaticKey::new(Some(run_dtors));
+     type List = Vec<(*mut u8, unsafe extern "C" fn(*mut u8))>;
+     if DTORS.get().is_null() {
+-        let v: Box<List> = box Vec::new();
++        let v: Box<List> = Box::new(Vec::new());
+         DTORS.set(Box::into_raw(v) as *mut u8);
+     }
+     let list: &mut List = &mut *(DTORS.get() as *mut List);
+diff --git a/sgx_tstd/src/thread/local.rs b/sgx_tstd/src/thread/local.rs
+index b214350d..29844d6b 100644
+--- a/sgx_tstd/src/thread/local.rs
++++ b/sgx_tstd/src/thread/local.rs
+@@ -1111,7 +1111,7 @@ pub mod os {
+             let ptr = if ptr.is_null() {
+                 // If the lookup returned null, we haven't initialized our own
+                 // local copy, so do that now.
+-                let ptr: Box<Value<T>> = box Value { inner: LazyKeyInner::new(), key: self };
++                let ptr: Box<Value<T>> = Box::new(Value { inner: LazyKeyInner::new(), key: self });
+                 let ptr = Box::into_raw(ptr);
+                 // SAFETY: At this point we are sure there is no value inside
+                 // ptr so setting it will not affect anyone else.
+diff --git a/sgx_tstd/src/time.rs b/sgx_tstd/src/time.rs
+index 2c9ebf75..2afa741b 100644
+--- a/sgx_tstd/src/time.rs
++++ b/sgx_tstd/src/time.rs
+@@ -56,7 +56,7 @@ use crate::sys_common::{FromInner, IntoInner};
+ 
+ pub use core::time::Duration;
+ 
+-pub use core::time::FromFloatSecsError;
++pub use core::time::TryFromFloatSecsError;
+ 
+ /// A measurement of a monotonically nondecreasing clock.
+ /// Opaque and useful only with [`Duration`].

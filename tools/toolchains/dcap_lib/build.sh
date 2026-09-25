@@ -4,6 +4,10 @@ set -e
 INSTALL_DIR=/opt/occlum/toolchains/dcap_lib
 SONAME=libocclum_dcap.so.0.1.0
 
+# The sgx_types dependency uses unstable features, which requires
+# RUSTC_BOOTSTRAP on a stable toolchain.
+export RUSTC_BOOTSTRAP=1
+
 function build_lib() {
     if [[ $1 == "musl" ]]; then
         echo "*** Build and install musl-libc dcap ***"

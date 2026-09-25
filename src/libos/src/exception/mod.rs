@@ -57,7 +57,7 @@ fn try_handle_kernel_exception(info: &sgx_exception_info_t) -> i32 {
             // This signal will eventually be handled here. And the instruction that triggers this exception is EACCEPT/EACCEPTCOPY.
             // In this case, since the new page is EAUG-ed already, just need to excecute the EACCEPT again. Thus here
             // just return SGX_MM_EXCEPTION_CONTINUE_EXECUTION
-            if ENCLU == (unsafe { *rip } as u32) & 0xffffff
+            if ENCLU == (unsafe { rip.read_unaligned() } as u32) & 0xffffff
                 && (EACCEPT == rax || EACCEPTCOPY == rax)
             {
                 return SGX_MM_EXCEPTION_CONTINUE_EXECUTION;
@@ -128,7 +128,7 @@ pub fn do_handle_exception(
     // Try to do instruction emulation first
     if info.exception_vector == sgx_exception_vector_t::SGX_EXCEPTION_VECTOR_UD {
         // Assume the length of opcode is 2 bytes
-        let ip_opcode: u16 = unsafe { *(user_context.rip as *const u16) };
+        let ip_opcode: u16 = unsafe { (user_context.rip as *const u16).read_unaligned() };
         if ip_opcode == RDTSC_OPCODE {
             return handle_rdtsc_exception(user_context);
         } else if ip_opcode == SYSCALL_OPCODE {
