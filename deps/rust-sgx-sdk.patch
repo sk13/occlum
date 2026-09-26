@@ -736,7 +736,7 @@ index cca723ae..f108ad21 100644
  ///
  /// The message can be of any (`Any + Send`) type, not just strings.
 diff --git a/sgx_tstd/src/panicking.rs b/sgx_tstd/src/panicking.rs
-index b6f55d89..394d9598 100644
+index b6f55d89..b7db8abd 100644
 --- a/sgx_tstd/src/panicking.rs
 +++ b/sgx_tstd/src/panicking.rs
 @@ -26,7 +26,8 @@
@@ -820,7 +820,7 @@ index b6f55d89..394d9598 100644
      // If this is a double panic, make sure that we print a backtrace
      // for this panic. Otherwise only print it if logging is enabled.
      #[cfg(feature = "backtrace")]
-@@ -453,12 +456,12 @@ pub unsafe fn r#try<R, F: FnOnce() -> R>(f: F) -> Result<R, Box<dyn Any + Send>>
+@@ -453,15 +456,16 @@ pub unsafe fn r#try<R, F: FnOnce() -> R>(f: F) -> Result<R, Box<dyn Any + Send>>
      // Access to the union's fields: this is `std` and we know that the `r#try`
      // intrinsic fills in the `r` or `p` union field based on its return value.
      //
@@ -831,11 +831,17 @@ index b6f55d89..394d9598 100644
      // See their safety preconditions for more information
      unsafe {
 -        return if intrinsics::r#try(do_call::<F, R>, data_ptr, do_catch::<F, R>) == 0 {
-+        return if intrinsics::catch_unwind(do_call::<F, R>, data_ptr, do_catch::<F, R>) == 0 {
-             Ok(ManuallyDrop::into_inner(data.r))
-         } else {
+-            Ok(ManuallyDrop::into_inner(data.r))
+-        } else {
++        // Since Rust 1.98 the intrinsic returns `true` if unwinding occurred.
++        return if intrinsics::catch_unwind(do_call::<F, R>, data_ptr, do_catch::<F, R>) {
              Err(ManuallyDrop::into_inner(data.p))
-@@ -535,16 +538,15 @@ pub fn panicking() -> bool {
++        } else {
++            Ok(ManuallyDrop::into_inner(data.r))
+         };
+     }
+ 
+@@ -535,16 +539,15 @@ pub fn panicking() -> bool {
  #[panic_handler]
  pub fn begin_panic_handler(info: &PanicInfo<'_>) -> ! {
      struct PanicPayload<'a> {
@@ -854,7 +860,7 @@ index b6f55d89..394d9598 100644
          fn fill(&mut self) -> &mut String {
              use crate::fmt::Write;
  
-@@ -552,12 +554,22 @@ pub fn begin_panic_handler(info: &PanicInfo<'_>) -> ! {
+@@ -552,12 +555,22 @@ pub fn begin_panic_handler(info: &PanicInfo<'_>) -> ! {
              // Lazily, the first time this gets called, run the actual string formatting.
              self.string.get_or_insert_with(|| {
                  let mut s = String::new();
@@ -878,7 +884,7 @@ index b6f55d89..394d9598 100644
      unsafe impl<'a> BoxMeUp for PanicPayload<'a> {
          fn take_box(&mut self) -> *mut (dyn Any + Send) {
              // We do two allocations here, unfortunately. But (a) they're required with the current
-@@ -582,35 +594,55 @@ pub fn begin_panic_handler(info: &PanicInfo<'_>) -> ! {
+@@ -582,35 +595,55 @@ pub fn begin_panic_handler(info: &PanicInfo<'_>) -> ! {
          fn get(&mut self) -> &(dyn Any + Send) {
              &self.0
          }
@@ -943,7 +949,7 @@ index b6f55d89..394d9598 100644
              );
          }
      }
-@@ -660,14 +692,23 @@ pub const fn begin_panic<M: Any + Send>(msg: M) -> ! {
+@@ -660,14 +693,23 @@ pub const fn begin_panic<M: Any + Send>(msg: M) -> ! {
          }
      }
  
@@ -969,7 +975,7 @@ index b6f55d89..394d9598 100644
      }
  }
  
-@@ -678,9 +719,9 @@ pub const fn begin_panic<M: Any + Send>(msg: M) -> ! {
+@@ -678,9 +720,9 @@ pub const fn begin_panic<M: Any + Send>(msg: M) -> ! {
  /// abort or unwind.
  fn rust_panic_with_hook(
      payload: &mut dyn BoxMeUp,
@@ -980,7 +986,7 @@ index b6f55d89..394d9598 100644
  ) -> ! {
      let (must_abort, panics) = panic_count::increase();
  
-@@ -697,13 +738,13 @@ fn rust_panic_with_hook(
+@@ -697,13 +739,13 @@ fn rust_panic_with_hook(
          } else {
              // Unfortunately, this does not print a backtrace, because creating
              // a `Backtrace` will allocate, which we must to avoid here.
@@ -997,7 +1003,7 @@ index b6f55d89..394d9598 100644
      let hook = HOOK.read().unwrap_or_else(PoisonError::into_inner);
      match *hook {
          // Some platforms (like wasm) know that printing to stderr won't ever actually
-@@ -715,12 +756,20 @@ fn rust_panic_with_hook(
+@@ -715,12 +757,20 @@ fn rust_panic_with_hook(
          #[cfg(feature = "stdio")]
          Hook::Default if panic_output().is_none() => {}
          Hook::Default => {
@@ -1022,7 +1028,7 @@ index b6f55d89..394d9598 100644
          }
      };
      drop(hook);
-@@ -754,9 +803,25 @@ pub fn rust_panic_without_hook(payload: Box<dyn Any + Send>) -> ! {
+@@ -754,9 +804,25 @@ pub fn rust_panic_without_hook(payload: Box<dyn Any + Send>) -> ! {
          }
      }
  
