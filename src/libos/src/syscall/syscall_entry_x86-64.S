@@ -30,6 +30,11 @@ __occlum_syscall_linux_pku_abi:
     .global __occlum_syscall_linux_abi
     .type __occlum_syscall_linux_abi, @function
 __occlum_syscall_linux_abi:
+    // This is the outermost frame of the kernel stack: mark the return
+    // address as undefined so that unwinders (the libOS panic backtrace,
+    // GDB) stop here instead of guessing a caller from the user's %rbp.
+    .cfi_startproc
+    .cfi_undefined rip
     //      num  - %rax
     //      arg0 - %rdi
     //      arg1 - %rsi
@@ -103,6 +108,8 @@ __occlum_syscall_linux_abi:
 
     // This should never happen!
     ud2
+    .cfi_endproc
+    .size __occlum_syscall_linux_abi, .-__occlum_syscall_linux_abi
 
 
     .global __occlum_sysret

@@ -20,6 +20,38 @@ index bc7881f1..91e85af1 100644
              }
  
              // SAFETY: `new_size` is non-zero. Other conditions must be upheld by the caller
+diff --git a/sgx_backtrace_sys/libbacktrace/dwarf.c b/sgx_backtrace_sys/libbacktrace/dwarf.c
+index 493ce3ff..dd16e8e7 100644
+--- a/sgx_backtrace_sys/libbacktrace/dwarf.c
++++ b/sgx_backtrace_sys/libbacktrace/dwarf.c
+@@ -1624,8 +1624,10 @@ build_address_map(struct backtrace_state* state, uintptr_t base_address,
+         version = read_uint16(&unit_buf);
+ 
+         if (version < 2 || version > 4) {
+-            dwarf_buf_error(&unit_buf, "unrecognized DWARF version");
+-            goto fail;
++            /* Skip units in a DWARF version we can't parse (e.g. DWARF 5
++               emitted by GCC >= 11 for C code) instead of giving up on all
++               the debug info; `info` has already been advanced past it.  */
++            continue;
+         }
+ 
+         abbrev_offset = read_offset(&unit_buf, is_dwarf64);
+diff --git a/sgx_backtrace_sys/libbacktrace/elf.c b/sgx_backtrace_sys/libbacktrace/elf.c
+index 7bf46b65..58eef6b6 100644
+--- a/sgx_backtrace_sys/libbacktrace/elf.c
++++ b/sgx_backtrace_sys/libbacktrace/elf.c
+@@ -2814,6 +2814,10 @@ elf_add (struct backtrace_state *state, const char *filename, int descriptor,
+         string table permanently.  */
+         backtrace_release_view (state, &symtab_view, error_callback, data);
+         symtab_view_valid = 0;
++        /* The symbol names registered by elf_add_syminfo_data below point
++           into the string table, so it must not be released on the fail
++           path, e.g. if the DWARF debug info can't be parsed later.  */
++        strtab_view_valid = 0;
+ 
+         *found_sym = 1;
+ 
 diff --git a/sgx_panic_abort/src/lib.rs b/sgx_panic_abort/src/lib.rs
 index b4b90016..7648f910 100644
 --- a/sgx_panic_abort/src/lib.rs
@@ -756,7 +788,7 @@ index cca723ae..f108ad21 100644
  ///
  /// The message can be of any (`Any + Send`) type, not just strings.
 diff --git a/sgx_tstd/src/panicking.rs b/sgx_tstd/src/panicking.rs
-index b6f55d89..91f22bed 100644
+index b6f55d89..832d7a62 100644
 --- a/sgx_tstd/src/panicking.rs
 +++ b/sgx_tstd/src/panicking.rs
 @@ -26,7 +26,8 @@
@@ -849,7 +881,23 @@ index b6f55d89..91f22bed 100644
      // If this is a double panic, make sure that we print a backtrace
      // for this panic. Otherwise only print it if logging is enabled.
      #[cfg(feature = "backtrace")]
-@@ -453,15 +458,16 @@ pub unsafe fn r#try<R, F: FnOnce() -> R>(f: F) -> Result<R, Box<dyn Any + Send>>
+@@ -378,6 +383,15 @@ pub mod panic_count {
+         GLOBAL_PANIC_COUNT.fetch_or(ALWAYS_ABORT_FLAG, Ordering::Relaxed);
+     }
+ 
++    // Whether the current thread is running the panic hook.
++    thread_local! { static IN_PANIC_HOOK: Cell<bool> = const { Cell::new(false) } }
++
++    // Sets whether the current thread is running the panic hook and returns
++    // the previous value.
++    pub fn set_in_panic_hook(in_panic_hook: bool) -> bool {
++        IN_PANIC_HOOK.with(|c| c.replace(in_panic_hook))
++    }
++
+     // Disregards ALWAYS_ABORT_FLAG
+     #[must_use]
+     pub fn get_count() -> usize {
+@@ -453,15 +467,16 @@ pub unsafe fn r#try<R, F: FnOnce() -> R>(f: F) -> Result<R, Box<dyn Any + Send>>
      // Access to the union's fields: this is `std` and we know that the `r#try`
      // intrinsic fills in the `r` or `p` union field based on its return value.
      //
@@ -870,7 +918,7 @@ index b6f55d89..91f22bed 100644
          };
      }
  
-@@ -535,16 +541,15 @@ pub fn panicking() -> bool {
+@@ -535,16 +550,15 @@ pub fn panicking() -> bool {
  #[panic_handler]
  pub fn begin_panic_handler(info: &PanicInfo<'_>) -> ! {
      struct PanicPayload<'a> {
@@ -889,7 +937,7 @@ index b6f55d89..91f22bed 100644
          fn fill(&mut self) -> &mut String {
              use crate::fmt::Write;
  
-@@ -552,12 +557,22 @@ pub fn begin_panic_handler(info: &PanicInfo<'_>) -> ! {
+@@ -552,12 +566,22 @@ pub fn begin_panic_handler(info: &PanicInfo<'_>) -> ! {
              // Lazily, the first time this gets called, run the actual string formatting.
              self.string.get_or_insert_with(|| {
                  let mut s = String::new();
@@ -913,7 +961,7 @@ index b6f55d89..91f22bed 100644
      unsafe impl<'a> BoxMeUp for PanicPayload<'a> {
          fn take_box(&mut self) -> *mut (dyn Any + Send) {
              // We do two allocations here, unfortunately. But (a) they're required with the current
-@@ -582,35 +597,55 @@ pub fn begin_panic_handler(info: &PanicInfo<'_>) -> ! {
+@@ -582,35 +606,55 @@ pub fn begin_panic_handler(info: &PanicInfo<'_>) -> ! {
          fn get(&mut self) -> &(dyn Any + Send) {
              &self.0
          }
@@ -978,7 +1026,7 @@ index b6f55d89..91f22bed 100644
              );
          }
      }
-@@ -660,14 +695,23 @@ pub const fn begin_panic<M: Any + Send>(msg: M) -> ! {
+@@ -660,14 +704,23 @@ pub const fn begin_panic<M: Any + Send>(msg: M) -> ! {
          }
      }
  
@@ -1004,7 +1052,7 @@ index b6f55d89..91f22bed 100644
      }
  }
  
-@@ -678,9 +722,9 @@ pub const fn begin_panic<M: Any + Send>(msg: M) -> ! {
+@@ -678,9 +731,9 @@ pub const fn begin_panic<M: Any + Send>(msg: M) -> ! {
  /// abort or unwind.
  fn rust_panic_with_hook(
      payload: &mut dyn BoxMeUp,
@@ -1015,7 +1063,7 @@ index b6f55d89..91f22bed 100644
  ) -> ! {
      let (must_abort, panics) = panic_count::increase();
  
-@@ -697,13 +741,13 @@ fn rust_panic_with_hook(
+@@ -697,13 +750,25 @@ fn rust_panic_with_hook(
          } else {
              // Unfortunately, this does not print a backtrace, because creating
              // a `Backtrace` will allocate, which we must to avoid here.
@@ -1029,10 +1077,22 @@ index b6f55d89..91f22bed 100644
      }
  
 -    let mut info = PanicInfo::internal_constructor(message, location, can_unwind);
++    // Don't run the hook again for a panic in the panic hook, e.g. while the
++    // default hook prints the backtrace: that would deadlock on the locks the
++    // outer hook invocation holds. Don't format the message either, perhaps
++    // that is what panicked.
++    if panic_count::set_in_panic_hook(true) {
++        let message: &str = payload.as_str().unwrap_or_default();
++        rtprintpanic!(
++            "panicked at {location}:\n{message}\nthread panicked while processing panic. aborting.\n"
++        );
++        rsgx_abort()
++    }
++
      let hook = HOOK.read().unwrap_or_else(PoisonError::into_inner);
      match *hook {
          // Some platforms (like wasm) know that printing to stderr won't ever actually
-@@ -715,12 +759,20 @@ fn rust_panic_with_hook(
+@@ -715,15 +780,24 @@ fn rust_panic_with_hook(
          #[cfg(feature = "stdio")]
          Hook::Default if panic_output().is_none() => {}
          Hook::Default => {
@@ -1057,7 +1117,11 @@ index b6f55d89..91f22bed 100644
          }
      };
      drop(hook);
-@@ -754,17 +806,30 @@ pub fn rust_panic_without_hook(payload: Box<dyn Any + Send>) -> ! {
++    panic_count::set_in_panic_hook(false);
+ 
+     if panics > 1 || !can_unwind {
+         // If a thread panics while it's already unwinding then we
+@@ -754,17 +828,30 @@ pub fn rust_panic_without_hook(payload: Box<dyn Any + Send>) -> ! {
          }
      }
  
@@ -1202,6 +1266,21 @@ index 221b5751..93594d87 100644
      /// Creates a new empty cell.
      ///
      /// # Example
+diff --git a/sgx_tstd/src/sys/backtrace/tracing/gcc_s.rs b/sgx_tstd/src/sys/backtrace/tracing/gcc_s.rs
+index b354026e..845a8e89 100644
+--- a/sgx_tstd/src/sys/backtrace/tracing/gcc_s.rs
++++ b/sgx_tstd/src/sys/backtrace/tracing/gcc_s.rs
+@@ -107,7 +107,9 @@ pub unsafe fn trace(mut cb: &mut dyn FnMut(&super::Frame) -> bool) {
+ 
+         let sym_addr = cx.symbol_address() as usize;
+         let enclave_entry = enclave::rsgx_get_enclave_entry();
+-        if enclave_entry == sym_addr || enclave_entry == (sym_addr - 0x04) {
++        // `sym_addr` is 0 if the frame has no unwind info, so don't
++        // subtract from it.
++        if sym_addr == enclave_entry || sym_addr == enclave_entry + 0x04 {
+             //0x04 endbr64
+             keep_going = false;
+         }
 diff --git a/sgx_tstd/src/sys/os_str.rs b/sgx_tstd/src/sys/os_str.rs
 index c8ecad4a..992840d9 100644
 --- a/sgx_tstd/src/sys/os_str.rs
@@ -1374,6 +1453,21 @@ index db0aac0d..2789fc7c 100644
          QUEUE = Box::into_raw(state);
      } else if QUEUE == DONE {
          // can't re-init after a cleanup
+diff --git a/sgx_tstd/src/sys_common/gnu/libbacktrace.rs b/sgx_tstd/src/sys_common/gnu/libbacktrace.rs
+index b3fc0b8e..204b3060 100644
+--- a/sgx_tstd/src/sys_common/gnu/libbacktrace.rs
++++ b/sgx_tstd/src/sys_common/gnu/libbacktrace.rs
+@@ -206,7 +206,9 @@ extern "C" fn syminfo_cb(
+                 let sym_address =
+                     uw::_Unwind_FindEnclosingFunction((pc + 1) as *mut c_void) as usize;
+                 let enclave_entry = enclave::rsgx_get_enclave_entry();
+-                if sym_address == enclave_entry || (sym_address - 0x04) == enclave_entry {
++                // `sym_address` is 0 if `pc` has no unwind info, so don't
++                // subtract from it.
++                if sym_address == enclave_entry || sym_address == enclave_entry + 0x04 {
+                     //0x04 endbr64
+                     symname = ENCLAVE_ENTRY_NAME as *const _ as *const c_char
+                 }
 diff --git a/sgx_tstd/src/sys_common/once/generic.rs b/sgx_tstd/src/sys_common/once/generic.rs
 index ed170b3a..cafc44ac 100644
 --- a/sgx_tstd/src/sys_common/once/generic.rs
@@ -1469,3 +1563,22 @@ index 2c9ebf75..2afa741b 100644
  
  /// A measurement of a monotonically nondecreasing clock.
  /// Opaque and useful only with [`Duration`].
+diff --git a/sgx_unwind/libunwind/src/x86_64/Ginit.c b/sgx_unwind/libunwind/src/x86_64/Ginit.c
+index 7bbd1db2..21dfb0fb 100644
+--- a/sgx_unwind/libunwind/src/x86_64/Ginit.c
++++ b/sgx_unwind/libunwind/src/x86_64/Ginit.c
+@@ -135,9 +135,13 @@ static int (*mem_validate_func) (void *addr, size_t len);
+ static int msync_validate (void *addr, size_t len)
+ {
+ #ifdef HAVE_SGX
++  /* Don't follow pointers out of the enclave, but report them as invalid
++     instead of aborting the enclave: this is reached from the frame-chain
++     fallback of unw_step() for frames without unwind info, where %rbp can
++     hold any value (e.g. while printing a panic backtrace).  */
+   extern int sgx_is_within_enclave(const void *addr, size_t size);
+   if(!sgx_is_within_enclave(addr, len))
+-    abort();
++    return -1;
+ #endif
+ 
+   if (msync (addr, len, MS_ASYNC) != 0)
