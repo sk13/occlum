@@ -364,7 +364,7 @@ index 5889ee95..810b4a8b 100644
  
          // SAFETY: We just added the entire contents of buf to the filled section.
 diff --git a/sgx_tstd/src/lib.rs b/sgx_tstd/src/lib.rs
-index 774e14db..d2fbf4ff 100644
+index 774e14db..422a21d4 100644
 --- a/sgx_tstd/src/lib.rs
 +++ b/sgx_tstd/src/lib.rs
 @@ -63,9 +63,7 @@
@@ -394,7 +394,7 @@ index 774e14db..d2fbf4ff 100644
  #![feature(linked_list_remove)]
  #![feature(maybe_uninit_slice)]
  #![feature(maybe_uninit_write_slice)]
-@@ -107,15 +102,11 @@
+@@ -107,15 +102,12 @@
  #![feature(panic_info_message)]
  #![feature(panic_internals)]
  #![feature(prelude_2024)]
@@ -407,10 +407,11 @@ index 774e14db..d2fbf4ff 100644
  #![feature(strict_provenance)]
 -#![feature(maybe_uninit_uninit_array)]
 -#![feature(const_maybe_uninit_uninit_array)]
++#![feature(temporary_niche_types)]
  //
  // Library features (alloc):
  #![feature(allocator_api)]
-@@ -137,7 +128,6 @@
+@@ -137,7 +129,6 @@
  #![feature(cfg_eval)]
  #![feature(concat_bytes)]
  #![feature(const_format_args)]
@@ -418,7 +419,7 @@ index 774e14db..d2fbf4ff 100644
  #![feature(custom_test_frameworks)]
  #![feature(edition_panic)]
  #![feature(format_args_nl)]
-@@ -152,11 +142,6 @@
+@@ -152,11 +143,6 @@
  //
  #![default_lib_allocator]
  
@@ -430,7 +431,7 @@ index 774e14db..d2fbf4ff 100644
  
  extern crate hashbrown;
  
-@@ -200,6 +185,12 @@ pub mod rt;
+@@ -200,6 +186,12 @@ pub mod rt;
  // The Rust prelude
  pub mod prelude;
  
@@ -443,7 +444,7 @@ index 774e14db..d2fbf4ff 100644
  // Public module declarations and re-exports
  pub use alloc_crate::borrow;
  pub use alloc_crate::boxed;
-@@ -320,7 +311,7 @@ pub use core::{
+@@ -320,7 +312,7 @@ pub use core::{
  // Re-export built-in macros defined through libcore.
  #[allow(deprecated)]
  pub use core::{
@@ -510,6 +511,103 @@ index e11e95c5..a8952d59 100644
 -#[cfg_attr(not(test), rustc_diagnostic_item = "Ipv6Addr")]
  pub struct Ipv6Addr {
      octets: [u8; 16],
+ }
+diff --git a/sgx_tstd/src/os/fd/owned.rs b/sgx_tstd/src/os/fd/owned.rs
+index 1f5ff356..1496b6be 100644
+--- a/sgx_tstd/src/os/fd/owned.rs
++++ b/sgx_tstd/src/os/fd/owned.rs
+@@ -27,6 +27,8 @@ use crate::mem::forget;
+ use crate::sys::cvt;
+ use crate::sys_common::{AsInner, FromInner, IntoInner};
+ 
++type ValidRawFd = core::num::niche_types::NotAllOnes<RawFd>;
++
+ /// A borrowed file descriptor.
+ ///
+ /// This has a lifetime parameter to tie it to the lifetime of something that
+@@ -42,13 +44,9 @@ use crate::sys_common::{AsInner, FromInner, IntoInner};
+ /// descriptor, which is then borrowed under the same lifetime.
+ #[derive(Copy, Clone)]
+ #[repr(transparent)]
+-#[rustc_layout_scalar_valid_range_start(0)]
+-// libstd/os/raw/mod.rs assures me that every libstd-supported platform has a
+-// 32-bit c_int. Below is -2, in two's complement, but that only works out
+-// because c_int is 32 bits.
+-#[rustc_layout_scalar_valid_range_end(0xFF_FF_FF_FE)]
++#[rustc_nonnull_optimization_guaranteed]
+ pub struct BorrowedFd<'fd> {
+-    fd: RawFd,
++    fd: ValidRawFd,
+     _phantom: PhantomData<&'fd OwnedFd>,
+ }
+ 
+@@ -61,13 +59,9 @@ pub struct BorrowedFd<'fd> {
+ /// passed as a consumed argument or returned as an owned value, and it never
+ /// has the value `-1`.
+ #[repr(transparent)]
+-#[rustc_layout_scalar_valid_range_start(0)]
+-// libstd/os/raw/mod.rs assures me that every libstd-supported platform has a
+-// 32-bit c_int. Below is -2, in two's complement, but that only works out
+-// because c_int is 32 bits.
+-#[rustc_layout_scalar_valid_range_end(0xFF_FF_FF_FE)]
++#[rustc_nonnull_optimization_guaranteed]
+ pub struct OwnedFd {
+-    fd: RawFd,
++    fd: ValidRawFd,
+ }
+ 
+ impl BorrowedFd<'_> {
+@@ -81,7 +75,7 @@ impl BorrowedFd<'_> {
+     pub const unsafe fn borrow_raw(fd: RawFd) -> Self {
+         assert!(fd != u32::MAX as RawFd);
+         // SAFETY: we just asserted that the value is in the valid range and isn't `-1` (the only value bigger than `0xFF_FF_FF_FE` unsigned)
+-        unsafe { Self { fd, _phantom: PhantomData } }
++        Self { fd: unsafe { ValidRawFd::new_unchecked(fd) }, _phantom: PhantomData }
+     }
+ }
+ 
+@@ -111,21 +105,21 @@ impl BorrowedFd<'_> {
+ impl AsRawFd for BorrowedFd<'_> {
+     #[inline]
+     fn as_raw_fd(&self) -> RawFd {
+-        self.fd
++        self.fd.as_inner()
+     }
+ }
+ 
+ impl AsRawFd for OwnedFd {
+     #[inline]
+     fn as_raw_fd(&self) -> RawFd {
+-        self.fd
++        self.fd.as_inner()
+     }
+ }
+ 
+ impl IntoRawFd for OwnedFd {
+     #[inline]
+     fn into_raw_fd(self) -> RawFd {
+-        let fd = self.fd;
++        let fd = self.fd.as_inner();
+         forget(self);
+         fd
+     }
+@@ -142,7 +136,7 @@ impl FromRawFd for OwnedFd {
+     unsafe fn from_raw_fd(fd: RawFd) -> Self {
+         assert_ne!(fd, u32::MAX as RawFd);
+         // SAFETY: we just asserted that the value is in the valid range and isn't `-1` (the only value bigger than `0xFF_FF_FF_FE` unsigned)
+-        unsafe { Self { fd } }
++        Self { fd: unsafe { ValidRawFd::new_unchecked(fd) } }
+     }
+ }
+ 
+@@ -155,7 +149,7 @@ impl Drop for OwnedFd {
+             // the file descriptor was closed or not, and if we retried (for
+             // something like EINTR), we might close another valid file descriptor
+             // opened after we closed ours.
+-            let _ = libc::close(self.fd);
++            let _ = libc::close(self.fd.as_inner());
+         }
+     }
  }
 diff --git a/sgx_tstd/src/panic.rs b/sgx_tstd/src/panic.rs
 index cca723ae..f108ad21 100644
@@ -1078,6 +1176,122 @@ index 538995b9..868280f2 100644
          let mut native: libc::pthread_t = mem::zeroed();
          let attr: libc::pthread_attr_t = mem::zeroed();
          let ret = libc::pthread_create(&mut native, &attr, thread_start, p as *mut _);
+diff --git a/sgx_tstd/src/sys/time.rs b/sgx_tstd/src/sys/time.rs
+index 0bc3fe78..f00c81c7 100644
+--- a/sgx_tstd/src/sys/time.rs
++++ b/sgx_tstd/src/sys/time.rs
+@@ -17,6 +17,7 @@
+ 
+ use crate::fmt;
+ use crate::time::Duration;
++use core::num::niche_types::Nanoseconds;
+ 
+ pub use self::inner::Instant;
+ 
+@@ -25,12 +26,6 @@ use sgx_libc as libc;
+ const NSEC_PER_SEC: u64 = 1_000_000_000;
+ pub const UNIX_EPOCH: SystemTime = SystemTime { t: Timespec::zero() };
+ 
+-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+-#[repr(transparent)]
+-#[rustc_layout_scalar_valid_range_start(0)]
+-#[rustc_layout_scalar_valid_range_end(999_999_999)]
+-struct Nanoseconds(u32);
+-
+ #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+ pub struct SystemTime {
+     pub(in crate::sys) t: Timespec,
+@@ -60,7 +55,7 @@ impl SystemTime {
+     }
+ 
+     pub fn get_tup(&self) -> (i64, i64) {
+-        (self.t.tv_sec, self.t.tv_nsec.0 as i64)
++        (self.t.tv_sec, self.t.tv_nsec.as_inner() as i64)
+     }
+ }
+ 
+@@ -74,7 +69,7 @@ impl fmt::Debug for SystemTime {
+     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+         f.debug_struct("SystemTime")
+             .field("tv_sec", &self.t.tv_sec)
+-            .field("tv_nsec", &self.t.tv_nsec.0)
++            .field("tv_nsec", &self.t.tv_nsec.as_inner())
+             .finish()
+     }
+ }
+@@ -87,7 +82,7 @@ impl Timespec {
+     const fn new(tv_sec: i64, tv_nsec: i64) -> Timespec {
+         assert!(tv_nsec >= 0 && tv_nsec < NSEC_PER_SEC as i64);
+         // SAFETY: The assert above checks tv_nsec is within the valid range
+-        Timespec { tv_sec, tv_nsec: unsafe { Nanoseconds(tv_nsec as u32) } }
++        Timespec { tv_sec, tv_nsec: unsafe { Nanoseconds::new_unchecked(tv_nsec as u32) } }
+     }
+ 
+     pub fn sub_timespec(&self, other: &Timespec) -> Result<Duration, Duration> {
+@@ -105,12 +100,15 @@ impl Timespec {
+             //
+             // Ideally this code could be rearranged such that it more
+             // directly expresses the lower-cost behavior we want from it.
+-            let (secs, nsec) = if self.tv_nsec.0 >= other.tv_nsec.0 {
+-                ((self.tv_sec - other.tv_sec) as u64, self.tv_nsec.0 - other.tv_nsec.0)
++            let (secs, nsec) = if self.tv_nsec.as_inner() >= other.tv_nsec.as_inner() {
++                (
++                    (self.tv_sec - other.tv_sec) as u64,
++                    self.tv_nsec.as_inner() - other.tv_nsec.as_inner(),
++                )
+             } else {
+                 (
+                     (self.tv_sec - other.tv_sec - 1) as u64,
+-                    self.tv_nsec.0 + (NSEC_PER_SEC as u32) - other.tv_nsec.0,
++                    self.tv_nsec.as_inner() + (NSEC_PER_SEC as u32) - other.tv_nsec.as_inner(),
+                 )
+             };
+ 
+@@ -132,7 +130,7 @@ impl Timespec {
+ 
+         // Nano calculations can't overflow because nanos are <1B which fit
+         // in a u32.
+-        let mut nsec = other.subsec_nanos() + self.tv_nsec.0;
++        let mut nsec = other.subsec_nanos() + self.tv_nsec.as_inner();
+         if nsec >= NSEC_PER_SEC as u32 {
+             nsec -= NSEC_PER_SEC as u32;
+             secs = secs.checked_add(1)?;
+@@ -148,7 +146,7 @@ impl Timespec {
+             .and_then(|secs| self.tv_sec.checked_sub(secs))?;
+ 
+         // Similar to above, nanos can't overflow.
+-        let mut nsec = self.tv_nsec.0 as i32 - other.subsec_nanos() as i32;
++        let mut nsec = self.tv_nsec.as_inner() as i32 - other.subsec_nanos() as i32;
+         if nsec < 0 {
+             nsec += NSEC_PER_SEC as i32;
+             secs = secs.checked_sub(1)?;
+@@ -161,7 +159,7 @@ impl Timespec {
+     pub fn to_timespec(&self) -> Option<libc::timespec> {
+         Some(libc::timespec {
+             tv_sec: self.tv_sec.try_into().ok()?,
+-            tv_nsec: self.tv_nsec.0.try_into().ok()?,
++            tv_nsec: self.tv_nsec.as_inner().try_into().ok()?,
+         })
+     }
+ }
+@@ -204,7 +202,7 @@ mod inner {
+         }
+ 
+         pub fn get_tup(&self) -> (i64, i64) {
+-            (self.t.tv_sec, self.t.tv_nsec.0 as i64)
++            (self.t.tv_sec, self.t.tv_nsec.as_inner() as i64)
+         }
+     }
+ 
+@@ -212,7 +210,7 @@ mod inner {
+         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+             f.debug_struct("Instant")
+                 .field("tv_sec", &self.t.tv_sec)
+-                .field("tv_nsec", &self.t.tv_nsec.0)
++                .field("tv_nsec", &self.t.tv_nsec.as_inner())
+                 .finish()
+         }
+     }
 diff --git a/sgx_tstd/src/sys_common/at_exit_imp.rs b/sgx_tstd/src/sys_common/at_exit_imp.rs
 index db0aac0d..2789fc7c 100644
 --- a/sgx_tstd/src/sys_common/at_exit_imp.rs
