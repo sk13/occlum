@@ -86,6 +86,10 @@ RUN curl https://sh.rustup.rs -sSf | \
     cargo -V
 
 # Install SGX PSW
+# libsgx-headers is pinned too: the latest version breaks
+# libsgx-dcap-quote-verify-dev < 1.26, and aptitude resolves that by silently
+# not installing it. The test makes sure the DCAP headers needed to build the
+# PAL are installed.
 ARG PSW_VERSION=2.21.100.1
 ARG DCAP_VERSION=1.18.100.1
 RUN apt-get update && aptitude install -y \
@@ -118,7 +122,9 @@ RUN apt-get update && aptitude install -y \
         libsgx-qe3-logic=$DCAP_VERSION-jammy1 \
         libsgx-launch=$PSW_VERSION-jammy1 \
         libsgx-dcap-default-qpl=$DCAP_VERSION-jammy1 \
+        libsgx-headers=$PSW_VERSION-jammy1 \
         && \
+    test -f /usr/include/sgx_dcap_quoteverify.h && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* && \
     ln -s /usr/lib/x86_64-linux-gnu/libsgx_enclave_common.so.1 /usr/lib/x86_64-linux-gnu/libsgx_enclave_common.so
