@@ -133,10 +133,12 @@ RUN git clone -b sgx_2.21_for_occlum https://github.com/occlum/linux-sgx && \
     echo 'source /opt/intel/sgxsdk/environment' >> /root/.bashrc && \
     rm -rf /tmp/linux-sgx
 
-# Download the Occlum source
-ARG OCCLUM_BRANCH
+# Download the Occlum source: by default the 0.31.0-dev branch of the
+# sk13/occlum fork, which builds with the Rust toolchain installed above
+ARG OCCLUM_REPO=https://github.com/sk13/occlum
+ARG OCCLUM_BRANCH=0.31.0-dev
 WORKDIR /root
-RUN git clone -b $OCCLUM_BRANCH https://github.com/occlum/occlum && \
+RUN git clone -b $OCCLUM_BRANCH $OCCLUM_REPO occlum && \
     cd /root/occlum && git submodule update --init && \
     mkdir -p /opt/occlum/ && \
     cp /root/occlum/tools/docker/start_aesm.sh /opt/occlum/

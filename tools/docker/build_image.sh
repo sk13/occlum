@@ -20,12 +20,16 @@ USAGE:
 <OS_NAME>:
     The name of the OS distribution that the Docker image is based on. Currently, <OS_NAME> must be one of the following values:
         ubuntu20.04         Use Ubuntu 20.04 as the base image
+        ubuntu22.04         Use Ubuntu 22.04 as the base image
         aliyunlinux3        Use AliyunLinux 3 as the base image
         anolis8.8           Use Anolis 8.8 as the base image
 
 <OCCLUM_BRANCH>:
     The Occlum branch which the docker image is built on, e.g "0.24.0".
-    It is optional, if not provided, "master" branch will be used.
+    It is optional, if not provided, the "0.31.0-dev" branch will be used.
+
+The Occlum repository is https://github.com/sk13/occlum unless the OCCLUM_REPO
+environment variable is set.
 
 The resulting Docker image will have "occlum/occlum:<OCCLUM_LABEL>-<OS_NAME>" as its label.
 EOF
@@ -40,7 +44,7 @@ fi
 
 occlum_label=$1
 os_name=$2
-occlum_branch=${3:-master}
+occlum_branch=${3:-0.31.0-dev}
 
 function check_item_in_list() {
     item=$1
@@ -48,7 +52,9 @@ function check_item_in_list() {
     [[ $list =~ (^|[[:space:]])$item($|[[:space:]]) ]]
 }
 
-check_item_in_list "$os_name" "ubuntu20.04 aliyunlinux3 anolis8.8" || report_error
+check_item_in_list "$os_name" "ubuntu20.04 ubuntu22.04 aliyunlinux3 anolis8.8" || report_error
 
 cd "$script_dir/.."
-docker build -f "$script_dir/Dockerfile.$os_name" -t "occlum/occlum:$occlum_label-$os_name" --build-arg OCCLUM_BRANCH=$occlum_branch .
+docker build -f "$script_dir/Dockerfile.$os_name" -t "occlum/occlum:$occlum_label-$os_name" \
+    --build-arg OCCLUM_BRANCH=$occlum_branch \
+    --build-arg OCCLUM_REPO=${OCCLUM_REPO:-https://github.com/sk13/occlum} .
