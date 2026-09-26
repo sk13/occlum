@@ -112,27 +112,9 @@ __occlum_syscall_linux_abi:
     .size __occlum_syscall_linux_abi, .-__occlum_syscall_linux_abi
 
 
-    .global __occlum_sysret
-    .type __occlum_sysret, @function
-__occlum_sysret:
-    // Arguments:
-    //      %rdi - user_context: &mut CpuContext
-
-    // Get current task
-    movq %gs:(TD_TASK_OFFSET), %r12
-    // Switch to the user TLS. Different implementation for HW and SIM modes.
-#if SGX_MODE_SIM
-    pushq %rdi
-
-    movq $ARCH_SET_FS, %rdi
-    movq TASK_USER_FS(%r12), %rsi
-    call __arch_prctl
-
-    popq %rdi
-#else // SGX_MODE_HW
-    movq TASK_USER_FS(%r12), %r11
-    wrfsbase %r11
-#endif
+    // Restore the user CPU state from the CpuContext pointed to by %rdi and
+    // switch %rsp to the user stack. Only uses instructions that keep RFLAGS.
+    .macro RESTORE_USER_CONTEXT
     // Restore flags first
     leaq (17*8)(%rdi), %rsp
     popfq
@@ -160,26 +142,56 @@ __occlum_sysret:
     pop %rax
     pop %rcx
     pop %rsp
+    .endm
+
+    .global __occlum_sysret
+    .type __occlum_sysret, @function
+__occlum_sysret:
+    // Arguments:
+    //      %rdi - user_context: &mut CpuContext
+
+    // Get current task
+    movq %gs:(TD_TASK_OFFSET), %r12
+    // Switch to the user TLS. Different implementation for HW and SIM modes.
+#if SGX_MODE_SIM
+    pushq %rdi
+
+    movq $ARCH_SET_FS, %rdi
+    movq TASK_USER_FS(%r12), %rsi
+    call __arch_prctl
+
+    popq %rdi
+#else // SGX_MODE_HW
+    movq TASK_USER_FS(%r12), %r11
+    wrfsbase %r11
+#endif
+    // Check whether PKRU has to be switched while %rsp still points to the
+    // kernel stack: `cmp` modifies RFLAGS, so it has to come before the user
+    // RFLAGS are restored.
+    cmpq $1, pku_enabled(%rip)
+    je sysret_with_pkru_update
+
+    RESTORE_USER_CONTEXT
+    // Don't touch the user stack here. With EDMM, its pages are committed on
+    // demand, and a page fault raised by libOS code while %rsp points to the
+    // user stack is fatal: the SGX SDK only accepts the trusted stack for
+    // exceptions in enclave code, reports SGX_ERROR_STACK_OVERRUN and marks
+    // the enclave as crashed.
+    jmp *%gs:(TD_SYSCALL_RET_ADDR_OFFSET)
+    // This should never happen
+    ud2
+
+sysret_with_pkru_update:
+    RESTORE_USER_CONTEXT
 
     // Skip the red zone aera (128 bytes according to x86_64 System V ABI)
     // Use `lea` here since it does not modify FLAGS
     lea -128(%rsp), %rsp
 
-    // Store RFLAGS since `cmp` operation may overwrite it
+    // wrpkru clobbers %rax (and %rcx, %rdx, saved below) and `xor` modifies
+    // RFLAGS: save them on the user stack
     pushfq
     push %rax
-
-    mov pku_enabled(%rip), %rax
-    cmp $1, %rax
-    je update_pkru_in_sysret
-
-    pop %rax
-    popfq
-
-    lea 128(%rsp), %rsp
-    jmp *%gs:(TD_SYSCALL_RET_ADDR_OFFSET)
-    // This should never happen
-    ud2
 
 update_pkru_in_sysret:
     // Prepare temporary stack area for saving the %rdx, %rdx and return address
