@@ -30,6 +30,15 @@ GCC_VER=8.3.0
 # This patch replaces syscall instruction with libc's syscall wrapper
 cp ${THIS_DIR}/0014-libgomp-*.diff patches/gcc-${GCC_VER}/
 
+# musl-cross-make downloads config.sub from git.savannah.gnu.org, which is
+# often unreachable. Download it from the freedesktop-sdk GitLab mirror of the
+# same config.git repository instead; musl-cross-make still checks its hash.
+SAVANNAH_CONFIG_SUB='http://git.savannah.gnu.org/gitweb/?p=config.git;a=blob_plain;f=config.sub;hb=$(CONFIG_SUB_REV)'
+MIRROR_CONFIG_SUB='https://gitlab.com/freedesktop-sdk/mirrors/savannah/config/-/raw/$(CONFIG_SUB_REV)/config.sub'
+grep -qF "${SAVANNAH_CONFIG_SUB}" Makefile
+sed -i "s|${SAVANNAH_CONFIG_SUB}|${MIRROR_CONFIG_SUB}|" Makefile
+grep -qF "${MIRROR_CONFIG_SUB}" Makefile
+
 # Build musl-gcc toolchain for Occlum
 cat > config.mak <<EOF
 TARGET = ${TARGET}
