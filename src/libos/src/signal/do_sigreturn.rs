@@ -4,7 +4,7 @@ use super::sig_stack::SigStackFlags;
 use super::{SigAction, SigActionFlags, SigDefaultAction, SigSet, Signal};
 use crate::lazy_static::__Deref;
 use crate::prelude::*;
-use crate::process::{ProcessRef, TermStatus, ThreadRef};
+use crate::process::{ProcessRef, TermStatus, ThreadRef, ThreadStatus};
 use crate::syscall::{BoxXsaveArea, CpuContext, ExtraContext, FpRegs};
 use aligned::{Aligned, A16};
 use std::mem::ManuallyDrop;
@@ -124,9 +124,14 @@ fn do_deliver_signal(thread: &ThreadRef, process: &ProcessRef, cpu_context: &mut
             // Dequeue a signal, respecting the signal mask and tmp mask
             let sig_mask =
                 *thread.sig_mask().read().unwrap() | *thread.sig_tmp_mask().read().unwrap();
+            let process_sig_mask = sig_mask | signals_left_to_main_thread(thread, process);
 
             // Don't use `Option` or_else to avoid nested write locks
-            let mut signal_opt = process.sig_queues().write().unwrap().dequeue(&sig_mask);
+            let mut signal_opt = process
+                .sig_queues()
+                .write()
+                .unwrap()
+                .dequeue(&process_sig_mask);
             if signal_opt.is_none() {
                 signal_opt = thread.sig_queues().write().unwrap().dequeue(&sig_mask);
             }
@@ -142,6 +147,36 @@ fn do_deliver_signal(thread: &ThreadRef, process: &ProcessRef, cpu_context: &mut
             break;
         }
     }
+}
+
+/// Returns the process-directed signals that the given thread leaves to the main
+/// thread: if the given thread is not the main thread, those that the main thread
+/// does not block and that have a user handler.
+///
+/// This follows Linux, which delivers a process-directed signal to the main thread
+/// unless the main thread blocks it. Applications may rely on it, e.g., with a
+/// SIGTERM handler that stops the other threads and calls exit() while the main
+/// thread waits for them in pthread_join(). Signals with the default action are
+/// left to any thread, so that terminating a process never waits for its main
+/// thread.
+pub fn signals_left_to_main_thread(thread: &ThreadRef, process: &ProcessRef) -> SigSet {
+    let main_thread = match process.main_thread() {
+        Some(main_thread) if main_thread.tid() != thread.tid() => main_thread,
+        _ => return SigSet::new_empty(),
+    };
+    if main_thread.status() != ThreadStatus::Running || main_thread.is_forced_to_stop() {
+        return SigSet::new_empty();
+    }
+
+    let handled_signals = process
+        .sig_dispositions()
+        .read()
+        .unwrap()
+        .iter()
+        .filter(|(_, action)| matches!(action, SigAction::User { .. }))
+        .fold(SigSet::new_empty(), |set, (signum, _)| set + signum);
+    let main_thread_sig_mask = *main_thread.sig_mask().read().unwrap();
+    handled_signals & !main_thread_sig_mask
 }
 
 /// Force delivering the given signal to the current thread, without checking the thread's

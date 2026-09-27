@@ -43,10 +43,14 @@ pub fn broadcast_interrupts() -> Result<usize> {
         }
 
         let interested = !*thread.sig_mask().read().unwrap();
+        // The process-directed signals that the thread leaves to the main thread
+        // are delivered by interrupting the main thread
+        let process_interested =
+            interested & !crate::signal::signals_left_to_main_thread(thread, &thread.process());
         // In the nightly-2022-10-22 Rust compiler, this expression holds two nested read locks.
         // However, in the stable-2023-12-21 Rust compiler, the expression drops the temporary variables
         // (including: read lock guard) after each division code completes.
-        !((thread.process().sig_queues().read().unwrap().pending() & interested).empty())
+        !((thread.process().sig_queues().read().unwrap().pending() & process_interested).empty())
             || !((thread.sig_queues().read().unwrap().pending() & interested).empty())
     };
 
