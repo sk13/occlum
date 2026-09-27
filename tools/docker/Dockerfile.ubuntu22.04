@@ -147,7 +147,8 @@ RUN git clone -b sgx_2.21_for_occlum https://github.com/occlum/linux-sgx && \
 #
 # ADD resolves the branch on every build, so that the steps are rebuilt when
 # the files that they use have changed: the toolchains when tools/toolchains
-# has changed, Occlum itself when anything has changed.
+# (or, for the DCAP library, the sgx_types crate) has changed, Occlum itself
+# when anything has changed.
 ARG OCCLUM_REPO=https://github.com/sk13/occlum.git
 ARG OCCLUM_BRANCH=0.31.0-dev
 ADD ${OCCLUM_REPO}#${OCCLUM_BRANCH}:tools/toolchains /root/occlum/tools/toolchains
@@ -199,7 +200,8 @@ COPY --from=alpine /usr/lib/jvm/java-1.8-openjdk $JDK8_PATH
 RUN rm $JDK8_PATH/jre/lib/security/cacerts
 COPY --from=alpine /etc/ssl/certs/java/cacerts $JDK8_PATH/jre/lib/security/cacerts
 
-# Install DCAP library
+# Install DCAP library, which uses the sgx_types crate of the Rust SGX SDK
+ADD ${OCCLUM_REPO}#${OCCLUM_BRANCH}:deps/rust-sgx-sdk/sgx_types /root/occlum/deps/rust-sgx-sdk/sgx_types
 WORKDIR /root/occlum/tools/toolchains
 RUN cd dcap_lib && ./build.sh && cd .. && rm -rf dcap_lib
 
