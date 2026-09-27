@@ -22,7 +22,14 @@ name of the OS distribution that the Docker image is based on.
 Currently, `<OS_NAME>` must be one of the following values:
 `ubuntu20.04`, `aliyunlinux3` and `anolis8.8`.
 `<OCCLUM_BRANCH>` indicates which the docker image is built on, e.g "0.24.0".
-It is optional, if not provided, "master" branch will be used.
+It is optional, if not provided, "0.31.0-dev" branch will be used.
+
+The Ubuntu 22.04 image is built from the `OCCLUM_REPO` repository, by default
+https://github.com/sk13/occlum.git. `Dockerfile.ubuntu22.04` adds it with `ADD`
+from Git, which needs BuildKit (the default builder since Docker 23.0).
+`ADD` resolves the branch on every build, so a rebuild reuses the cache only for
+the steps whose files have not changed: the toolchains are rebuilt only when
+`tools/toolchains` has changed, Occlum itself whenever the branch has changed.
 
 The resulting Docker image will have `occlum/occlum:<OCCLUM_LABEL>-<OS_NAME>` as its label.
 

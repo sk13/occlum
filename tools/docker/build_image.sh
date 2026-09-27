@@ -28,8 +28,9 @@ USAGE:
     The Occlum branch which the docker image is built on, e.g "0.24.0".
     It is optional, if not provided, the "0.31.0-dev" branch will be used.
 
-The Occlum repository is https://github.com/sk13/occlum unless the OCCLUM_REPO
-environment variable is set.
+The Occlum repository is https://github.com/sk13/occlum.git unless the OCCLUM_REPO
+environment variable is set. For Ubuntu 22.04, the image is rebuilt from the
+steps that use files which have changed on the branch since the last build.
 
 The resulting Docker image will have "occlum/occlum:<OCCLUM_LABEL>-<OS_NAME>" as its label.
 EOF
@@ -54,7 +55,11 @@ function check_item_in_list() {
 
 check_item_in_list "$os_name" "ubuntu20.04 ubuntu22.04 aliyunlinux3 anolis8.8" || report_error
 
+# The Dockerfile adds the repository with ADD, which needs a Git URL
+occlum_repo=${OCCLUM_REPO:-https://github.com/sk13/occlum.git}
+[[ "$occlum_repo" == *.git ]] || occlum_repo="$occlum_repo.git"
+
 cd "$script_dir/.."
 docker build -f "$script_dir/Dockerfile.$os_name" -t "occlum/occlum:$occlum_label-$os_name" \
     --build-arg OCCLUM_BRANCH=$occlum_branch \
-    --build-arg OCCLUM_REPO=${OCCLUM_REPO:-https://github.com/sk13/occlum} .
+    --build-arg OCCLUM_REPO=$occlum_repo .

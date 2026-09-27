@@ -1,3 +1,5 @@
+# syntax=docker/dockerfile:1
+
 FROM alpine:3.11 AS alpine
 
 LABEL maintainer="Qi Zheng <huaiqing.zq@antgroup.com>"
@@ -139,15 +141,20 @@ RUN git clone -b sgx_2.21_for_occlum https://github.com/occlum/linux-sgx && \
     echo 'source /opt/intel/sgxsdk/environment' >> /root/.bashrc && \
     rm -rf /tmp/linux-sgx
 
-# Download the Occlum source: by default the 0.31.0-dev branch of the
-# sk13/occlum fork, which builds with the Rust toolchain installed above
-ARG OCCLUM_REPO=https://github.com/sk13/occlum
+# The Occlum source: by default the 0.31.0-dev branch of the sk13/occlum fork,
+# which builds with the Rust toolchain installed above. OCCLUM_REPO must be a
+# Git URL, i.e., end with .git.
+#
+# ADD resolves the branch on every build, so that the steps are rebuilt when
+# the files that they use have changed: the toolchains when tools/toolchains
+# has changed, Occlum itself when anything has changed.
+ARG OCCLUM_REPO=https://github.com/sk13/occlum.git
 ARG OCCLUM_BRANCH=0.31.0-dev
-WORKDIR /root
-RUN git clone -b $OCCLUM_BRANCH $OCCLUM_REPO occlum && \
-    cd /root/occlum && git submodule update --init && \
-    mkdir -p /opt/occlum/ && \
-    cp /root/occlum/tools/docker/start_aesm.sh /opt/occlum/
+ADD ${OCCLUM_REPO}#${OCCLUM_BRANCH}:tools/toolchains /root/occlum/tools/toolchains
+# ADD downloads any other URL as a file
+RUN test -d /root/occlum/tools/toolchains || \
+        { echo "OCCLUM_REPO is not a Git URL ending with .git: $OCCLUM_REPO" >&2; exit 1; } && \
+    mkdir -p /opt/occlum/
 
 # Install Occlum toolchain
 WORKDIR /root/occlum/tools/toolchains
@@ -205,8 +212,10 @@ WORKDIR /root/occlum/tools/toolchains
 RUN cd grpc_ratls && ./build.sh && cd .. && rm -rf grpc_ratls && rm -rf /tmp/grpc*
 
 # Install Occlum
+ADD --keep-git-dir=true ${OCCLUM_REPO}#${OCCLUM_BRANCH} /root/occlum
 WORKDIR /root
-RUN cd occlum && \
+RUN cp /root/occlum/tools/docker/start_aesm.sh /opt/occlum/ && \
+    cd occlum && \
     source /opt/intel/sgxsdk/environment && \
     make submodule && \
     OCCLUM_RELEASE_BUILD=1 make install && \
