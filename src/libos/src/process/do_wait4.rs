@@ -2,7 +2,7 @@ use super::do_vfork::wait4_exit_child_created_with_vfork;
 use super::pgrp::clean_pgrp_when_exit;
 use super::process::{ProcessFilter, ProcessInner};
 use super::wait::Waiter;
-use super::{table, ProcessRef, ProcessStatus};
+use super::{table, ProcessRef, ProcessStatus, TermStatus};
 use crate::prelude::*;
 
 // Children process exits without parent calls wait4 should be reaped by Idle process in the end.
@@ -33,6 +33,33 @@ pub fn idle_reap_zombie_children() -> Result<()> {
 
     info!("Idle process reaps zombie children pid = {:?}", zombie_pids);
     return Ok(());
+}
+
+/// Wait for a child of the idle process to exit and return its termination status.
+///
+/// The host waits this way for the processes that it creates, whose main threads
+/// it executes, as the main thread of a process may exit before the other threads,
+/// e.g., with pthread_exit().
+pub fn idle_wait_for_child(child: &ProcessRef) -> TermStatus {
+    let idle_ref = super::IDLE.process().clone();
+    let waiter = {
+        // Lock order: always lock parent then child to avoid deadlock
+        let mut idle_inner = idle_ref.inner();
+        debug_assert!(child.parent().pid() == 0);
+        if child.status() == ProcessStatus::Zombie {
+            return child.inner().term_status().unwrap();
+        }
+
+        let waiter = Waiter::new(&ProcessFilter::WithPid(child.pid()));
+        idle_inner
+            .waiting_children_mut()
+            .unwrap()
+            .add_waiter(&waiter);
+        waiter
+    };
+    // Only the child's exit ends the wait, as the idle process never exits
+    waiter.sleep_until_woken_with_result();
+    child.inner().term_status().unwrap()
 }
 
 pub fn do_wait4(child_filter: &ProcessFilter, options: WaitOptions) -> Result<(pid_t, i32)> {

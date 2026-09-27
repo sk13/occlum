@@ -1,3 +1,4 @@
+use super::super::do_wait4::idle_wait_for_child;
 use super::super::{current, TermStatus, ThreadRef};
 use super::Task;
 use crate::interrupt;
@@ -33,8 +34,16 @@ fn dequeue(libos_tid: pid_t) -> Result<ThreadRef> {
 }
 
 /// Execute the specified LibOS thread in the current host thread.
+///
+/// Returns the termination status of the thread or, for the main thread of a process
+/// that the host created, of the process.
 pub fn exec(libos_tid: pid_t, host_tid: pid_t) -> Result<i32> {
     let this_thread: ThreadRef = dequeue(libos_tid)?;
+    // The processes that the host creates are the children of the idle process
+    let is_main_thread_of_host_process = {
+        let process = this_thread.process();
+        this_thread.tid() == process.pid() && process.parent().pid() == 0
+    };
     this_thread.start(host_tid);
 
     // Enable current::get() from now on
@@ -61,6 +70,14 @@ pub fn exec(libos_tid: pid_t, host_tid: pid_t) -> Result<i32> {
 
     // Disable current::get()
     current::reset();
+
+    // The host expects the termination status of a process that it created when the
+    // process exits, which may be after its main thread exits, e.g., with pthread_exit()
+    let term_status = if is_main_thread_of_host_process {
+        idle_wait_for_child(this_thread.process())
+    } else {
+        term_status
+    };
 
     Ok(term_status.as_u32() as i32)
 }

@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use super::do_futex::futex_wake;
 use super::do_vfork::{is_vforked_child_process, vfork_return_to_parent};
 use super::pgrp::clean_pgrp_when_exit;
-use super::process::{Process, ProcessFilter};
+use super::process::{Process, ProcessFilter, ProcessInner};
 use super::{table, ProcessRef, TermStatus, ThreadRef, ThreadStatus};
 use crate::ipc::{SYSTEM_V_SEM_MANAGER, SYSTEM_V_SHM_MANAGER};
 use crate::prelude::*;
@@ -139,6 +139,7 @@ fn exit_process(thread: &ThreadRef, term_status: TermStatus) {
         let _ = reap_zombie_child_created_with_vfork(pid);
 
         idle_inner.remove_zombie_child(pid);
+        wake_idle_waiters(&mut idle_inner, pid);
         return;
     }
     // Otherwise, we need to notify the parent process
@@ -170,6 +171,17 @@ fn exit_process(thread: &ThreadRef, term_status: TermStatus) {
         }
         Some(process.pid())
     });
+}
+
+// Wake up the host threads, if any, that wait for the child of the idle process
+// with the pid to exit. See idle_wait_for_child.
+fn wake_idle_waiters(idle_inner: &mut ProcessInner, pid: pid_t) {
+    let waits_for_pid = |waiter_data: &ProcessFilter| match waiter_data {
+        ProcessFilter::WithPid(required_pid) if *required_pid == pid => Some(pid),
+        _ => None,
+    };
+    let waiting_children = idle_inner.waiting_children_mut().unwrap();
+    while waiting_children.del_and_wake_one_waiter(waits_for_pid) > 0 {}
 }
 
 fn send_sigchld_to(parent: &Arc<Process>) {
@@ -243,6 +255,7 @@ fn exit_process_for_execve(
     if parent_inner.is_none() {
         debug_assert!(parent.pid() == 0);
         idle_inner.remove_zombie_child(pid);
+        wake_idle_waiters(&mut idle_inner, pid);
         return;
     }
 
