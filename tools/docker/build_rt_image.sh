@@ -54,7 +54,7 @@ function check_item_in_list() {
     [[ $list =~ (^|[[:space:]])$item($|[[:space:]]) ]]
 }
 
-check_item_in_list "$os_name" "ubuntu20.04" || report_error
+check_item_in_list "$os_name" "ubuntu20.04 ubuntu22.04" || report_error
 
 cd "$script_dir"
 docker build -f "$script_dir/Dockerfile.$os_name-rt" \
