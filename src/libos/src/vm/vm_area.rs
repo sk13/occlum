@@ -514,11 +514,12 @@ impl VMArea {
             return false;
         }
 
-        // If the two VMAs have write-back files, the files must be the same and
-        // the two file regions must be continuous.
-        let left_writeback_file = left.writeback_file();
-        let right_writeback_file = right.writeback_file();
-        match (left_writeback_file, right_writeback_file) {
+        // Either both VMAs are anonymous, or they are backed by the same file with
+        // continuous file regions and the same write-back mode. Comparing only the
+        // write-back files is not enough: a private file mapping has none, but its
+        // uncommitted pages are still initialized from the file on #PF. Merged with
+        // an anonymous neighbor, the anonymous pages would be filled with file data.
+        match (left.backed_file(), right.backed_file()) {
             (None, None) => true,
             (Some(_), None) => false,
             (None, Some(_)) => false,
@@ -526,6 +527,7 @@ impl VMArea {
                 Arc::ptr_eq(&left_file, &right_file)
                     && right_offset > left_offset
                     && right_offset - left_offset == left.size()
+                    && left.writeback_file().is_some() == right.writeback_file().is_some()
             }
         }
     }
