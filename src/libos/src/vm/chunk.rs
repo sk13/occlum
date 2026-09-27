@@ -255,6 +255,18 @@ impl Chunk {
         }
     }
 
+    // Commit the uncommitted pages of the current process in the given range
+    pub fn commit_range(&self, range: &VMRange) -> Result<()> {
+        match self.internal() {
+            ChunkType::SingleVMA(vma) => vma.lock().unwrap().commit_range(range),
+            ChunkType::MultiVMA(internal_manager) => internal_manager
+                .lock()
+                .unwrap()
+                .chunk_manager
+                .commit_range(range),
+        }
+    }
+
     pub fn is_free_range(&self, request_range: &VMRange) -> bool {
         match self.internal() {
             ChunkType::SingleVMA(_) => false, // single-vma chunk can't be free

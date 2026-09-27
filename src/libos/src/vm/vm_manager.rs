@@ -506,6 +506,19 @@ impl VMManager {
         }?;
         debug!("mremap options after parsing = {:?}", remap_result_option);
 
+        // When the range moves, the new range is initialized from the old one while the
+        // lock of the chunk that receives it is held. An uncommitted page in the old range
+        // would page-fault in this copy, and the #PF handler would wait for the same lock
+        // if both ranges are in one chunk. Commit the old range before.
+        if let Some(mmap_options) = remap_result_option.mmap_options() {
+            if matches!(
+                mmap_options.initializer(),
+                VMInitializer::CopyFrom { .. } | VMInitializer::CopyOldAndReadNew { .. }
+            ) {
+                chunk.commit_range(&old_range)?;
+            }
+        }
+
         let ret_addr = if let Some(mmap_options) = remap_result_option.mmap_options() {
             let mmap_addr = self.mmap(mmap_options);
 

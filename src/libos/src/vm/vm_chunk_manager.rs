@@ -446,6 +446,30 @@ impl ChunkManager {
         Ok(())
     }
 
+    // Commit the uncommitted pages of the current process's VMAs in the given range
+    pub fn commit_range(&mut self, range: &VMRange) -> Result<()> {
+        let current_pid = current!().process().pid();
+        let bound = range.start().max(self.range.start());
+        let mut vmas_cursor = self.vmas.upper_bound_mut(Bound::Included(&bound));
+        while !vmas_cursor.is_null() && vmas_cursor.get().unwrap().vma().start() < range.end() {
+            let vma = vmas_cursor.get().unwrap().vma();
+            if vma.size() == 0
+                || !vma.belong_to(current_pid)
+                || vma.is_fully_committed()
+                || !vma.overlap_with(range)
+            {
+                vmas_cursor.move_next();
+                continue;
+            }
+
+            let mut vma = vma.clone();
+            vma.commit_range(range)?;
+            vmas_cursor.replace_with(VMAObj::new_vma_obj(vma));
+            vmas_cursor.move_next();
+        }
+        Ok(())
+    }
+
     pub fn usage_percentage(&self) -> f32 {
         let total_size = self.range.size();
         let mut used_size = 0;

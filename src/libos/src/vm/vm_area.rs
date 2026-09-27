@@ -815,6 +815,30 @@ impl VMArea {
 
         Ok(())
     }
+
+    // Commit the uncommitted pages of this VMA in the given range, the same way the
+    // #PF handler does.
+    pub fn commit_range(&mut self, range: &VMRange) -> Result<()> {
+        if self.is_fully_committed() {
+            return Ok(());
+        }
+        let range = match self.range().intersect(range) {
+            Some(range) => range,
+            None => return Ok(()),
+        };
+
+        let uncommitted_ranges = self.pages().get_ranges(false);
+        for uncommitted_range in uncommitted_ranges {
+            if let Some(commit_range) = uncommitted_range.intersect(&range) {
+                self.init_memory_internal(&commit_range, None)?;
+            }
+        }
+        if self.pages().is_fully_committed() {
+            self.pages = None;
+        }
+
+        Ok(())
+    }
 }
 
 impl Deref for VMArea {
