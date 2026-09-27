@@ -1,3 +1,9 @@
+# The Occlum runtime is taken from the patched Occlum development image, which
+# builds Occlum from the 0.31.0-dev branch of the sk13/occlum fork (see
+# Dockerfile.ubuntu22.04), instead of the upstream occlum-runtime package
+ARG OCCLUM_DEV_IMAGE=docker.io/sk13sk13/occlum:sk13-ubuntu22.04
+FROM ${OCCLUM_DEV_IMAGE} AS occlum-dev
+
 FROM ubuntu:22.04
 LABEL maintainer="Qi Zheng <huaiqing.zq@antgroup.com>"
 
@@ -5,12 +11,9 @@ LABEL maintainer="Qi Zheng <huaiqing.zq@antgroup.com>"
 ENV APT_KEY_DONT_WARN_ON_DANGEROUS_USAGE=1
 ARG PSW_VERSION=2.21.100.1
 ARG DCAP_VERSION=1.18.100.1
-ARG OCCLUM_VERSION=0.31.0
 RUN apt update && DEBIAN_FRONTEND="noninteractive" apt install -y --no-install-recommends gnupg wget ca-certificates jq && \
     echo 'deb [arch=amd64] https://download.01.org/intel-sgx/sgx_repo/ubuntu jammy main' | tee /etc/apt/sources.list.d/intel-sgx.list && \
     wget -qO - https://download.01.org/intel-sgx/sgx_repo/ubuntu/intel-sgx-deb.key | apt-key add - && \
-    echo 'deb [arch=amd64] https://occlum.io/occlum-package-repos/debian jammy main' | tee /etc/apt/sources.list.d/occlum.list && \
-    wget -qO - https://occlum.io/occlum-package-repos/debian/public.key | apt-key add - && \
     apt update && apt install -y --no-install-recommends \
         libsgx-launch=$PSW_VERSION-jammy1 \
         libsgx-epid=$PSW_VERSION-jammy1 \
@@ -27,10 +30,18 @@ RUN apt update && DEBIAN_FRONTEND="noninteractive" apt install -y --no-install-r
         libsgx-qe3-logic=$DCAP_VERSION-jammy1 \
         libsgx-dcap-default-qpl=$DCAP_VERSION-jammy1 \
         libsgx-dcap-quote-verify=$DCAP_VERSION-jammy1 \
-        occlum-runtime=$OCCLUM_VERSION-jammy-1 \
         && \
     apt clean && \
     rm -rf /var/lib/apt/lists/*
+
+# Install the files of the occlum-runtime package
+COPY --from=occlum-dev \
+    /opt/occlum/build/bin/occlum \
+    /opt/occlum/build/bin/occlum_build.mk \
+    /opt/occlum/build/bin/occlum-run \
+    /opt/occlum/build/bin/occlum_exec_client \
+    /opt/occlum/build/bin/occlum_exec_server \
+    /opt/occlum/build/bin/
 
 COPY docker-entrypoint.sh /usr/local/bin/
 
