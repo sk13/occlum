@@ -5,8 +5,9 @@ extern crate regex;
 extern crate serde;
 extern crate serde_derive;
 extern crate serde_xml_rs;
+extern crate xml;
 
-use clap::{App, Arg, SubCommand};
+use clap::{Arg, Command};
 use lazy_static::lazy_static;
 use log::debug;
 use serde_derive::{Deserialize, Serialize};
@@ -49,70 +50,62 @@ impl DefaultConfig {
 fn main() {
     env_logger::init();
 
-    let matches = App::new("gen_internal_conf")
+    let matches = Command::new("gen_internal_conf")
         .version("0.2.0")
         // Input: JSON file which users may change
         .arg(
-            Arg::with_name("user_json")
+            Arg::new("user_json")
                 .long("user_json")
                 .value_name("input user json")
                 .required(true)
-                .validator(|f| match Path::new(&f).exists() {
-                    true => Ok(()),
-                    false => {
-                        let err_message = f + " is not exist";
-                        Err(err_message)
-                    }
-                })
-                .takes_value(true),
+                .value_parser(|f: &str| match Path::new(f).exists() {
+                    true => Ok(f.to_string()),
+                    false => Err(f.to_string() + " is not exist"),
+                }),
         )
         .subcommand(
-            SubCommand::with_name("gen_conf")
+            Command::new("gen_conf")
                 .about("Generate image config")
                 // Input: User's Secure Occlum FS image MAC
                 .arg(
-                    Arg::with_name("user_fs_mac")
+                    Arg::new("user_fs_mac")
                         .long("user_fs_mac")
                         .value_name("input MAC of user image fs")
-                        .required(true)
-                        .takes_value(true),
+                        .required(true),
                 )
                 // Input: InitFS image MAC
                 .arg(
-                    Arg::with_name("init_fs_mac")
+                    Arg::new("init_fs_mac")
                         .long("init_fs_mac")
                         .value_name("input MAC of init image fs")
-                        .required(true)
-                        .takes_value(true),
+                        .required(true),
                 )
                 // Output: JSON file used by libOS and users shouldn't touch
                 .arg(
-                    Arg::with_name("output_json")
+                    Arg::new("output_json")
                         .long("output_json")
                         .value_name("output json")
                         .required(true)
-                        .validator(|f| match File::create(f) {
-                            Ok(_) => Ok(()),
+                        .value_parser(|f: &str| match File::create(f) {
+                            Ok(_) => Ok(f.to_string()),
                             Err(e) => Err(e.to_string()),
-                        })
-                        .takes_value(true),
+                        }),
                 )
                 // Output: XML file used by Intel SGX SDK
                 .arg(
-                    Arg::with_name("sdk_xml")
+                    Arg::new("sdk_xml")
                         .long("sdk_xml")
                         .value_name("output sdk's xml")
                         .required(true)
-                        .validator(|f| match File::create(f) {
-                            Ok(_e) => Ok(()),
+                        .value_parser(|f: &str| match File::create(f) {
+                            Ok(_e) => Ok(f.to_string()),
                             Err(e) => Err(e.to_string()),
-                        })
-                        .takes_value(true),
+                        }),
                 ),
         )
         .get_matches();
 
-    let occlum_config_file_path = matches.value_of("user_json").unwrap();
+    let occlum_config_file_path = matches.get_one::<String>("user_json").unwrap();
     debug!(
         "Occlum config (json) file name {:?}",
         occlum_config_file_path
@@ -134,19 +127,19 @@ fn main() {
 
     // Match subcommand
     if let Some(sub_matches) = matches.subcommand_matches("gen_conf") {
-        let occlum_conf_user_fs_mac = sub_matches.value_of("user_fs_mac").unwrap();
+        let occlum_conf_user_fs_mac = sub_matches.get_one::<String>("user_fs_mac").unwrap();
         debug!("Occlum config user FS MAC {:?}", occlum_conf_user_fs_mac);
 
-        let occlum_conf_init_fs_mac = sub_matches.value_of("init_fs_mac").unwrap();
+        let occlum_conf_init_fs_mac = sub_matches.get_one::<String>("init_fs_mac").unwrap();
         debug!("Occlum config init FS MAC {:?}", occlum_conf_init_fs_mac);
 
-        let occlum_json_file_path = sub_matches.value_of("output_json").unwrap();
+        let occlum_json_file_path = sub_matches.get_one::<String>("output_json").unwrap();
         debug!(
             "Generated Occlum user config (json) file name {:?}",
             occlum_json_file_path
         );
 
-        let enclave_config_file_path = sub_matches.value_of("sdk_xml").unwrap();
+        let enclave_config_file_path = sub_matches.get_one::<String>("sdk_xml").unwrap();
         debug!(
             "Enclave config (xml) file name {:?}",
             enclave_config_file_path
@@ -526,7 +519,11 @@ fn main() {
             PKRU: occlum_config.feature.pkru,
             AMX: occlum_config.feature.amx,
         };
-        let enclave_config = serde_xml_rs::to_string(&sgx_enclave_configuration).unwrap();
+        // Without an XML declaration, which serde_xml_rs writes by default
+        let enclave_config = serde_xml_rs::SerdeXml::new()
+            .emitter(xml::EmitterConfig::new().write_document_declaration(false))
+            .to_string(&sgx_enclave_configuration)
+            .unwrap();
         debug!("The enclave config:{:?}", enclave_config);
 
         // Generate app config, including "init" and user app
