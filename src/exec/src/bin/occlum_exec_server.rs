@@ -5,7 +5,7 @@ extern crate occlum_exec;
 extern crate protobuf;
 #[macro_use]
 extern crate log;
-use clap::{App, Arg};
+use clap::{Arg, Command};
 use futures::executor;
 use grpc::prelude::*;
 use grpc::ClientConf;
@@ -54,20 +54,19 @@ fn is_server_running(sock_file: &str) -> bool {
 }
 
 fn main() -> Result<(), i32> {
-    let matches = App::new("Occlum_server")
+    let matches = Command::new("Occlum_server")
         .version("0.1.0")
         .arg(
-            Arg::with_name("instance_dir")
+            Arg::new("instance_dir")
                 .short('d')
                 .long("instance_dir")
-                .takes_value(true)
                 .default_value("./")
                 .help("The Occlum instance dir."),
         )
         .get_matches();
 
     // Set the instance_dir as the current dir
-    let instance_dir = Path::new(matches.value_of("instance_dir").unwrap());
+    let instance_dir = Path::new(matches.get_one::<String>("instance_dir").unwrap());
     assert!(env::set_current_dir(&instance_dir).is_ok());
 
     //If the server already startted, then return

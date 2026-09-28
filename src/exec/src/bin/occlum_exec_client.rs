@@ -8,7 +8,7 @@ extern crate signal_hook;
 #[macro_use]
 extern crate log;
 
-use clap::{App, Arg};
+use clap::Arg;
 use futures::executor;
 use grpc::prelude::*;
 use grpc::ClientConf;
@@ -238,43 +238,38 @@ fn kill_process(client: &OcclumExecClient, process_id: &i32, signal: &i32) {
 fn main() -> Result<(), i32> {
     env_logger::init();
 
-    let matches = App::new("Occlum")
+    let matches = clap::Command::new("Occlum")
         .version("0.1.0")
         .arg(
-            Arg::with_name("instance_dir")
+            Arg::new("instance_dir")
                 .short('d')
                 .long("instance_dir")
-                .takes_value(true)
                 .default_value("./")
                 .help("The Occlum instance dir."),
         )
         .subcommand(
-            App::new("start").about(
+            clap::Command::new("start").about(
                 "Start the Occlum server. If the server already running, immediately return.",
             ),
         )
         .subcommand(
-            App::new("stop")
+            clap::Command::new("stop")
                 .about(
                     "Stop the Occlum server.",
                 )
                 .arg(
-                    Arg::with_name("time")
+                    Arg::new("time")
                         .short('t')
                         .long("time")
-                        .takes_value(true)
                         .help("Seconds to wait before killing the applications running on the Occlum server.")
                         .default_value("10")
-                        .validator(|t| match t.parse::<u32>() {
-                            Ok(_) => Ok(()),
-                            Err(e) => Err(e.to_string()),
-                        }),
+                        .value_parser(clap::value_parser!(u32)),
                 ),
         )
         .subcommand(
-            App::new("exec")
+            clap::Command::new("exec")
                 .about("Execute the command on server.")
-                .arg(Arg::with_name("args").multiple(true).min_values(1).last(true).help("The arguments for the command")),
+                .arg(Arg::new("args").num_args(1..).last(true).help("The arguments for the command")),
         )
         .get_matches();
 
@@ -284,7 +279,7 @@ fn main() -> Result<(), i32> {
         .collect();
 
     // Set the instance_dir as the current dir
-    let instance_dir = Path::new(matches.value_of("instance_dir").unwrap());
+    let instance_dir = Path::new(matches.get_one::<String>("instance_dir").unwrap());
     assert!(env::set_current_dir(&instance_dir).is_ok());
 
     let client = OcclumExecClient::new_plain_unix(DEFAULT_SOCK_FILE, ClientConf::new())
@@ -297,13 +292,13 @@ fn main() -> Result<(), i32> {
         }
         println!("server is running.");
     } else if let Some(ref matches) = matches.subcommand_matches("stop") {
-        let stop_time = matches.value_of("time").unwrap().parse::<u32>().unwrap();
+        let stop_time = *matches.get_one::<u32>("time").unwrap();
         stop_server(&client, stop_time);
         println!("server is stopping.");
     } else if let Some(ref matches) = matches.subcommand_matches("exec") {
         let mut cmd_args: Vec<&str> = match matches
-            .values_of("args")
-            .map(|vals| vals.collect::<Vec<_>>())
+            .get_many::<String>("args")
+            .map(|vals| vals.map(|val| val.as_str()).collect::<Vec<_>>())
         {
             Some(p) => p,
             //Already set the min_values to 1. So it could not be here
