@@ -184,11 +184,13 @@ pub fn do_rt_sigtimedwait(
         }
         SigSet::from_c(unsafe { *mask_ptr })
     };
-    let info: &mut siginfo_t = {
+    let info: Option<&mut siginfo_t> = {
         if info_ptr.is_null() {
-            return_errno!(EINVAL, "ptr must not be null");
+            None
+        } else {
+            from_user::check_mut_ptr(info_ptr)?;
+            Some(unsafe { &mut *info_ptr })
         }
-        unsafe { &mut *info_ptr }
     };
     let timeout: Option<Duration> = {
         if timeout_ptr.is_null() {
@@ -199,8 +201,11 @@ pub fn do_rt_sigtimedwait(
         }
     };
 
-    *info = super::do_sigtimedwait::do_sigtimedwait(mask, timeout.as_ref())?;
-    Ok(0)
+    let siginfo = super::do_sigtimedwait::do_sigtimedwait(mask, timeout.as_ref())?;
+    if let Some(info) = info {
+        *info = siginfo;
+    }
+    Ok(siginfo.si_signo as isize)
 }
 
 pub fn do_rt_sigsuspend(mask_ptr: *const sigset_t) -> Result<isize> {

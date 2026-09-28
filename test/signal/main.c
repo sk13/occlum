@@ -560,8 +560,24 @@ int test_sigtimedwait() {
 
     // Let's generate a pending signal and then get it
     raise(SIGIO);
-    if ((ret = sigtimedwait(&new_mask, &info, NULL)) < 0 || info.si_signo != SIGIO) {
+    if ((ret = sigtimedwait(&new_mask, &info, NULL)) != SIGIO || info.si_signo != SIGIO) {
         THROW_ERROR("sigtimedwait should return the SIGIO");
+    }
+
+    // The same for a process-directed signal
+    kill(getpid(), SIGIO);
+    if ((ret = sigtimedwait(&new_mask, &info, NULL)) != SIGIO || info.si_signo != SIGIO) {
+        THROW_ERROR("sigtimedwait should return the process-directed SIGIO");
+    }
+
+    // The info argument is optional
+    raise(SIGIO);
+    if ((ret = sigtimedwait(&new_mask, NULL, NULL)) != SIGIO) {
+        THROW_ERROR("sigtimedwait without info should return the SIGIO");
+    }
+    kill(getpid(), SIGIO);
+    if ((ret = sigtimedwait(&new_mask, NULL, NULL)) != SIGIO) {
+        THROW_ERROR("sigtimedwait without info should return the process-directed SIGIO");
     }
 
     // Now let's generate a pending signal in an async way. The pending signal
@@ -576,7 +592,7 @@ int test_sigtimedwait() {
     timeout.tv_sec = 0;
     timeout.tv_nsec = 2 * delay.tv_nsec;
 
-    if ((ret = sigtimedwait(&new_mask, &info, &timeout)) < 0 || info.si_signo != SIGIO) {
+    if ((ret = sigtimedwait(&new_mask, &info, &timeout)) != SIGIO || info.si_signo != SIGIO) {
         THROW_ERROR("sigtimedwait should return the SIGIO");
     }
 
