@@ -3,6 +3,7 @@ extern crate libc;
 extern crate serde;
 extern crate serde_json;
 
+use base64::Engine;
 use libc::syscall;
 use serde::{Deserialize, Serialize};
 
@@ -132,7 +133,9 @@ fn get_kms_keys(
                 println!("base64 encoded key {:}", keys.key);
                 let base64_string = String::from_utf8(buffer).expect("error converting to string");
                 let mut buf = Vec::<u8>::new();
-                base64::decode_config_buf(&base64_string, base64::STANDARD, &mut buf).unwrap();
+                base64::engine::general_purpose::STANDARD
+                    .decode_vec(&base64_string, &mut buf)
+                    .unwrap();
                 buffer = buf.clone();
             }
         }
