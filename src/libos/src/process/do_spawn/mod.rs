@@ -287,6 +287,16 @@ fn new_process_common(
         // Use parent process's process group by default.
         let pgrp_ref = process_ref.pgrp();
 
+        // The normalized absolute path of the executable identifies the program,
+        // e.g., in the network policy
+        let exec_path = crate::fs::normalize_abs_path(
+            &current_ref
+                .fs()
+                .read()
+                .unwrap()
+                .convert_to_abs_path(&elf_path),
+        );
+
         // Make the default thread name to be the process's corresponding elf file name
         let elf_name = elf_path.rsplit('/').collect::<Vec<&str>>()[0];
         let thread_name = ThreadName::new(elf_name);
@@ -307,7 +317,7 @@ fn new_process_common(
 
         let new_process = process_builder
             .vm(vm_ref)
-            .exec_path(&elf_path)
+            .exec_path(&exec_path)
             .umask(parent.umask())
             .parent(parent)
             .task(task)

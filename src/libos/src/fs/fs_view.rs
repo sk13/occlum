@@ -225,6 +225,22 @@ impl FsView {
     }
 }
 
+/// Returns the absolute path with "." and ".." resolved, without following
+/// symbolic links.
+pub fn normalize_abs_path(abs_path: &str) -> String {
+    let mut components: Vec<&str> = Vec::new();
+    for component in abs_path.split('/') {
+        match component {
+            "" | "." => (),
+            ".." => {
+                components.pop();
+            }
+            component => components.push(component),
+        }
+    }
+    format!("/{}", components.join("/"))
+}
+
 impl Default for FsView {
     fn default() -> Self {
         let root = String::from("/");
