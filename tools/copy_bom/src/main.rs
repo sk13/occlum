@@ -8,8 +8,8 @@ extern crate regex;
 extern crate shellexpand;
 extern crate walkdir;
 use bom::Bom;
+use clap::Parser;
 use env_logger::Env;
-use structopt::StructOpt;
 use util::check_rsync;
 
 mod bom;
@@ -17,19 +17,20 @@ mod error;
 mod util;
 
 /// copy files described in a bom file to a given dest root dir
-#[derive(Debug, Clone, StructOpt)]
+#[derive(Debug, Clone, Parser)]
+#[command(version)]
 struct CopyBomOption {
     /// Set the bom file to copy
-    #[structopt(short = "f", long = "file")]
+    #[arg(short = 'f', long = "file")]
     bom_file: String,
     /// The dest root dir
-    #[structopt(long = "root")]
+    #[arg(long = "root")]
     root_dir: String,
     /// Dry run mode
-    #[structopt(long = "dry-run")]
+    #[arg(long = "dry-run")]
     dry_run: bool,
     /// Set the paths where to find included bom files
-    #[structopt(long = "include-dir")]
+    #[arg(long = "include-dir", num_args = 1..)]
     included_dirs: Vec<String>,
 }
 
@@ -52,6 +53,6 @@ fn main() {
     env_logger::init_from_env(env);
     check_rsync();
 
-    let copy_bom_option = CopyBomOption::from_args();
+    let copy_bom_option = CopyBomOption::parse();
     copy_bom_option.copy_files();
 }

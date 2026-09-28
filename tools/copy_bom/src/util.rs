@@ -3,7 +3,9 @@ use crate::error::{
     INCORRECT_HASH_ERROR, MISSING_LIBRARY_ERROR, RSYNC_NOT_FOUND_ERROR,
 };
 use data_encoding::HEXUPPER;
-use elf::types::{Type, ET_DYN, ET_EXEC};
+use elf::abi::{ET_DYN, ET_EXEC};
+use elf::endian::AnyEndian;
+use elf::ElfBytes;
 use regex::Regex;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
@@ -193,10 +195,24 @@ pub fn calculate_file_hash(filename: &str) -> String {
         std::process::exit(FILE_NOT_EXISTS_ERROR);
     });
     let mut hasher = Sha256::new();
-    std::io::copy(&mut file, &mut hasher).unwrap();
+    std::io::copy(&mut file, &mut HashWriter(&mut hasher)).unwrap();
     let hash = hasher.finalize();
     let hash = HEXUPPER.encode(&hash);
     hash
+}
+
+/// Feeds the data written to it into a hasher.
+struct HashWriter<'a, D: Digest>(&'a mut D);
+
+impl<D: Digest> std::io::Write for HashWriter<'_, D> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.update(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 /// This is the main function of finding dependent shared objects for an elf file.
@@ -230,7 +246,11 @@ pub fn find_dependent_shared_objects(
 
     if let Ok(output) = output {
         let loader_path_buf = PathBuf::from(&occlum_elf_loader);
-        let loader_dir = loader_path_buf.parent().unwrap().to_string_lossy().to_string();
+        let loader_dir = loader_path_buf
+            .parent()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
         let default_lib_dirs = OCCLUM_LOADERS
             .default_lib_dirs
             .get(&occlum_elf_loader)
@@ -299,17 +319,21 @@ fn auto_dynamic_loader(
     filename: &str,
     default_loader: &Option<(String, String)>,
 ) -> Option<(String, String)> {
-    let elf_file = match elf::File::open_path(filename) {
+    let elf_data = match std::fs::read(filename) {
+        Err(_) => return None,
+        Ok(elf_data) => elf_data,
+    };
+    let elf_file = match ElfBytes::<AnyEndian>::minimal_parse(&elf_data) {
         Err(_) => return None,
         Ok(elf_file) => elf_file,
     };
     // We should only try to find dependencies for dynamic libraries or executables
     // relocatable files and core files are not included
-    match elf_file.ehdr.elftype {
+    match elf_file.ehdr.e_type {
         ET_DYN | ET_EXEC => {}
-        Type(_) => return None,
+        _ => return None,
     }
-    match elf_file.get_section(".interp") {
+    match elf_file.section_header_by_name(".interp").ok().flatten() {
         None => {
             // When the elf file does not has interp section
             // 1. if we have default loader, we will return the default loader
@@ -329,15 +353,23 @@ fn auto_dynamic_loader(
 }
 
 fn read_loader_from_interp_section(filename: &str) -> Option<(String, String)> {
-    let elf_file = match elf::File::open_path(filename) {
+    let elf_data = match std::fs::read(filename) {
+        Err(_) => return None,
+        Ok(elf_data) => elf_data,
+    };
+    let elf_file = match ElfBytes::<AnyEndian>::minimal_parse(&elf_data) {
         Err(_) => return None,
         Ok(elf_file) => elf_file,
     };
-    let interp_scan = match elf_file.get_section(".interp") {
+    let interp_scan = match elf_file.section_header_by_name(".interp").ok().flatten() {
         None => return None,
         Some(section) => section,
     };
-    let interp_data = String::from_utf8_lossy(&interp_scan.data).to_string();
+    let interp_scan_data = match elf_file.section_data(&interp_scan) {
+        Ok((data, None)) => data,
+        _ => return None,
+    };
+    let interp_data = String::from_utf8_lossy(interp_scan_data).to_string();
     let inlined_elf_loader = interp_data.trim_end_matches("\u{0}"); // this interp_data always with a \u{0} at end
     debug!("the loader of {} is {}.", filename, inlined_elf_loader);
     let inlined_elf_loader_path = PathBuf::from(inlined_elf_loader);
