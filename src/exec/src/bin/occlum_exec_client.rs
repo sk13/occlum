@@ -31,7 +31,6 @@ use std::process;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::{thread, time};
-use tempdir::TempDir;
 
 /// Execute the command on server
 ///
@@ -61,7 +60,10 @@ fn exec_command(
         enviroments_list.push(env.to_string());
     }
 
-    let tmp_dir = TempDir::new("occlum_tmp").expect("create temp dir");
+    let tmp_dir = tempfile::Builder::new()
+        .prefix("occlum_tmp")
+        .tempdir()
+        .expect("create temp dir");
     let sockpath = tmp_dir.path().join("occlum.sock");
 
     let listener = UnixListener::bind(&sockpath).unwrap();

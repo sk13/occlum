@@ -1,6 +1,4 @@
-extern crate chrono;
 extern crate nix;
-extern crate timer;
 use crate::occlum_exec::{
     ExecCommRequest, ExecCommResponse, ExecCommResponse_ExecutionStatus, GetResultRequest,
     GetResultResponse, GetResultResponse_ExecutionStatus, HealthCheckRequest, HealthCheckResponse,
@@ -20,9 +18,9 @@ use std::os::unix::io::RawFd;
 use std::os::unix::net::UnixStream;
 use std::panic;
 use std::ptr;
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::thread;
-use timer::{Guard, Timer};
+use std::time::Duration;
 
 pub enum ServerStatus {
     Stopped,
@@ -67,7 +65,7 @@ pub struct OcclumExecImpl {
     //process_id, return value, execution status
     commands: Arc<Mutex<HashMap<i32, (Option<i32>, bool)>>>,
     execution_lock: Arc<(Mutex<ServerStatus>, Condvar)>,
-    stop_timer: Arc<Mutex<Option<(Timer, Guard)>>>,
+    stop_timer: Arc<Mutex<Option<mpsc::Sender<()>>>>,
 }
 
 impl OcclumExecImpl {
@@ -147,8 +145,7 @@ impl OcclumExec for OcclumExecImpl {
         // If one status query command or execute new command request comes from client, and at that
         // time the timer is still waiting, the timer would be cancelled.
         let lock = self.execution_lock.clone();
-        let timer = timer::Timer::new();
-        let guard = timer.schedule_with_delay(chrono::Duration::seconds(time as i64), move || {
+        let guard = schedule_with_delay(Duration::from_secs(time.into()), move || {
             if rust_occlum_pal_kill(-1, SIGKILL).is_err() {
                 warn!("SIGKILL failed.")
             }
@@ -157,8 +154,8 @@ impl OcclumExec for OcclumExecImpl {
             cvar.notify_one();
         });
 
-        // We could not drop the timer and guard until timer is triggered.
-        *self.stop_timer.lock().unwrap() = Some((timer, guard));
+        // Dropping the guard cancels the timer
+        *self.stop_timer.lock().unwrap() = Some(guard);
 
         resp.finish(StopResponse::default())
     }
@@ -296,6 +293,22 @@ impl OcclumExec for OcclumExecImpl {
             })
         }
     }
+}
+
+/// Runs the action in a new thread after the delay, unless the returned guard
+/// is dropped before.
+fn schedule_with_delay<F>(delay: Duration, action: F) -> mpsc::Sender<()>
+where
+    F: FnOnce() + Send + 'static,
+{
+    let (guard, cancelled) = mpsc::channel::<()>();
+    thread::spawn(move || {
+        // Dropping the guard disconnects the channel
+        if let Err(mpsc::RecvTimeoutError::Timeout) = cancelled.recv_timeout(delay) {
+            action();
+        }
+    });
+    guard
 }
 
 /*
