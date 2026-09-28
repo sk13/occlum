@@ -179,6 +179,34 @@ pub fn signals_left_to_main_thread(thread: &ThreadRef, process: &ProcessRef) -> 
     handled_signals & !main_thread_sig_mask
 }
 
+/// Returns whether the given thread has a pending signal that deliver_signal would
+/// dequeue and not discard, i.e., one with a user handler or one that terminates
+/// the process.
+///
+/// A blocking syscall uses this to decide whether to return EINTR when the host
+/// interrupts it, which it does for threads with pending signals, see
+/// broadcast_interrupts. Signals that deliver_signal discards, e.g., SIGCHLD with
+/// the default action, do not interrupt it, as on Linux, which discards them when
+/// they are sent.
+pub fn has_signal_to_deliver(thread: &ThreadRef, process: &ProcessRef) -> bool {
+    let sig_mask = *thread.sig_mask().read().unwrap() | *thread.sig_tmp_mask().read().unwrap();
+    let process_sig_mask = sig_mask | signals_left_to_main_thread(thread, process);
+    let process_pending = process.sig_queues().read().unwrap().pending() & !process_sig_mask;
+    let thread_pending = thread.sig_queues().read().unwrap().pending() & !sig_mask;
+
+    let dispositions = process.sig_dispositions().read().unwrap();
+    (process_pending | thread_pending)
+        .iter()
+        .any(|signum| match dispositions.get(signum) {
+            SigAction::Ign => false,
+            SigAction::Dfl => matches!(
+                SigDefaultAction::from_signum(signum),
+                SigDefaultAction::Term | SigDefaultAction::Core
+            ),
+            SigAction::User { .. } => true,
+        })
+}
+
 /// Force delivering the given signal to the current thread, without checking the thread's
 /// signal mask.
 ///

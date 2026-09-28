@@ -60,6 +60,34 @@ where
 
         self.inner.lock().unwrap().result
     }
+
+    /// Sleep until woken, or until the current thread is interrupted: its process
+    /// is forced to exit, or it has a signal to deliver.
+    ///
+    /// Returns whether the waiter has been woken. An interrupted waiter remains in
+    /// its wait queue; the caller removes it with WaitQueue::del_waiter, and then
+    /// checks with result() whether it has been woken in the meantime.
+    pub fn sleep_until_woken_or_interrupted(&self) -> bool {
+        let thread = current!();
+        let process = thread.process();
+        loop {
+            if self.inner.lock().unwrap().is_woken {
+                return true;
+            }
+            if process.is_forced_to_exit() || crate::signal::has_signal_to_deliver(&thread, process)
+            {
+                return false;
+            }
+            // The wait also returns when the host interrupts it with a signal, which
+            // it does for threads with pending signals, see broadcast_interrupts
+            wait_event(self.thread);
+        }
+    }
+
+    /// Returns the result of the wakeup, if the waiter has been woken.
+    pub fn result(&self) -> Option<R> {
+        self.inner.lock().unwrap().result
+    }
 }
 
 #[derive(Debug)]
@@ -87,6 +115,12 @@ where
             thread: waiter.thread,
             inner: waiter.inner.clone(),
         });
+    }
+
+    /// Remove the waiter from the queue, if it has not been woken yet.
+    pub fn del_waiter(&mut self, waiter: &Waiter<D, R>) {
+        self.waiters
+            .retain(|queued| !Arc::ptr_eq(&queued.inner, &waiter.inner));
     }
 
     pub fn del_and_wake_one_waiter<F>(&mut self, cond: F) -> usize

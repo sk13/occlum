@@ -119,9 +119,18 @@ pub fn do_wait4(child_filter: &ProcessFilter, options: WaitOptions) -> Result<(p
     // After adding the waiter, we can safely release the lock on the process inner
     // without risking missing events from the process's children.
     drop(process_inner);
-    // Wait until a child has interesting events
-    if let Some(zombie_pid) = waiter.sleep_until_woken_with_result() {
-        let mut process_inner = process.inner();
+    // Wait until a child has interesting events, or a signal interrupts the wait
+    let is_woken = waiter.sleep_until_woken_or_interrupted();
+    let mut process_inner = process.inner();
+    if !is_woken {
+        // An exiting child wakes a waiter with this lock held, so once the waiter
+        // is removed, its result tells whether a child woke it in the meantime
+        process_inner
+            .waiting_children_mut()
+            .unwrap()
+            .del_waiter(&waiter);
+    }
+    if let Some(zombie_pid) = waiter.result() {
         let exit_status = free_zombie_child(process_inner, zombie_pid);
         Ok((zombie_pid, exit_status))
     } else {

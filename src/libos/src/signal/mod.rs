@@ -8,7 +8,9 @@ pub use self::c_types::{sigaction_t, siginfo_t, sigset_t, stack_t};
 pub use self::constants::*;
 pub use self::do_kill::do_kill_from_outside_enclave;
 pub use self::do_sigprocmask::MaskOp;
-pub use self::do_sigreturn::{deliver_signal, force_signal, signals_left_to_main_thread};
+pub use self::do_sigreturn::{
+    deliver_signal, force_signal, has_signal_to_deliver, signals_left_to_main_thread,
+};
 pub use self::sig_dispositions::SigDispositions;
 pub use self::sig_num::SigNum;
 pub use self::sig_queues::SigQueues;
