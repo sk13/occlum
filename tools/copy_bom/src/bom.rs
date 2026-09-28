@@ -12,7 +12,6 @@ use crate::util::{
     lazy_check_missing_libraries, mkdir, resolve_envs, warn_on_nonempty_image_dir,
 };
 use serde::{Deserialize, Serialize};
-use serde_yaml;
 use std::collections::{HashSet, VecDeque};
 use std::hash::Hash;
 use std::path::PathBuf;
@@ -167,8 +166,11 @@ impl Bom {
     }
 
     /// init a bom from a yaml string
-    fn from_yaml_string(yaml: &str) -> Result<Self, serde_yaml::Error> {
-        serde_yaml::from_str(yaml)
+    fn from_yaml_string(yaml: &str) -> Result<Self, serde_saphyr::Error> {
+        // Only true and false are booleans, as in YAML 1.2
+        let mut options = serde_saphyr::Options::default();
+        options.strict_booleans = true;
+        serde_saphyr::from_str_with_options(yaml, options)
     }
 
     /// init a bom from a yaml file
