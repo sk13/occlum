@@ -249,7 +249,7 @@ impl OcclumExec for OcclumExecImpl {
             // Run the command in a thread
             // Use a 8MB stack for rust started thread
             const DEFAULT_STACK_SIZE: usize = 8 * 1024 * 1024;
-            thread::Builder::new()
+            if let Err(e) = thread::Builder::new()
                 .stack_size(DEFAULT_STACK_SIZE)
                 .spawn(move || {
                     let mut exit_status = Box::new(0);
@@ -272,7 +272,16 @@ impl OcclumExec for OcclumExecImpl {
                     );
                     signal::kill(Pid::from_raw(client_process_id as i32), Signal::SIGUSR1)
                         .unwrap_or_default();
+                })
+            {
+                error!("Failed to start a thread for process {}: {}", process_id, e);
+                self.commands.lock().unwrap().remove(&process_id);
+                return resp.finish(ExecCommResponse {
+                    status: ExecCommResponse_ExecutionStatus::LAUNCH_FAILED,
+                    process_id: 0,
+                    ..Default::default()
                 });
+            }
 
             resp.finish(ExecCommResponse {
                 status: ExecCommResponse_ExecutionStatus::RUNNING,
