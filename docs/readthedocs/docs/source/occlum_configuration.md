@@ -184,6 +184,48 @@ In general, three optional fields have been added to the existing Occlum.json co
 
 More details please refer to [edmm_config_guide](./edmm_config_guide.md).
 
+## Network Policy
+
+In Occlum, all sockets except those of `AF_UNIX` are sockets of the host: the data sent with IP sockets leaves the enclave, and the host sees it. The optional `network_policy` restricts which programs may use which addresses, e.g., so that only a TLS proxy communicates outside the enclave, while the application talks to it with `AF_UNIX` sockets. Like the rest of `Occlum.json`, the policy is part of the enclave configuration, which the LibOS verifies, so that the host cannot change it.
+
+```json
+{
+    "network_policy": {
+        "rules": [
+            {
+                // The program to which the rule applies (optional)
+                "program": "/bin/envoy",
+                // The local addresses to which sockets may be bound
+                "bind": ["0.0.0.0:8443"],
+                // The destinations to which sockets may connect or send
+                "connect": ["*:8443"],
+                // Whether raw IP, AF_PACKET and other sockets are allowed (default: false)
+                "raw": false
+            }
+        ]
+    }
+}
+```
+
+Without `network_policy`, all socket operations are allowed. With it, a socket operation fails with `EACCES` unless a rule of the current program allows it:
+
+* `bind`: binding an IP socket with `bind()` or `sctp_bindx()`, and `listen()`, which binds an unbound socket, need a pattern that matches the local address.
+* `connect`: `connect()`, `sctp_connectx()`, and `sendto()`, `sendmsg()` and `sendmmsg()` with a destination address need a pattern that matches the destination.
+* `raw`: raw IP sockets, `AF_PACKET` sockets and sockets of domains other than `AF_UNIX`, `AF_NETLINK`, `AF_INET` and `AF_INET6` need a rule with `"raw": true`, as their addresses do not determine their destinations.
+
+A pattern has the form `<address>:<port>`:
+
+* The address is `*` (any IPv4 or IPv6 address), an IPv4 address or network (`127.0.0.1`, `10.0.0.0/8`), or an IPv6 address or network in brackets (`[::1]`, `[fd00::/8]`). `0.0.0.0` and `[::]` are the addresses that bind a socket to all interfaces, not wildcards. IPv4-mapped IPv6 addresses match the patterns of their IPv4 addresses.
+* The port is `*`, a port (`8443`) or a range of ports (`9000-9099`).
+
+Where the policy cannot determine the destination, only `*` matches: IP options and IPv6 routing headers may route packets through other addresses, and Linux takes `AF_UNSPEC` addresses of IPv4 sockets for IPv4 addresses.
+
+The rules with a `program` apply to the processes that run it, i.e., whose executable (for a script, its interpreter) has that absolute path, with `.` and `..` resolved, but not symbolic links. The rules without a `program` apply to all programs that no rule names. So the rules of a program replace the general rules for it, and a policy whose only rule names Envoy lets no other program use the network.
+
+`AF_UNIX` sockets, which stay inside the enclave, are not restricted, nor are `AF_NETLINK` sockets, which reach the kernel of the host, but not the network. The LibOS logs denied operations as warnings (`OCCLUM_LOG_LEVEL=warn`), and fails to start if the policy is invalid; unknown fields in `network_policy` make `occlum build` fail.
+
+The host sees all data that programs send with IP sockets and decides where the packets go. So the policy restricts which programs hand which data to the host, and for which destinations, but not where the host delivers the packets.
+
 ## Runtime Resource Configuration for Occlum process
 
 Occlum has enabled per process resource configuration via [prlimit](https://man7.org/linux/man-pages//man2/prlimit.2.html) syscall and shell built-in command [ulimit](https://fishshell.com/docs/current/cmds/ulimit.html).

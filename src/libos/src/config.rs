@@ -9,6 +9,7 @@ use std::mem::size_of;
 use std::path::{Path, PathBuf};
 use std::sgxfs::SgxFile;
 
+use crate::net::NetworkPolicy;
 use crate::util::mem_util::from_user;
 
 use log::{set_max_level, LevelFilter};
@@ -108,6 +109,7 @@ pub struct Config {
     pub env: ConfigEnv,
     pub app: Vec<ConfigApp>,
     pub feature: ConfigFeature,
+    pub network_policy: Option<NetworkPolicy>,
 }
 
 #[derive(Debug)]
@@ -208,6 +210,10 @@ impl Config {
             app
         };
         let feature = ConfigFeature::from_input(&input.feature)?;
+        let network_policy = match &input.network_policy {
+            Some(input) => Some(NetworkPolicy::from_input(input)?),
+            None => None,
+        };
 
         if input.disable_log {
             log::set_max_level(LevelFilter::Off);
@@ -229,6 +235,7 @@ impl Config {
             env,
             app,
             feature,
+            network_policy,
         })
     }
 
@@ -422,6 +429,8 @@ struct InputConfig {
     pub app: Vec<InputConfigApp>,
     #[serde(default)]
     pub feature: InputConfigFeature,
+    #[serde(default)]
+    pub network_policy: Option<InputConfigNetworkPolicy>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -556,6 +565,26 @@ struct InputConfigFeature {
     pub enable_edmm: bool,
     #[serde(default)]
     pub enable_posix_shm: bool,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct InputConfigNetworkPolicy {
+    #[serde(default)]
+    pub rules: Vec<InputConfigNetworkRule>,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct InputConfigNetworkRule {
+    #[serde(default)]
+    pub program: Option<String>,
+    #[serde(default)]
+    pub bind: Vec<String>,
+    #[serde(default)]
+    pub connect: Vec<String>,
+    #[serde(default)]
+    pub raw: bool,
 }
 
 impl Default for InputConfigFeature {

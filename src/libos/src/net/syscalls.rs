@@ -17,6 +17,7 @@ use std::convert::TryFrom;
 use time::{timespec_t, timeval_t};
 use util::mem_util::from_user;
 
+use super::policy;
 use super::*;
 
 use crate::fs::StatusFlags;
@@ -39,6 +40,7 @@ pub fn do_socket(domain: c_int, socket_type: c_int, protocol: c_int) -> Result<i
         "socket domain: {:?}, type: {:?}, protocol: {:?}",
         domain, socket_type, protocol
     );
+    policy::check_socket(domain, socket_type)?;
 
     let mut file_ref: Option<Arc<dyn File>> = None;
 
@@ -121,6 +123,7 @@ pub fn do_bind(fd: c_int, addr: *const libc::sockaddr, addr_len: libc::socklen_t
     };
 
     trace!("bind to addr: {:?}", addr);
+    policy::check_bind(&addr)?;
 
     let file_ref = current!().file(fd as FileDesc)?;
     if let Ok(socket) = file_ref.as_host_socket() {
@@ -141,6 +144,10 @@ pub fn do_bind(fd: c_int, addr: *const libc::sockaddr, addr_len: libc::socklen_t
 pub fn do_listen(fd: c_int, backlog: c_int) -> Result<isize> {
     let file_ref = current!().file(fd as FileDesc)?;
     if let Ok(socket) = file_ref.as_host_socket() {
+        // Listening binds an unbound socket to a port
+        if policy::is_enabled() {
+            policy::check_listen(&socket.addr()?)?;
+        }
         socket.listen(backlog)?;
     } else if let Ok(unix_socket) = file_ref.as_unix_socket() {
         unix_socket.listen(backlog)?;
@@ -152,6 +159,9 @@ pub fn do_listen(fd: c_int, backlog: c_int) -> Result<isize> {
         } else {
             backlog as u32
         };
+        if policy::is_enabled() {
+            policy::check_bind(&uring_socket.addr()?)?;
+        }
         uring_socket.listen(backlog)?;
     } else {
         return_errno!(ENOTSOCK, "not a socket");
@@ -180,6 +190,9 @@ pub fn do_connect(
         } else {
             None
         };
+        if let Some(addr) = &addr_option {
+            policy::check_connect_raw(addr)?;
+        }
 
         socket.connect(addr_option.as_ref())?;
         return Ok(0);
@@ -191,6 +204,7 @@ pub fn do_connect(
         let addr = AnyAddr::from_c_storage(&sockaddr_storage, addr_len)?;
         addr
     };
+    policy::check_connect(&addr)?;
 
     if let Ok(unix_socket) = file_ref.as_unix_socket() {
         // TODO: support AF_UNSPEC address for datagram socket use
@@ -295,6 +309,14 @@ pub fn do_setsockopt(
     let file_ref = current!().file(fd as FileDesc)?;
 
     let optval = from_user::make_slice(optval as *const u8, optlen as usize)?;
+    // The network policy checks the addresses in some options, which are then
+    // set from the checked copy
+    let checked_optval = policy::check_setsockopt(level, optname, optval)?;
+    let optval: &'static [u8] = match &checked_optval {
+        // Safety: the copy lives until the option has been set below
+        Some(copy) => unsafe { std::slice::from_raw_parts(copy.as_ptr(), copy.len()) },
+        None => optval,
+    };
 
     if let Ok(host_socket) = file_ref.as_host_socket() {
         let mut cmd = new_host_setsockopt_cmd(level, optname, optval)?;
@@ -321,6 +343,7 @@ pub fn do_getsockopt(
         "getsockopt: fd: {}, level: {}, optname: {}, optval: {:?}, optlen: {:?}",
         fd, level, optname, optval, optlen
     );
+    policy::check_getsockopt(level, optname)?;
     let optlen_mut = from_user::make_mut_ref(optlen)?;
     let optlen = *optlen_mut;
     let optval_mut = from_user::make_mut_slice(optval as *mut u8, optlen as usize)?;
@@ -427,6 +450,7 @@ pub fn do_sendto(
             Some(AnyAddr::from_c_storage(&addr_storage, addr_len as _)?)
         }
     };
+    policy::check_send(addr.as_ref(), None)?;
 
     from_user::check_array(base as *const u8, len)?;
     let buf = unsafe { std::slice::from_raw_parts(base as *const u8, len as usize) };
@@ -538,6 +562,8 @@ pub fn do_sendmsg(fd: c_int, msg_ptr: *const libc::msghdr, flags_c: c_int) -> Re
     );
 
     let (addr, bufs, control) = extract_msghdr_from_user(msg_ptr)?;
+    let checked_control = check_send_msg(addr.as_ref(), control)?;
+    let control = checked_control.as_deref().or(control);
     let flags = SendFlags::from_bits_truncate(flags_c);
 
     let file_ref = current!().file(fd as FileDesc)?;
@@ -615,6 +641,8 @@ pub fn do_sendmmsg(
     if let Ok(host_socket) = file_ref.as_host_socket() {
         for mmsg in (msgvec) {
             let (addr, bufs, control) = extract_msghdr_from_user(&mmsg.msg_hdr)?;
+            let checked_control = check_send_msg(addr.as_ref(), control)?;
+            let control = checked_control.as_deref().or(control);
 
             if host_socket
                 .sendmsg(&bufs[..], flags, addr, control)
@@ -634,6 +662,8 @@ pub fn do_sendmmsg(
     } else if let Ok(uring_socket) = file_ref.as_uring_socket() {
         for mmsg in (msgvec) {
             let (addr, bufs, control) = extract_msghdr_from_user(&mmsg.msg_hdr)?;
+            let checked_control = check_send_msg(addr.as_ref(), control)?;
+            let control = checked_control.as_deref().or(control);
 
             if uring_socket
                 .sendmsg(&bufs[..], addr, flags, control)
@@ -1328,6 +1358,19 @@ fn copy_bytes_to_user(src_buf: &[u8], dst_buf: &mut [u8], dst_len: &mut u32) {
     let copy_len = dst_buf.len().min(src_buf.len());
     dst_buf[..copy_len].copy_from_slice(&src_buf[..copy_len]);
     *dst_len = copy_len as _;
+}
+
+/// Checks the destination address and control messages of a message to send
+/// against the network policy. Returns a copy of the control messages if the
+/// check depends on them, which must then be sent instead of those in user
+/// memory.
+fn check_send_msg(addr: Option<&AnyAddr>, control: Option<&[u8]>) -> Result<Option<Vec<u8>>> {
+    if !policy::is_enabled() {
+        return Ok(None);
+    }
+    let control = control.map(|control| control.to_vec());
+    policy::check_send(addr, control.as_deref())?;
+    Ok(control)
 }
 
 fn extract_msghdr_from_user<'a>(

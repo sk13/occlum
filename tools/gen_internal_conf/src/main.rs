@@ -572,6 +572,7 @@ fn main() {
             disable_log: disable_log,
             app: app_config,
             feature: occlum_config.feature.clone(),
+            network_policy: occlum_config.network_policy.clone(),
         };
 
         let occlum_json_str = serde_json::to_string_pretty(&occlum_json_config).unwrap();
@@ -764,6 +765,8 @@ struct OcclumConfiguration {
     metadata: OcclumMetadata,
     feature: OcclumFeature,
     mount: Vec<OcclumMount>,
+    #[serde(default)]
+    network_policy: Option<OcclumNetworkPolicy>,
 }
 
 #[derive(Debug, PartialEq, Deserialize)]
@@ -819,6 +822,27 @@ struct OcclumFeature {
     enable_edmm: bool,
     #[serde(default)]
     enable_posix_shm: bool,
+}
+
+// Unknown fields are errors, so that a misspelled field cannot weaken the policy
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct OcclumNetworkPolicy {
+    #[serde(default)]
+    rules: Vec<OcclumNetworkRule>,
+}
+
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct OcclumNetworkRule {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    program: Option<String>,
+    #[serde(default)]
+    bind: Vec<String>,
+    #[serde(default)]
+    connect: Vec<String>,
+    #[serde(default)]
+    raw: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -906,4 +930,6 @@ struct InternalOcclumJson {
     disable_log: bool,
     app: serde_json::Value,
     feature: OcclumFeature,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    network_policy: Option<OcclumNetworkPolicy>,
 }

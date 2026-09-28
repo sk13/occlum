@@ -6,6 +6,7 @@ pub use self::io_multiplexing::{
     clear_notifier_status, notify_thread, wait_for_notification, AsEpollFile, EpollEvent, IoEvent,
     PollEvent, PollEventFlags, PollFd, THREAD_NOTIFIERS,
 };
+pub use self::policy::NetworkPolicy;
 pub use self::socket::{
     mmsghdr, socketpair, unix_socket, Addr, AnyAddr, AsUnixSocket, Domain, GetAcceptConnCmd,
     GetDomainCmd, GetErrorCmd, GetOutputAsBytes, GetPeerNameCmd, GetRecvBufSizeCmd,
@@ -17,6 +18,7 @@ pub use self::socket::{
 pub use self::syscalls::*;
 
 mod io_multiplexing;
+mod policy;
 mod socket;
 mod syscalls;
 
