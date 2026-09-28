@@ -258,7 +258,7 @@ impl ShmManager {
         Ok(())
     }
 
-    fn vma_of(chunk: &ChunkRef) -> SgxMutexGuard<VMArea> {
+    fn vma_of(chunk: &ChunkRef) -> SgxMutexGuard<'_, VMArea> {
         match chunk.internal() {
             ChunkType::SingleVMA(vma) => vma.lock().unwrap(),
             ChunkType::MultiVMA(_) => unreachable!(),

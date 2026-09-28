@@ -14,7 +14,6 @@ mod sys;
 
 use errno::prelude::*;
 use lazy_static::lazy_static;
-use log::trace;
 use std::convert::TryFrom;
 use std::time::Duration;
 use std::{hint, str};

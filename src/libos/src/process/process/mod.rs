@@ -188,7 +188,7 @@ impl Process {
     /// Get the internal representation of the process.
     ///
     /// For the purpose of encapsulation, this method is invisible to other subsystems.
-    pub(super) fn inner(&self) -> SgxMutexGuard<ProcessInner> {
+    pub(super) fn inner(&self) -> SgxMutexGuard<'_, ProcessInner> {
         self.inner.lock().unwrap()
     }
 }

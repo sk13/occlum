@@ -306,7 +306,7 @@ impl INode for HNode {
 impl HNode {
     /// Ensure to open the file and store a `File` into `self.file`,
     /// return the `MutexGuard`.
-    fn open_file(&self) -> Result<MutexGuard<Option<fs::File>>> {
+    fn open_file(&self) -> Result<MutexGuard<'_, Option<fs::File>>> {
         let mut maybe_file = self.file.lock().unwrap();
         if maybe_file.is_none() {
             let file = try_std!(fs::OpenOptions::new()

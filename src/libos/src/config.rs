@@ -1,3 +1,7 @@
+// The Deserialize derive of the serde_derive in deps/serde-sgx defines the
+// impls in named constants
+#![allow(non_local_definitions)]
+
 use super::*;
 use crate::std::untrusted::path::PathEx;
 use crate::util::sgx::allow_debug as sgx_allow_debug;
@@ -16,8 +20,7 @@ use log::{set_max_level, LevelFilter};
 
 lazy_static! {
     pub static ref LIBOS_CONFIG: Config = {
-        let config_path =
-            unsafe { format!("{}{}", INSTANCE_DIR, "/build/.Occlum_sys.json.protected") };
+        let config_path = format!("{}{}", instance_dir(), "/build/.Occlum_sys.json.protected");
         let expected_mac = conf_get_hardcoded_file_mac();
         match load_config(&config_path, &expected_mac) {
             Err(e) => {
@@ -339,7 +342,7 @@ impl ConfigMount {
         let source = if source.is_none() {
             None
         } else {
-            let path = unsafe { PathBuf::from(&INSTANCE_DIR) };
+            let path = PathBuf::from(instance_dir());
             path.join(source.unwrap()).canonicalize().ok()
         };
         let options = ConfigMountOptions::from_input(&input.options)?;

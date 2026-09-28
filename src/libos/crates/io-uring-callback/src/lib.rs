@@ -102,7 +102,6 @@
 //! io_uring.wait_completions(1);
 //! ```
 
-#![feature(get_mut_unchecked)]
 #![cfg_attr(feature = "sgx", no_std)]
 
 #[cfg(feature = "sgx")]

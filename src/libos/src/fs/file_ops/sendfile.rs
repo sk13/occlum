@@ -26,7 +26,7 @@ pub fn do_sendfile(
         return_errno!(EBADF, "The out file is non-writable");
     }
 
-    let mut buffer: [u8; 1024 * 11] = unsafe { MaybeUninit::uninit().assume_init() };
+    let mut buffer = [0u8; 1024 * 11];
 
     let mut read_offset = match offset {
         Some(offset) => offset,

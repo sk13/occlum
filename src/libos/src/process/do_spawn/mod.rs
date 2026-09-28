@@ -165,7 +165,7 @@ fn new_process_common(
     reuse_tid: Option<ThreadId>,
     parent_process: Option<ProcessRef>,
 ) -> Result<ProcessRef> {
-    let mut argv = argv.clone().to_vec();
+    let mut argv = argv.to_vec();
     let (is_script, elf_file, mut elf_buf, elf_header) =
         load_exec_file_hdr_to_vec(file_path, current_ref)?;
 

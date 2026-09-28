@@ -72,7 +72,7 @@ impl Chunk {
         &self.internal
     }
 
-    pub fn get_vma_for_single_vma_chunk(&self) -> SgxMutexGuard<VMArea> {
+    pub fn get_vma_for_single_vma_chunk(&self) -> SgxMutexGuard<'_, VMArea> {
         match self.internal() {
             ChunkType::SingleVMA(vma) => return vma.lock().unwrap(),
             ChunkType::MultiVMA(internal_manager) => unreachable!(),

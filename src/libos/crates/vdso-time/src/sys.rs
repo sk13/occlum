@@ -6,7 +6,7 @@ pub const PAGE_SIZE: u64 = 4096;
 pub const CLOCK_TAI: usize = 11;
 pub const VDSO_BASES: usize = CLOCK_TAI + 1;
 
-#[cfg(not(any(arget_arch = "x86", target_arch = "x86_64")))]
+#[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
 compile_error!("Only support x86 or x86_64 architecture now.");
 
 /// Reads the current value of the processor’s time-stamp counter.
@@ -100,10 +100,14 @@ pub trait VdsoData {
     fn seq(&self) -> u32;
     fn clock_mode(&self) -> i32;
     fn cycle_last(&self) -> u64;
+    // The fields of vdso_data that the time calculation does not use
+    #[allow(dead_code)]
     fn mask(&self) -> u64;
     fn mult(&self) -> u32;
     fn shift(&self) -> u32;
+    #[allow(dead_code)]
     fn tz_minuteswest(&self) -> i32;
+    #[allow(dead_code)]
     fn tz_dsttime(&self) -> i32;
 
     fn vdsodata_ptr(vdso_addr: u64) -> *const Self

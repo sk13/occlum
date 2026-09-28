@@ -10,7 +10,7 @@ pub struct Iovs<'a> {
 }
 
 impl<'a> Iovs<'a> {
-    pub fn new(slices: Vec<&'a [u8]>) -> Iovs {
+    pub fn new(slices: Vec<&'a [u8]>) -> Iovs<'a> {
         Self { iovs: slices }
     }
 

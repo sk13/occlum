@@ -36,7 +36,7 @@ impl UntrustedSliceAlloc {
         }
 
         let layout = Layout::from_size_align(buf_size, 1)?;
-        let buf_ptr = unsafe { UNTRUSTED_ALLOC.allocate(layout)?.as_mut_ptr() };
+        let buf_ptr = UNTRUSTED_ALLOC.allocate(layout)?.as_mut_ptr();
 
         let buf_pos = AtomicUsize::new(0);
         Ok(Self {
@@ -50,13 +50,13 @@ impl UntrustedSliceAlloc {
         UntrustedSliceAllocGuard { alloc: self }
     }
 
-    fn new_slice(&self, src_slice: &[u8]) -> Result<UntrustedSlice> {
+    fn new_slice(&self, src_slice: &[u8]) -> Result<UntrustedSlice<'_>> {
         let mut new_slice = self.new_slice_mut(src_slice.len())?;
         new_slice.read_from_slice(src_slice)?;
         Ok(new_slice)
     }
 
-    fn new_slice_mut(&self, new_slice_len: usize) -> Result<UntrustedSlice> {
+    fn new_slice_mut(&self, new_slice_len: usize) -> Result<UntrustedSlice<'_>> {
         let new_slice_ptr = {
             // Move self.buf_pos forward if enough space _atomically_.
             let old_pos = self
@@ -109,10 +109,10 @@ pub struct UntrustedSliceAllocGuard<'a> {
 }
 
 impl<'a> UntrustedSliceAllocGuard<'a> {
-    pub fn new_slice(&self, src_slice: &[u8]) -> Result<UntrustedSlice> {
+    pub fn new_slice(&self, src_slice: &[u8]) -> Result<UntrustedSlice<'_>> {
         self.alloc.new_slice(src_slice)
     }
-    pub fn new_slice_mut(&self, new_slice_len: usize) -> Result<UntrustedSlice> {
+    pub fn new_slice_mut(&self, new_slice_len: usize) -> Result<UntrustedSlice<'_>> {
         self.alloc.new_slice_mut(new_slice_len)
     }
 }

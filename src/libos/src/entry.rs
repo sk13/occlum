@@ -19,8 +19,15 @@ use crate::util::sgx::allow_debug as sgx_allow_debug;
 use crate::vm::USER_SPACE_VM_MANAGER;
 use sgx_tse::*;
 
-pub static mut INSTANCE_DIR: String = String::new();
+// Set once when the LibOS is initialized
+static mut INSTANCE_DIR: String = String::new();
 static mut ENCLAVE_PATH: String = String::new();
+
+/// Returns the directory of the Occlum instance.
+pub fn instance_dir() -> &'static str {
+    // Safety: INSTANCE_DIR is only modified when the LibOS is initialized
+    unsafe { &*(&raw const INSTANCE_DIR) }
+}
 
 /// Note about memory ordering:
 /// HAS_INIT need to synchronize the relevant resources in interrupt::init().
@@ -90,9 +97,10 @@ pub extern "C" fn occlum_ecall_init(
 
         unsafe {
             let dir_str: &str = CStr::from_ptr(instance_dir).to_str().unwrap();
-            INSTANCE_DIR.push_str(dir_str);
-            ENCLAVE_PATH.push_str(&INSTANCE_DIR);
-            ENCLAVE_PATH.push_str("/build/lib/libocclum-libos.signed.so");
+            (*(&raw mut INSTANCE_DIR)).push_str(dir_str);
+            let enclave_path = &mut *(&raw mut ENCLAVE_PATH);
+            enclave_path.push_str(dir_str);
+            enclave_path.push_str("/build/lib/libocclum-libos.signed.so");
         }
 
         interrupt::init();
@@ -111,7 +119,7 @@ pub extern "C" fn occlum_ecall_init(
 
         HAS_INIT.store(true, Ordering::Release);
         // Enable global backtrace
-        unsafe { backtrace::enable_backtrace(&ENCLAVE_PATH, PrintFormat::Short) };
+        unsafe { backtrace::enable_backtrace(&*(&raw const ENCLAVE_PATH), PrintFormat::Short) };
 
         // Add hook for allocation error
         std::alloc::set_alloc_error_hook(oom_handle);

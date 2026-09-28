@@ -46,7 +46,7 @@ impl VMManager {
         &self.gap_range
     }
 
-    pub fn internal(&self) -> SgxMutexGuard<InternalVMManager> {
+    pub fn internal(&self) -> SgxMutexGuard<'_, InternalVMManager> {
         self.internal.lock().unwrap()
     }
 

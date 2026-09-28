@@ -4,9 +4,7 @@
 #![cfg_attr(not(target_env = "sgx"), no_std)]
 #![cfg_attr(target_env = "sgx", feature(rustc_private))]
 #![feature(allocator_api)]
-#![feature(core_intrinsics)]
 #![feature(stmt_expr_attributes)]
-#![feature(alloc_layout_extra)]
 #![feature(trace_macros)]
 // for !Send in rw_lock
 #![feature(negative_impls)]
@@ -17,18 +15,8 @@
 #![feature(get_mut_unchecked)]
 // for std::hint::black_box
 #![feature(test)]
-#![feature(atomic_from_mut)]
-#![feature(btree_extract_if)]
-#![feature(arbitrary_enum_discriminant)]
-// for core::ptr::non_null::NonNull addr() method
-#![feature(strict_provenance)]
-// for VMArea::can_merge_vmas
-#![feature(is_some_and)]
 // for edmm_api macro
 #![feature(linkage)]
-#![feature(new_uninit)]
-#![feature(raw_ref_op)]
-#![feature(let_chains)]
 
 #[macro_use]
 extern crate alloc;
@@ -72,7 +60,7 @@ use sgx_trts::libc;
 use sgx_types::*;
 use std::backtrace::{self, PrintFormat};
 use std::ffi::CStr; // a borrowed C string
-use std::panic;
+use std::panic::{self};
 
 use crate::prelude::*;
 use crate::process::pid_t;

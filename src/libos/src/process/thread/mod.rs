@@ -307,7 +307,7 @@ impl Thread {
         threads.len()
     }
 
-    pub(super) fn inner(&self) -> SgxMutexGuard<ThreadInner> {
+    pub(super) fn inner(&self) -> SgxMutexGuard<'_, ThreadInner> {
         self.inner.lock().unwrap()
     }
 

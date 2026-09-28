@@ -94,12 +94,12 @@ impl CpuSet {
     }
 
     /// Returns an iterator that allows accessing the underlying bits.
-    pub fn iter(&self) -> Iter {
+    pub fn iter(&self) -> Iter<'_> {
         self.bits.iter()
     }
 
     /// Returns an iterator that allows modifying the underlying bits.
-    pub fn iter_mut(&mut self) -> IterMut {
+    pub fn iter_mut(&mut self) -> IterMut<'_> {
         self.bits.iter_mut()
     }
 

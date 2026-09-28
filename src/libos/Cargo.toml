@@ -69,3 +69,8 @@ sgx_trts = { path = "../../deps/rust-sgx-sdk/sgx_trts" }
 sgx_tse = { path = "../../deps/rust-sgx-sdk/sgx_tse" }
 sgx_tcrypto = { path = "../../deps/rust-sgx-sdk/sgx_tcrypto" }
 sgx_cov = { path = "../../deps/rust-sgx-sdk/sgx_cov", optional = true }
+
+[lints.rust]
+# The Deserialize derive of the serde_derive in deps/serde-sgx checks the
+# feature that Clippy used to set
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("cargo-clippy"))'] }

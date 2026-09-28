@@ -1,7 +1,6 @@
 use core::hint;
 use core::sync::atomic::AtomicBool;
 use core::time::Duration;
-use std::mem::MaybeUninit;
 use std::ptr::{self};
 
 use atomic::Ordering;
@@ -405,7 +404,7 @@ impl Inner {
 
     fn gen_iovecs_from_send_buf(&mut self) -> ([libc::iovec; 2], usize) {
         let mut iovecs_len = 0;
-        let mut iovecs = unsafe { MaybeUninit::<[libc::iovec; 2]>::uninit().assume_init() };
+        let mut iovecs: [libc::iovec; 2] = unsafe { std::mem::zeroed() };
         self.send_buf.with_consumer_view(|part0, part1| {
             debug_assert!(part0.len() > 0);
 

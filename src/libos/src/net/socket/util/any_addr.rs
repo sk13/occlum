@@ -1,4 +1,4 @@
-use std::mem::{self, MaybeUninit};
+use std::mem;
 
 use crate::net::socket::Domain;
 use crate::prelude::*;
@@ -62,8 +62,7 @@ impl AnyAddr {
             Self::Unix(unix_addr) => unix_addr.to_c_storage(),
             Self::Raw(raw_addr) => raw_addr.to_c_storage(),
             Self::Unspec => {
-                let mut sockaddr_storage =
-                    unsafe { MaybeUninit::<libc::sockaddr_storage>::uninit().assume_init() };
+                let mut sockaddr_storage = unsafe { mem::zeroed::<libc::sockaddr_storage>() };
                 sockaddr_storage.ss_family = libc::AF_UNSPEC as _;
                 (sockaddr_storage, mem::size_of::<libc::sa_family_t>())
             }
@@ -79,8 +78,7 @@ impl AnyAddr {
             Self::Unix(unix_addr) => unix_addr.to_raw(),
             Self::Raw(raw_addr) => *raw_addr,
             Self::Unspec => {
-                let mut sockaddr_storage =
-                    unsafe { MaybeUninit::<libc::sockaddr_storage>::uninit().assume_init() };
+                let mut sockaddr_storage = unsafe { mem::zeroed::<libc::sockaddr_storage>() };
                 sockaddr_storage.ss_family = libc::AF_UNSPEC as _;
                 SockAddr::from_c_storage(&sockaddr_storage, mem::size_of::<libc::sa_family_t>())
             }

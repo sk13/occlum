@@ -11,7 +11,7 @@ pub struct ErrorBacktrace<'a> {
 }
 
 impl<'a> ErrorBacktrace<'a> {
-    fn new(last_error: &'a Error) -> ErrorBacktrace {
+    fn new(last_error: &'a Error) -> ErrorBacktrace<'a> {
         ErrorBacktrace {
             next_error: Some(last_error),
         }
@@ -49,7 +49,7 @@ impl Error {
         new_err
     }
 
-    pub fn backtrace(&self) -> ErrorBacktrace {
+    pub fn backtrace(&self) -> ErrorBacktrace<'_> {
         ErrorBacktrace::new(self)
     }
 }

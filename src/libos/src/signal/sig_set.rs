@@ -51,7 +51,7 @@ impl SigSet {
         (self.bits & (1_u64 << idx)) != 0
     }
 
-    pub fn iter(&self) -> SigSetIter {
+    pub fn iter(&self) -> SigSetIter<'_> {
         SigSetIter::new(self)
     }
 

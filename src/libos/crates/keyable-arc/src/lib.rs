@@ -177,7 +177,8 @@ impl<T: ?Sized> Into<Arc<T>> for KeyableArc<T> {
 
 impl<T: ?Sized> PartialEq for KeyableArc<T> {
     fn eq(&self, other: &Self) -> bool {
-        Arc::as_ptr(&self.0) == Arc::as_ptr(&other.0)
+        // Compare the addresses only, as a trait object may have more than one vtable
+        core::ptr::addr_eq(Arc::as_ptr(&self.0), Arc::as_ptr(&other.0))
     }
 }
 
@@ -185,7 +186,7 @@ impl<T: ?Sized> Eq for KeyableArc<T> {}
 
 impl<T: ?Sized> Hash for KeyableArc<T> {
     fn hash<H: Hasher>(&self, s: &mut H) {
-        Arc::as_ptr(&self.0).hash(s)
+        Arc::as_ptr(&self.0).cast::<()>().hash(s)
     }
 }
 
@@ -275,7 +276,7 @@ impl<T: ?Sized> Into<Weak<T>> for KeyableWeak<T> {
 
 impl<T: ?Sized> PartialEq for KeyableWeak<T> {
     fn eq(&self, other: &Self) -> bool {
-        self.0.as_ptr() == other.0.as_ptr()
+        core::ptr::addr_eq(self.0.as_ptr(), other.0.as_ptr())
     }
 }
 
@@ -289,7 +290,10 @@ impl<T: ?Sized> Eq for KeyableWeak<T> {}
 
 impl<T: ?Sized> Ord for KeyableWeak<T> {
     fn cmp(&self, other: &Self) -> core::cmp::Ordering {
-        self.0.as_ptr().cmp(&other.0.as_ptr())
+        self.0
+            .as_ptr()
+            .cast::<()>()
+            .cmp(&other.0.as_ptr().cast::<()>())
     }
 }
 

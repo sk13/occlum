@@ -83,7 +83,7 @@ impl TryFrom<FsInfo> for Statfs {
             || info.magic == rcore_fs_sefs::SEFS_MAGIC as usize
         {
             let mut host_statfs = {
-                let host_rootfs_dir = unsafe { format!("{}{}", INSTANCE_DIR, "/run/mount/__ROOT") };
+                let host_rootfs_dir = format!("{}{}", instance_dir(), "/run/mount/__ROOT");
                 fetch_host_statfs(&host_rootfs_dir)?
             };
             host_statfs.f_type = info.magic;

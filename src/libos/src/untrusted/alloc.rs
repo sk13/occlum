@@ -3,7 +3,7 @@ use std::alloc::{AllocError, Allocator, Layout};
 use std::ptr::{self, write_bytes, NonNull};
 
 /// The global memory allocator for untrusted memory
-pub static mut UNTRUSTED_ALLOC: UntrustedAlloc = UntrustedAlloc;
+pub static UNTRUSTED_ALLOC: UntrustedAlloc = UntrustedAlloc;
 
 pub struct UntrustedAlloc;
 

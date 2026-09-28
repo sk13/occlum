@@ -1,5 +1,5 @@
 use std::ffi::CString;
-use std::mem::{self, MaybeUninit};
+use std::mem;
 
 use crate::prelude::*;
 
@@ -31,8 +31,7 @@ pub fn do_connect<A: Addr>(host_fd: FileDesc, addr: Option<&A>) -> Result<()> {
     let (c_addr_storage, c_addr_len) = match addr {
         Some(addr_inner) => addr_inner.to_c_storage(),
         None => {
-            let mut sockaddr_storage =
-                unsafe { MaybeUninit::<libc::sockaddr_storage>::uninit().assume_init() };
+            let mut sockaddr_storage = unsafe { mem::zeroed::<libc::sockaddr_storage>() };
             sockaddr_storage.ss_family = libc::AF_UNSPEC as _;
             (sockaddr_storage, mem::size_of::<libc::sa_family_t>())
         }

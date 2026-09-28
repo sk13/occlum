@@ -1,5 +1,5 @@
 use crate::prelude::*;
-use std::mem::{size_of, size_of_val, MaybeUninit};
+use std::mem::{self, size_of, size_of_val};
 /// A trait for all C version of C socket addresses.
 ///
 /// There are four types that implement this trait:
@@ -16,8 +16,7 @@ pub trait CSockAddr {
 
     /// Returns the address in `libc::sockaddr_storage` along with its length.
     fn to_c_storage(&self) -> (libc::sockaddr_storage, usize) {
-        let mut c_storage =
-            unsafe { MaybeUninit::<libc::sockaddr_storage>::uninit().assume_init() };
+        let mut c_storage = unsafe { mem::zeroed::<libc::sockaddr_storage>() };
 
         c_storage.ss_family = self.c_family();
         let offset = size_of_val(&c_storage.ss_family);
