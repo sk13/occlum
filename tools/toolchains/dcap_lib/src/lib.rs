@@ -89,6 +89,6 @@ pub extern "C" fn dcap_quote_close(handle: *mut c_void) {
     dcap.close();
 
     unsafe {
-        Box::from_raw(handle);
+        drop(Box::from_raw(handle));
     }
 }
