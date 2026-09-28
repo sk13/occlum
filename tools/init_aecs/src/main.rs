@@ -31,17 +31,6 @@ extern "C" {
 
 #[derive(Deserialize, Serialize, Debug)]
 #[warn(dead_code)]
-struct MRsValue {
-    pub mr_enclave: String,
-    pub mr_signer: String,
-    pub isv_prod_id: u32,
-    pub isv_svn: u32,
-    pub config_svn: u32,
-    pub debuggable: bool,
-}
-
-#[derive(Deserialize, Serialize, Debug)]
-#[warn(dead_code)]
 struct RAConfig {
     ua_ias_url: String,
     ua_ias_spid: String,
