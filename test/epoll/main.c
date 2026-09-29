@@ -221,6 +221,47 @@ out:
     return ret;
 }
 
+// Closing a socket that is in an epoll file, and in its ready list, closes it
+// right away: its peer gets end of file without another epoll_wait()
+int test_epoll_close_ready_socket() {
+    int sockets[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) < 0) {
+        THROW_ERROR("failed to create a socket pair");
+    }
+    int epfd = epoll_create1(0);
+    struct epoll_event event = { .events = EPOLLIN, .data.fd = sockets[0] };
+    char c = 'x';
+    int ret = -1;
+    if (epfd < 0 || epoll_ctl(epfd, EPOLL_CTL_ADD, sockets[0], &event) < 0 ||
+            write(sockets[1], &c, 1) != 1) {
+        printf("\t\tERROR: failed to set up: %s\n", strerror(errno));
+        goto out;
+    }
+    // Level-triggered, so the socket stays in the ready list. Without unread
+    // data, as closing the socket would reset the connection otherwise.
+    if (epoll_wait(epfd, &event, 1, 1000) != 1 || read(sockets[0], &c, 1) != 1) {
+        printf("\t\tERROR: no event or no data\n");
+        goto out;
+    }
+    close(sockets[0]);
+    sockets[0] = -1;
+
+    struct pollfd pfd = { .fd = sockets[1], .events = POLLIN };
+    if (poll(&pfd, 1, 1000) != 1 || read(sockets[1], &c, 1) != 0) {
+        printf("\t\tERROR: the peer did not get end of file\n");
+        goto out;
+    }
+    ret = 0;
+
+out:
+    if (sockets[0] >= 0) {
+        close(sockets[0]);
+    }
+    close(sockets[1]);
+    close(epfd);
+    return ret;
+}
+
 // ============================================================================
 // Test suite main
 // ============================================================================
@@ -229,6 +270,7 @@ static test_case_t test_cases[] = {
     TEST_CASE(test_epoll_ctl_eventfd),
     TEST_CASE(test_epoll_ctl_uds),
     TEST_CASE(test_epoll_ctl_after_dup2),
+    TEST_CASE(test_epoll_close_ready_socket),
 };
 
 int main() {

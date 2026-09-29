@@ -280,14 +280,14 @@ impl EpollFile {
 
     fn del_interest(&self, fd: FileDesc) -> Result<()> {
         // A critical section protected by the lock of self.interest
-        {
+        let ep_entry = {
             let mut interest_entries = self.interest.lock().unwrap();
-            // There is a data-dependency, so this cannot be re-ordered,
-            // `Relaxed` should be enough.
             let ep_entry = interest_entries
                 .remove(&fd)
                 .ok_or_else(|| errno!(ENOENT, "fd is not added"))?;
-            ep_entry.is_deleted.store(true, Ordering::Relaxed);
+            // push_ready_iter() does not add the entry to the ready list
+            // after this
+            ep_entry.is_deleted.store(true, Ordering::Release);
 
             let notifier = ep_entry.file.notifier().unwrap();
             let weak_observer = self.weak_self.clone() as Weak<dyn Observer<_>>;
@@ -296,7 +296,17 @@ impl EpollFile {
             if ep_entry.file.host_fd().is_some() {
                 self.host_file_epoller.del_file(&ep_entry.file);
             }
-        }
+            ep_entry
+        };
+
+        // Remove the entry from the ready list, too, where it would keep the
+        // file open, e.g., after close(), until the next wait. The file is
+        // dropped with ep_entry only after the lock, as dropping it may
+        // trigger events, which push_ready() handles with the lock.
+        self.ready
+            .lock()
+            .unwrap()
+            .retain(|entry| !Arc::ptr_eq(entry, &ep_entry));
         Ok(())
     }
 
@@ -355,7 +365,9 @@ impl EpollFile {
         {
             let mut ready_entries = self.ready.lock().unwrap();
             for ep_entry in ep_entries {
-                if ep_entry.is_ready.load(Ordering::Relaxed) {
+                if ep_entry.is_ready.load(Ordering::Relaxed)
+                    || ep_entry.is_deleted.load(Ordering::Acquire)
+                {
                     continue;
                 }
 
