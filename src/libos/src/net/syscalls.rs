@@ -150,7 +150,10 @@ pub fn do_listen(fd: c_int, backlog: c_int) -> Result<isize> {
         }
         socket.listen(backlog)?;
     } else if let Ok(unix_socket) = file_ref.as_unix_socket() {
-        unix_socket.listen(backlog)?;
+        // Like Linux, which takes a negative backlog for a large one, e.g.,
+        // Envoy passes -1 by default
+        let backlog = (backlog as u32).min(SOMAXCONN);
+        unix_socket.listen(backlog as i32)?;
     } else if let Ok(uring_socket) = file_ref.as_uring_socket() {
         let backlog: u32 = if backlog as u32 > SOMAXCONN {
             SOMAXCONN

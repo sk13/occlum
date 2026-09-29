@@ -182,7 +182,7 @@ impl Stream {
     }
 
     pub fn listen(&self, backlog: i32) -> Result<()> {
-        //TODO: restrict backlog accroding to /proc/sys/net/core/somaxconn
+        // do_listen() limits the backlog to SOMAXCONN
         if backlog < 0 {
             return_errno!(EINVAL, "negative backlog is not supported");
         }

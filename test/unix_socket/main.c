@@ -701,6 +701,37 @@ int test_getsockopt() {
     return ret;
 }
 
+// Like Linux, listen() takes a negative backlog for the maximum one
+int test_listen_negative_backlog() {
+    const char *path = "/tmp/unix_socket_backlog";
+    struct sockaddr_un addr = {0};
+    addr.sun_family = AF_UNIX;
+    strcpy(addr.sun_path, path);
+    socklen_t addr_len = strlen(addr.sun_path) + sizeof(addr.sun_family) + 1;
+
+    int listen_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (listen_fd < 0) {
+        THROW_ERROR("failed to create a unix socket");
+    }
+    if (bind(listen_fd, (struct sockaddr *)&addr, addr_len) < 0 ||
+            listen(listen_fd, -1) < 0) {
+        close(listen_fd);
+        unlink(path);
+        THROW_ERROR("failed to listen with a negative backlog");
+    }
+
+    int client_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    int ret = 0;
+    if (client_fd < 0 || connect(client_fd, (struct sockaddr *)&addr, addr_len) < 0) {
+        printf("\t\tERROR: failed to connect: %s\n", strerror(errno));
+        ret = -1;
+    }
+    close(client_fd);
+    close(listen_fd);
+    unlink(path);
+    return ret;
+}
+
 static test_case_t test_cases[] = {
     TEST_CASE(test_unix_socket_inter_process),
     TEST_CASE(test_socketpair_inter_process),
@@ -712,6 +743,7 @@ static test_case_t test_cases[] = {
     TEST_CASE(test_epoll_wait),
     TEST_CASE(test_sendmsg_recvmsg),
     TEST_CASE(test_getsockopt),
+    TEST_CASE(test_listen_negative_backlog),
 };
 
 int main(int argc, const char *argv[]) {
