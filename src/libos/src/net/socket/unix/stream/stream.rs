@@ -1,5 +1,5 @@
 use super::address_space::ADDRESS_SPACE;
-use super::endpoint::{end_pair, Ancillary, Endpoint, RelayNotifier};
+use super::endpoint::{end_pair, Ancillary, Endpoint, RelayNotifier, DEFAULT_BUF_SIZE};
 use super::*;
 use events::{Event, EventFilter, Notifier, Observer};
 use fs::channel::Channel;
@@ -70,6 +70,72 @@ impl Stream {
             }
         }
         return_errno!(ENOTCONN, "the socket is not connected");
+    }
+
+    /// Returns the value of a socket option for a buffer of `optlen` bytes. As
+    /// the LibOS ignores setsockopt() for unix sockets, the options that it
+    /// does not determine have their default values, which are zero.
+    pub fn getsockopt(&self, level: i32, optname: i32, optlen: u32) -> Result<Vec<u8>> {
+        if level != libc::SOL_SOCKET {
+            return_errno!(EOPNOTSUPP, "unix sockets have no options at this level");
+        }
+        let opt = SockOptName::try_from(optname)
+            .map_err(|_| errno!(ENOPROTOOPT, "Not a valid optname"))?;
+        let int = |value: i32| value.to_ne_bytes().to_vec();
+
+        Ok(match opt {
+            SockOptName::SO_TYPE => int(libc::SOCK_STREAM),
+            SockOptName::SO_DOMAIN => int(libc::AF_UNIX),
+            SockOptName::SO_PROTOCOL => int(0),
+            // Connecting never fails asynchronously, see connect()
+            SockOptName::SO_ERROR => int(0),
+            SockOptName::SO_ACCEPTCONN => {
+                int(matches!(&*self.inner(), Status::Listening(_)) as i32)
+            }
+            SockOptName::SO_SNDBUF | SockOptName::SO_RCVBUF => int(DEFAULT_BUF_SIZE as i32),
+            SockOptName::SO_RCVLOWAT | SockOptName::SO_SNDLOWAT => int(1),
+            SockOptName::SO_PEERCRED => {
+                // The process that connected, for an accepted socket, and the
+                // one that accepted, for a connected one. All processes run
+                // as root. Like Linux, pid 0 and uid/gid -1 if unknown.
+                let cred = match self.peer_ancillary() {
+                    Some(peer) => libc::ucred {
+                        pid: peer.pid() as libc::pid_t,
+                        uid: 0,
+                        gid: 0,
+                    },
+                    None => libc::ucred {
+                        pid: 0,
+                        uid: u32::MAX,
+                        gid: u32::MAX,
+                    },
+                };
+                [
+                    cred.pid.to_ne_bytes(),
+                    cred.uid.to_ne_bytes(),
+                    cred.gid.to_ne_bytes(),
+                ]
+                .concat()
+            }
+            SockOptName::SO_PEERNAME => {
+                let (storage, len) = self.peer_addr()?.to_c_storage();
+                // Like Linux, which does not truncate the address
+                if len < optlen as usize {
+                    return_errno!(EINVAL, "the address is shorter than the buffer");
+                }
+                let bytes =
+                    unsafe { std::slice::from_raw_parts(&storage as *const _ as *const u8, len) };
+                bytes.to_vec()
+            }
+            SockOptName::SO_PEERSEC => return_errno!(ENOPROTOOPT, "no security context"),
+            SockOptName::SO_LINGER => vec![0; std::mem::size_of::<libc::linger>()],
+            SockOptName::SO_RCVTIMEO_OLD | SockOptName::SO_SNDTIMEO_OLD => {
+                vec![0; std::mem::size_of::<libc::timeval>()]
+            }
+            // No device, no groups
+            SockOptName::SO_BINDTODEVICE | SockOptName::SO_PEERGROUPS => Vec::new(),
+            _ => int(0),
+        })
     }
 
     pub fn bind(&self, addr: &UnixAddr) -> Result<()> {
@@ -166,9 +232,7 @@ impl Stream {
                 if let Some(self_addr) = self_addr_opt {
                     end_self.set_addr(self_addr);
                 }
-                end_self.set_ancillary(Ancillary {
-                    tid: current!().tid(),
-                });
+                end_self.set_ancillary(Ancillary::of_current());
 
                 ADDRESS_SPACE
                     .push_incoming(addr, end_incoming)
@@ -198,9 +262,7 @@ impl Stream {
             Status::Listening(addr) => {
                 let endpoint = ADDRESS_SPACE.pop_incoming(&addr)?;
                 endpoint.set_nonblocking(flags.contains(SocketFlags::SOCK_NONBLOCK));
-                endpoint.set_ancillary(Ancillary {
-                    tid: current!().tid(),
-                });
+                endpoint.set_ancillary(Ancillary::of_current());
                 let notifier = Arc::new(RelayNotifier::new());
                 notifier.observe_endpoint(&endpoint);
 

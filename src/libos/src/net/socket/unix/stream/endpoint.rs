@@ -157,11 +157,25 @@ impl Inner {
 #[derive(Clone, Debug)]
 pub struct Ancillary {
     pub(super) tid: pid_t, // currently store tid to locate file table
+    pid: pid_t,
 }
 
 impl Ancillary {
+    /// The ancillary data of the current thread, which connects or accepts
+    pub fn of_current() -> Self {
+        let current = current!();
+        Self {
+            tid: current.tid(),
+            pid: current.process().pid(),
+        }
+    }
+
     pub fn tid(&self) -> pid_t {
         self.tid
+    }
+
+    pub fn pid(&self) -> pid_t {
+        self.pid
     }
 }
 

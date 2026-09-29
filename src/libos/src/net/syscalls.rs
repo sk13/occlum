@@ -363,7 +363,8 @@ pub fn do_getsockopt(
         let src_optval = get_optval(cmd.as_ref())?;
         copy_bytes_to_user(src_optval, optval_mut, optlen_mut);
     } else if let Ok(unix_socket) = file_ref.as_unix_socket() {
-        warn!("getsockopt for unix socket is unimplemented");
+        let src_optval = unix_socket.getsockopt(level, optname, optlen)?;
+        copy_bytes_to_user(&src_optval, optval_mut, optlen_mut);
     } else if let Ok(uring_socket) = file_ref.as_uring_socket() {
         let mut cmd = new_uring_getsockopt_cmd(level, optname, optlen, uring_socket.get_type())?;
         uring_socket.ioctl(cmd.as_mut())?;

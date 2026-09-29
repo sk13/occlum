@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <sys/socket.h>
@@ -11,6 +12,10 @@
 #include <string.h>
 #include <sys/epoll.h>
 #include <pthread.h>
+#include <errno.h>
+#include <stddef.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
 
 #include "test.h"
 
@@ -558,6 +563,144 @@ int test_sendmsg_recvmsg() {
     return ret;
 }
 
+// Reads an int option into a buffer filled with a pattern, which must be
+// overwritten
+static int get_int_sockopt(int fd, int optname, int *value) {
+    *value = 0x7f7f7f7f;
+    socklen_t len = sizeof(*value);
+    if (getsockopt(fd, SOL_SOCKET, optname, value, &len) < 0) {
+        THROW_ERROR("getsockopt(%d) failed", optname);
+    }
+    if (len != sizeof(*value) || *value == 0x7f7f7f7f) {
+        THROW_ERROR("getsockopt(%d) did not return a value", optname);
+    }
+    return 0;
+}
+
+static int check_int_sockopt(int fd, int optname, int expected) {
+    int value;
+    if (get_int_sockopt(fd, optname, &value) < 0) {
+        return -1;
+    }
+    if (value != expected) {
+        THROW_ERROR("getsockopt(%d) returned %d instead of %d", optname, value, expected);
+    }
+    return 0;
+}
+
+static int check_peercred(int fd, pid_t pid) {
+    struct ucred cred;
+    memset(&cred, 0x7f, sizeof(cred));
+    socklen_t len = sizeof(cred);
+    if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &cred, &len) < 0) {
+        THROW_ERROR("getsockopt(SO_PEERCRED) failed");
+    }
+    if (len != sizeof(cred) || cred.pid != pid || cred.uid != getuid() ||
+            cred.gid != getgid()) {
+        THROW_ERROR("SO_PEERCRED returned pid %d, uid %u, gid %u", cred.pid, cred.uid,
+                    cred.gid);
+    }
+    return 0;
+}
+
+static int check_sockopts(const char *path, int listen_fd, int client_fd,
+                          int accepted_fd) {
+    if (check_int_sockopt(listen_fd, SO_TYPE, SOCK_STREAM) < 0 ||
+            check_int_sockopt(listen_fd, SO_DOMAIN, AF_UNIX) < 0 ||
+            check_int_sockopt(listen_fd, SO_PROTOCOL, 0) < 0 ||
+            check_int_sockopt(listen_fd, SO_ACCEPTCONN, 1) < 0 ||
+            check_int_sockopt(client_fd, SO_ACCEPTCONN, 0) < 0 ||
+            check_int_sockopt(client_fd, SO_ERROR, 0) < 0 ||
+            check_int_sockopt(accepted_fd, SO_ERROR, 0) < 0 ||
+            check_peercred(accepted_fd, getpid()) < 0 ||
+            check_peercred(client_fd, getpid()) < 0 ||
+            // The options that cannot be set have their default values
+            check_int_sockopt(accepted_fd, SO_KEEPALIVE, 0) < 0 ||
+            check_int_sockopt(accepted_fd, SO_REUSEADDR, 0) < 0) {
+        return -1;
+    }
+
+    // The length is that of the value
+    struct linger linger;
+    memset(&linger, 0x7f, sizeof(linger));
+    socklen_t len = sizeof(linger);
+    if (getsockopt(accepted_fd, SOL_SOCKET, SO_LINGER, &linger, &len) < 0 ||
+            len != sizeof(linger) || linger.l_onoff != 0) {
+        THROW_ERROR("SO_LINGER returned length %u and l_onoff %d", len, linger.l_onoff);
+    }
+    long long wide = -1;
+    len = sizeof(wide);
+    if (getsockopt(accepted_fd, SOL_SOCKET, SO_KEEPALIVE, &wide, &len) < 0 ||
+            len != sizeof(int)) {
+        THROW_ERROR("SO_KEEPALIVE returned length %u for a longer buffer", len);
+    }
+
+    int bufsize;
+    if (get_int_sockopt(accepted_fd, SO_SNDBUF, &bufsize) < 0) {
+        return -1;
+    }
+    if (bufsize <= 0) {
+        THROW_ERROR("SO_SNDBUF returned %d", bufsize);
+    }
+
+    // Linux fails with EINVAL if the buffer is longer than the address
+    struct sockaddr_un peer = {0};
+    socklen_t peer_len = offsetof(struct sockaddr_un, sun_path) + strlen(path) + 1;
+    if (getsockopt(client_fd, SOL_SOCKET, SO_PEERNAME, &peer, &peer_len) < 0) {
+        THROW_ERROR("getsockopt(SO_PEERNAME) failed");
+    }
+    if (peer.sun_family != AF_UNIX || strcmp(peer.sun_path, path) != 0) {
+        THROW_ERROR("SO_PEERNAME did not return the path of the listener");
+    }
+
+    // Unix sockets have no options of other levels
+    int nodelay;
+    len = sizeof(nodelay);
+    if (getsockopt(accepted_fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, &len) != -1 ||
+            errno != EOPNOTSUPP) {
+        THROW_ERROR("getsockopt(IPPROTO_TCP) did not fail with EOPNOTSUPP");
+    }
+    return 0;
+}
+
+int test_getsockopt() {
+    const char *path = "/tmp/unix_socket_sockopt";
+    struct sockaddr_un addr = {0};
+    addr.sun_family = AF_UNIX;
+    strcpy(addr.sun_path, path);
+    socklen_t addr_len = strlen(addr.sun_path) + sizeof(addr.sun_family) + 1;
+
+    int listen_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (listen_fd < 0) {
+        THROW_ERROR("failed to create a unix socket");
+    }
+    if (bind(listen_fd, (struct sockaddr *)&addr, addr_len) < 0 || listen(listen_fd, 5) < 0) {
+        close(listen_fd);
+        THROW_ERROR("failed to listen");
+    }
+
+    // Like a non-blocking connect of an event loop, which checks SO_ERROR
+    // once the socket becomes writable
+    int client_fd = socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0);
+    int accepted_fd = -1;
+    if (client_fd < 0 ||
+            (connect(client_fd, (struct sockaddr *)&addr, addr_len) < 0 && errno != EINPROGRESS) ||
+            (accepted_fd = accept(listen_fd, NULL, NULL)) < 0) {
+        printf("\t\tERROR: failed to connect: %s\n", strerror(errno));
+        close(listen_fd);
+        close(client_fd);
+        unlink(path);
+        return -1;
+    }
+
+    int ret = check_sockopts(path, listen_fd, client_fd, accepted_fd);
+    close(accepted_fd);
+    close(client_fd);
+    close(listen_fd);
+    unlink(path);
+    return ret;
+}
+
 static test_case_t test_cases[] = {
     TEST_CASE(test_unix_socket_inter_process),
     TEST_CASE(test_socketpair_inter_process),
@@ -568,6 +711,7 @@ static test_case_t test_cases[] = {
     TEST_CASE(test_unix_socket_rename),
     TEST_CASE(test_epoll_wait),
     TEST_CASE(test_sendmsg_recvmsg),
+    TEST_CASE(test_getsockopt),
 };
 
 int main(int argc, const char *argv[]) {
