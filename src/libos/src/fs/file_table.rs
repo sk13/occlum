@@ -105,6 +105,11 @@ impl FileTable {
         std::mem::swap(&mut table_entry, &mut table[fd as usize]);
         if table_entry.is_none() {
             self.num_fds += 1;
+        } else {
+            // Like closing the fd, e.g., for dup2(): the epoll files that
+            // monitor the fd drop the replaced file
+            self.broadcast_del(fd);
+            self.try_remove_hostfd(fd);
         }
 
         self.try_insert_hostfd(&file, fd);

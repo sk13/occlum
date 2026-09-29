@@ -163,6 +163,64 @@ int test_epoll_ctl_eventfd() {
     return 0;
 }
 
+// Like closing the fd, replacing a monitored file with dup2() removes it from
+// the epoll file, so that the fd can be added again with the new file. This
+// is how an LD_PRELOAD library such as ip2unix replaces a socket.
+int test_epoll_ctl_after_dup2() {
+    int ret = -1;
+    int epfd = epoll_create1(0);
+    int old_fd = eventfd(1, EFD_NONBLOCK); // readable
+    int new_fd = eventfd(0, EFD_NONBLOCK); // not readable
+    if (epfd < 0 || old_fd < 0 || new_fd < 0) {
+        THROW_ERROR("failed to create the files");
+    }
+
+    struct epoll_event event = { .events = EPOLLIN, .data.u64 = 1 };
+    if (epoll_ctl(epfd, EPOLL_CTL_ADD, old_fd, &event) < 0) {
+        printf("\t\tERROR: epoll_ctl add failed: %s\n", strerror(errno));
+        goto out;
+    }
+    if (dup2(new_fd, old_fd) != old_fd) {
+        printf("\t\tERROR: dup2 failed: %s\n", strerror(errno));
+        goto out;
+    }
+    close(new_fd);
+    new_fd = -1;
+
+    struct epoll_event events[MAXEVENTS];
+    int nfds = epoll_wait(epfd, events, MAXEVENTS, 0);
+    if (nfds != 0) {
+        printf("\t\tERROR: epoll_wait returned %d instead of no event for the replaced file\n",
+               nfds);
+        goto out;
+    }
+
+    event.data.u64 = 2;
+    if (epoll_ctl(epfd, EPOLL_CTL_ADD, old_fd, &event) < 0) {
+        printf("\t\tERROR: epoll_ctl add after dup2 failed: %s\n", strerror(errno));
+        goto out;
+    }
+    uint64_t one = 1;
+    if (write(old_fd, &one, sizeof(one)) != sizeof(one)) {
+        printf("\t\tERROR: failed to write the eventfd: %s\n", strerror(errno));
+        goto out;
+    }
+    nfds = epoll_wait(epfd, events, MAXEVENTS, 0);
+    if (nfds != 1 || events[0].data.u64 != 2) {
+        printf("\t\tERROR: epoll_wait returned %d events instead of one of the new file\n", nfds);
+        goto out;
+    }
+    ret = 0;
+
+out:
+    close(epfd);
+    close(old_fd);
+    if (new_fd >= 0) {
+        close(new_fd);
+    }
+    return ret;
+}
+
 // ============================================================================
 // Test suite main
 // ============================================================================
@@ -170,6 +228,7 @@ int test_epoll_ctl_eventfd() {
 static test_case_t test_cases[] = {
     TEST_CASE(test_epoll_ctl_eventfd),
     TEST_CASE(test_epoll_ctl_uds),
+    TEST_CASE(test_epoll_ctl_after_dup2),
 };
 
 int main() {
