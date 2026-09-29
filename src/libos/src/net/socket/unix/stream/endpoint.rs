@@ -202,8 +202,10 @@ impl RelayNotifier {
     }
 
     pub fn observe_endpoint(self: &Arc<Self>, endpoint: &Endpoint) {
-        endpoint.register_relay_notifier(self);
+        // Before registering, as the peer may write, and so trigger events,
+        // right away
         *self.endpoint.lock().unwrap() = Some(endpoint.clone());
+        endpoint.register_relay_notifier(self);
     }
 }
 

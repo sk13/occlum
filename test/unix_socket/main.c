@@ -814,6 +814,152 @@ int test_unnamed_peer_address() {
     return ret;
 }
 
+#define ACCEPT_WHILE_WRITING_CONNECTIONS 2000
+#define ACCEPT_WHILE_WRITING_WRITES 64
+
+static void *accept_and_read(void *arg) {
+    int listen_fd = *(int *)arg;
+    for (int i = 0; i < ACCEPT_WHILE_WRITING_CONNECTIONS; i++) {
+        int fd = accept(listen_fd, NULL, NULL);
+        if (fd < 0) {
+            return (void *) -1;
+        }
+        char buf[ACCEPT_WHILE_WRITING_WRITES];
+        while (read(fd, buf, sizeof(buf)) > 0) {
+        }
+        close(fd);
+    }
+    return NULL;
+}
+
+// A client writes while the server accepts its connection, which must not
+// race with the setup of the accepted socket
+int test_accept_while_writing() {
+    const char *path = "/tmp/unix_socket_accept_while_writing";
+    struct sockaddr_un addr = {0};
+    addr.sun_family = AF_UNIX;
+    strcpy(addr.sun_path, path);
+    socklen_t addr_len = strlen(addr.sun_path) + sizeof(addr.sun_family) + 1;
+
+    int listen_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (listen_fd < 0) {
+        THROW_ERROR("failed to create a unix socket");
+    }
+    // A backlog for all connections, as connect() fails if it is full
+    if (bind(listen_fd, (struct sockaddr *)&addr, addr_len) < 0 ||
+            listen(listen_fd, ACCEPT_WHILE_WRITING_CONNECTIONS) < 0) {
+        close(listen_fd);
+        unlink(path);
+        THROW_ERROR("failed to listen");
+    }
+    pthread_t server;
+    if (pthread_create(&server, NULL, accept_and_read, &listen_fd) != 0) {
+        close(listen_fd);
+        unlink(path);
+        THROW_ERROR("failed to create the server thread");
+    }
+
+    int ret = 0;
+    for (int i = 0; i < ACCEPT_WHILE_WRITING_CONNECTIONS && ret == 0; i++) {
+        int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+        if (fd < 0 || connect(fd, (struct sockaddr *)&addr, addr_len) < 0) {
+            printf("\t\tERROR: failed to connect: %s\n", strerror(errno));
+            ret = -1;
+        }
+        for (int j = 0; j < ACCEPT_WHILE_WRITING_WRITES && ret == 0; j++) {
+            if (write(fd, "x", 1) != 1) {
+                printf("\t\tERROR: failed to write: %s\n", strerror(errno));
+                ret = -1;
+            }
+        }
+        close(fd);
+    }
+
+    void *server_ret = NULL;
+    if (ret == 0) {
+        pthread_join(server, &server_ret);
+    }
+    close(listen_fd);
+    unlink(path);
+    if (ret == 0 && server_ret != NULL) {
+        THROW_ERROR("the server failed to accept");
+    }
+    return ret;
+}
+
+#define WRITE_AFTER_ACCEPT_CONNECTIONS 2000
+
+static void *accept_and_write(void *arg) {
+    int listen_fd = *(int *)arg;
+    for (int i = 0; i < WRITE_AFTER_ACCEPT_CONNECTIONS; i++) {
+        int fd = accept(listen_fd, NULL, NULL);
+        if (fd < 0 || write(fd, "x", 1) != 1) {
+            return (void *) -1;
+        }
+        char c;
+        read(fd, &c, 1); // until the client closes
+        close(fd);
+    }
+    return NULL;
+}
+
+// The server writes as soon as it accepts; the client, whose socket is in an
+// epoll file already before connect(), must get the event
+int test_epoll_in_after_connect() {
+    const char *path = "/tmp/unix_socket_write_after_accept";
+    struct sockaddr_un addr = {0};
+    addr.sun_family = AF_UNIX;
+    strcpy(addr.sun_path, path);
+    socklen_t addr_len = strlen(addr.sun_path) + sizeof(addr.sun_family) + 1;
+
+    int listen_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    int epfd = epoll_create1(0);
+    if (listen_fd < 0 || epfd < 0) {
+        THROW_ERROR("failed to create a unix socket or an epoll file");
+    }
+    if (bind(listen_fd, (struct sockaddr *)&addr, addr_len) < 0 ||
+            listen(listen_fd, WRITE_AFTER_ACCEPT_CONNECTIONS) < 0) {
+        close(listen_fd);
+        close(epfd);
+        unlink(path);
+        THROW_ERROR("failed to listen");
+    }
+    pthread_t server;
+    if (pthread_create(&server, NULL, accept_and_write, &listen_fd) != 0) {
+        close(listen_fd);
+        close(epfd);
+        unlink(path);
+        THROW_ERROR("failed to create the server thread");
+    }
+
+    int ret = 0;
+    for (int i = 0; i < WRITE_AFTER_ACCEPT_CONNECTIONS && ret == 0; i++) {
+        int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0);
+        struct epoll_event event = { .events = EPOLLIN, .data.fd = fd };
+        if (fd < 0 || epoll_ctl(epfd, EPOLL_CTL_ADD, fd, &event) < 0 ||
+                connect(fd, (struct sockaddr *)&addr, addr_len) < 0) {
+            printf("\t\tERROR: failed to connect: %s\n", strerror(errno));
+            ret = -1;
+        } else if (epoll_wait(epfd, &event, 1, 2000) != 1) {
+            printf("\t\tERROR: no event of connection %d after 2 s\n", i);
+            ret = -1;
+        }
+        close(fd);
+    }
+
+    void *server_ret = NULL;
+    if (ret == 0) {
+        pthread_join(server, &server_ret);
+    }
+    close(listen_fd);
+    close(epfd);
+    unlink(path);
+    if (ret == 0 && server_ret != NULL) {
+        THROW_ERROR("the server failed to accept or write");
+    }
+    return ret;
+}
+
 static test_case_t test_cases[] = {
     TEST_CASE(test_unix_socket_inter_process),
     TEST_CASE(test_socketpair_inter_process),
@@ -827,6 +973,8 @@ static test_case_t test_cases[] = {
     TEST_CASE(test_getsockopt),
     TEST_CASE(test_listen_negative_backlog),
     TEST_CASE(test_unnamed_peer_address),
+    TEST_CASE(test_accept_while_writing),
+    TEST_CASE(test_epoll_in_after_connect),
 };
 
 int main(int argc, const char *argv[]) {

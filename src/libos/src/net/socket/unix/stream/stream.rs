@@ -233,6 +233,8 @@ impl Stream {
                     end_self.set_addr(self_addr);
                 }
                 end_self.set_ancillary(Ancillary::of_current());
+                // Before the listener gets the peer, which may write right away
+                self.notifier.observe_endpoint(&end_self);
 
                 ADDRESS_SPACE
                     .push_incoming(addr, end_incoming)
@@ -240,8 +242,6 @@ impl Stream {
                         EAGAIN => errno!(ECONNREFUSED, "the backlog is full"),
                         _ => e,
                     })?;
-
-                self.notifier.observe_endpoint(&end_self);
 
                 // Notify listener for this event
                 if let Some(listener) = ADDRESS_SPACE.get_listener_ref(addr) {
