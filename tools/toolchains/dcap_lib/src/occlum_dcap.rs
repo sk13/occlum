@@ -65,8 +65,10 @@ impl DcapQuote {
     }
 
     pub fn get_quote_size(&mut self) -> Result<u32, Error> {
-        let size: u32 = 0;
-        let ret = unsafe { libc::ioctl(self.fd, IOCTL_GET_DCAP_QUOTE_SIZE, &size) };
+        // The ioctl writes the size, so it needs a mutable reference; with a
+        // shared one, the compiler may assume that size stays 0
+        let mut size: u32 = 0;
+        let ret = unsafe { libc::ioctl(self.fd, IOCTL_GET_DCAP_QUOTE_SIZE, &mut size) };
         if ret < 0 {
             let os_err = Error::last_os_error();
             println!("OS error: {os_err:?}");
@@ -99,8 +101,8 @@ impl DcapQuote {
     }
 
     pub fn get_supplemental_data_size(&mut self) -> Result<u32, Error> {
-        let size: u32 = 0;
-        let ret = unsafe { libc::ioctl(self.fd, IOCTL_GET_DCAP_SUPPLEMENTAL_SIZE, &size) };
+        let mut size: u32 = 0;
+        let ret = unsafe { libc::ioctl(self.fd, IOCTL_GET_DCAP_SUPPLEMENTAL_SIZE, &mut size) };
         if ret < 0 {
             let os_err = Error::last_os_error();
             println!("OS error: {os_err:?}");
