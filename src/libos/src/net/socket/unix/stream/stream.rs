@@ -63,11 +63,11 @@ impl Stream {
         addr_opt.unwrap_or(UnixAddr::Unnamed)
     }
 
+    /// Returns the address of the peer, which is unnamed unless the peer is
+    /// bound, like in Linux.
     pub fn peer_addr(&self) -> Result<UnixAddr> {
         if let Status::Connected(endpoint) = &*self.inner() {
-            if let Some(addr) = endpoint.peer_addr() {
-                return Ok(addr);
-            }
+            return Ok(endpoint.peer_addr().unwrap_or(UnixAddr::Unnamed));
         }
         return_errno!(ENOTCONN, "the socket is not connected");
     }
@@ -266,7 +266,7 @@ impl Stream {
                 let notifier = Arc::new(RelayNotifier::new());
                 notifier.observe_endpoint(&endpoint);
 
-                let peer_addr = endpoint.peer_addr();
+                let peer_addr = Some(endpoint.peer_addr().unwrap_or(UnixAddr::Unnamed));
 
                 debug!("accept socket from {:?}", peer_addr);
 
@@ -290,7 +290,11 @@ impl Stream {
     // TODO: handle flags
     pub fn recvfrom(&self, buf: &mut [u8], flags: RecvFlags) -> Result<(usize, Option<UnixAddr>)> {
         let data_len = self.read(buf)?;
-        let addr = self.peer_addr().ok();
+        // Like Linux, no address for an unnamed peer
+        let addr = self
+            .peer_addr()
+            .ok()
+            .filter(|addr| *addr != UnixAddr::Unnamed);
 
         debug!("recvfrom {:?}", addr);
 

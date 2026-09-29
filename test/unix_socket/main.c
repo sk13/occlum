@@ -732,6 +732,88 @@ int test_listen_negative_backlog() {
     return ret;
 }
 
+static int check_unnamed(struct sockaddr_un *addr, socklen_t len, const char *call) {
+    if (len != sizeof(sa_family_t) || addr->sun_family != AF_UNIX) {
+        THROW_ERROR("%s returned length %u and family %d for an unnamed peer", call, len,
+                    addr->sun_family);
+    }
+    return 0;
+}
+
+// Like Linux, accept() and getpeername() return an address of the family
+// AF_UNIX without a path for an unnamed peer, i.e., an unbound client, and
+// recvfrom() returns no address
+static int check_unnamed_peer(int listen_fd, int client_fd, int *accepted_fd) {
+    struct sockaddr_un peer;
+    memset(&peer, 0x7f, sizeof(peer));
+    socklen_t len = sizeof(peer);
+    *accepted_fd = accept(listen_fd, (struct sockaddr *)&peer, &len);
+    if (*accepted_fd < 0) {
+        THROW_ERROR("failed to accept");
+    }
+    if (check_unnamed(&peer, len, "accept") < 0) {
+        return -1;
+    }
+
+    memset(&peer, 0x7f, sizeof(peer));
+    len = sizeof(peer);
+    if (getpeername(*accepted_fd, (struct sockaddr *)&peer, &len) < 0) {
+        THROW_ERROR("getpeername failed");
+    }
+    if (check_unnamed(&peer, len, "getpeername") < 0) {
+        return -1;
+    }
+
+    char c = 'x';
+    if (write(client_fd, &c, 1) != 1) {
+        THROW_ERROR("failed to write");
+    }
+    len = sizeof(peer);
+    if (recvfrom(*accepted_fd, &c, 1, 0, (struct sockaddr *)&peer, &len) != 1) {
+        THROW_ERROR("failed to receive");
+    }
+    if (len != 0) {
+        THROW_ERROR("recvfrom returned an address of length %u for an unnamed peer", len);
+    }
+    return 0;
+}
+
+int test_unnamed_peer_address() {
+    const char *path = "/tmp/unix_socket_unnamed";
+    struct sockaddr_un addr = {0};
+    addr.sun_family = AF_UNIX;
+    strcpy(addr.sun_path, path);
+    socklen_t addr_len = strlen(addr.sun_path) + sizeof(addr.sun_family) + 1;
+
+    int listen_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (listen_fd < 0) {
+        THROW_ERROR("failed to create a unix socket");
+    }
+    if (bind(listen_fd, (struct sockaddr *)&addr, addr_len) < 0 || listen(listen_fd, 5) < 0) {
+        close(listen_fd);
+        unlink(path);
+        THROW_ERROR("failed to listen");
+    }
+    int client_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (client_fd < 0 || connect(client_fd, (struct sockaddr *)&addr, addr_len) < 0) {
+        printf("\t\tERROR: failed to connect: %s\n", strerror(errno));
+        close(client_fd);
+        close(listen_fd);
+        unlink(path);
+        return -1;
+    }
+
+    int accepted_fd = -1;
+    int ret = check_unnamed_peer(listen_fd, client_fd, &accepted_fd);
+    if (accepted_fd >= 0) {
+        close(accepted_fd);
+    }
+    close(client_fd);
+    close(listen_fd);
+    unlink(path);
+    return ret;
+}
+
 static test_case_t test_cases[] = {
     TEST_CASE(test_unix_socket_inter_process),
     TEST_CASE(test_socketpair_inter_process),
@@ -744,6 +826,7 @@ static test_case_t test_cases[] = {
     TEST_CASE(test_sendmsg_recvmsg),
     TEST_CASE(test_getsockopt),
     TEST_CASE(test_listen_negative_backlog),
+    TEST_CASE(test_unnamed_peer_address),
 };
 
 int main(int argc, const char *argv[]) {
