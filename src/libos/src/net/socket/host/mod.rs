@@ -1,7 +1,6 @@
 use atomic::Atomic;
 use std::any::Any;
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::mem;
 
 use super::*;
 use crate::fs::{
@@ -21,6 +20,9 @@ pub struct HostSocket {
     host_fd: HostFd,
     host_events: Atomic<IoEvents>,
     notifier: IoNotifier,
+    /// Whether the socket is a TCP socket, as created in the enclave, so that
+    /// the host cannot pretend otherwise
+    is_tcp: bool,
 }
 
 impl HostSocket {
@@ -36,16 +38,20 @@ impl HostSocket {
             protocol
         )) as FileDesc;
         let host_fd = HostFd::new(raw_host_fd);
-        Ok(HostSocket::from_host_fd(host_fd)?)
+        let is_tcp = matches!(domain, Domain::INET | Domain::INET6)
+            && socket_type == SocketType::STREAM
+            && (protocol == 0 || protocol == libc::IPPROTO_TCP);
+        Ok(HostSocket::from_host_fd(host_fd, is_tcp)?)
     }
 
-    fn from_host_fd(host_fd: HostFd) -> Result<HostSocket> {
+    fn from_host_fd(host_fd: HostFd, is_tcp: bool) -> Result<HostSocket> {
         let host_events = Atomic::new(IoEvents::empty());
         let notifier = IoNotifier::new();
         Ok(Self {
             host_fd,
             host_events,
             notifier,
+            is_tcp,
         })
     }
 
@@ -60,22 +66,10 @@ impl HostSocket {
         Ok(())
     }
 
-    /// Returns whether the socket is a TCP socket.
-    pub fn is_tcp(&self) -> Result<bool> {
-        let get_int = |optname: i32| -> Result<i32> {
-            let mut value: i32 = 0;
-            let mut len = mem::size_of::<i32>() as u32;
-            try_libc!(libc::ocall::getsockopt(
-                self.raw_host_fd() as i32,
-                libc::SOL_SOCKET,
-                optname,
-                &mut value as *mut i32 as *mut c_void,
-                &mut len
-            ));
-            Ok(value)
-        };
-        Ok(get_int(libc::SO_TYPE)? == libc::SOCK_STREAM
-            && get_int(libc::SO_PROTOCOL)? == libc::IPPROTO_TCP)
+    /// Returns whether the socket is a TCP socket (or one that a TCP socket
+    /// accepted), according to the arguments of socket() in the enclave
+    pub fn is_tcp(&self) -> bool {
+        self.is_tcp
     }
 
     pub fn listen(&self, backlog: i32) -> Result<()> {
@@ -101,7 +95,7 @@ impl HostSocket {
         } else {
             None
         };
-        Ok((HostSocket::from_host_fd(host_fd)?, addr_option))
+        Ok((HostSocket::from_host_fd(host_fd, self.is_tcp)?, addr_option))
     }
 
     pub fn addr(&self) -> Result<SockAddr> {

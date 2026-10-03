@@ -86,7 +86,7 @@ fn redirect_target(file_ref: &FileRef, op: RedirectOp, addr: &AnyAddr) -> Result
         None => return Ok(None),
     };
     let is_tcp = if let Ok(host_socket) = file_ref.as_host_socket() {
-        host_socket.is_tcp()?
+        host_socket.is_tcp()
     } else if let Ok(uring_socket) = file_ref.as_uring_socket() {
         // The io_uring sockets of type SOCK_STREAM are those of TCP
         uring_socket.get_type() == SocketType::STREAM
