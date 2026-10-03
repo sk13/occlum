@@ -116,6 +116,24 @@ impl FileTable {
         table_entry.map(|entry| entry.file.clone())
     }
 
+    /// Replaces the file at `fd`, keeping close-on-spawn, and returns the old
+    /// file. Unlike put_at(), which closes the old file, the epoll files that
+    /// monitor the fd go on monitoring it, with the new file, e.g., when the
+    /// LibOS replaces a socket with another kind of socket (see
+    /// `net::redirect`).
+    pub fn replace(&mut self, fd: FileDesc, file: FileRef) -> Result<FileRef> {
+        let entry = self
+            .table
+            .get_mut(fd as usize)
+            .and_then(Option::as_mut)
+            .ok_or_else(|| errno!(EBADF, "Invalid file descriptor"))?;
+        let old_file = std::mem::replace(&mut entry.file, file.clone());
+        self.try_remove_hostfd(fd);
+        self.try_insert_hostfd(&file, fd);
+        self.notifier.broadcast(&FileTableEvent::Replace(fd));
+        Ok(old_file)
+    }
+
     pub fn fds(&self) -> Vec<FileDesc> {
         let table = &self.table;
         table
@@ -283,7 +301,11 @@ impl Default for FileTable {
 
 #[derive(Debug, Clone, Copy)]
 pub enum FileTableEvent {
+    // The fd was closed or refers to another file (dup2(), put_at())
     Del(FileDesc),
+    // The file of the fd was replaced, which should not affect its monitoring
+    // (replace())
+    Replace(FileDesc),
 }
 
 impl Event for FileTableEvent {}

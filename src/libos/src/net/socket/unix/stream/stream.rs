@@ -20,6 +20,27 @@ pub struct Stream {
     // Use the internal notifier of RelayNotifier as the notifier of stream socket. It relays the
     // events of the endpoint, too.
     pub(super) notifier: Arc<RelayNotifier>,
+    // The IP addresses that the socket shows if it replaces a TCP socket
+    inet: SgxMutex<Option<InetView>>,
+}
+
+/// The IP socket addresses that a Unix socket shows to the program if it
+/// replaces a TCP socket that the network policy redirects (see
+/// `net::redirect`): the local address, and the peer address if connected.
+#[derive(Debug, Clone)]
+pub struct InetView {
+    pub local: AnyAddr,
+    pub peer: Option<AnyAddr>,
+}
+
+impl InetView {
+    /// Returns AF_INET or AF_INET6.
+    pub fn family(&self) -> i32 {
+        match self.local {
+            AnyAddr::Ipv6(_) => libc::AF_INET6,
+            _ => libc::AF_INET,
+        }
+    }
 }
 
 impl Stream {
@@ -29,6 +50,7 @@ impl Stream {
                 flags.contains(SocketFlags::SOCK_NONBLOCK),
             ))),
             notifier: Arc::new(RelayNotifier::new()),
+            inet: SgxMutex::new(None),
         }
     }
 
@@ -43,11 +65,13 @@ impl Stream {
         let socket_a = Self {
             inner: SgxMutex::new(Status::Connected(end_a)),
             notifier: notifier_a,
+            inet: SgxMutex::new(None),
         };
 
         let socket_b = Self {
             inner: SgxMutex::new(Status::Connected(end_b)),
             notifier: notifier_b,
+            inet: SgxMutex::new(None),
         };
 
         Ok((socket_a, socket_b))
@@ -72,10 +96,31 @@ impl Stream {
         return_errno!(ENOTCONN, "the socket is not connected");
     }
 
+    /// Returns the IP addresses that the socket shows, if it replaces a TCP
+    /// socket.
+    pub fn inet_view(&self) -> Option<InetView> {
+        self.inet.lock().unwrap().clone()
+    }
+
+    pub fn set_inet_view(&self, view: InetView) {
+        *self.inet.lock().unwrap() = Some(view);
+    }
+
     /// Returns the value of a socket option for a buffer of `optlen` bytes. As
     /// the LibOS ignores setsockopt() for unix sockets, the options that it
-    /// does not determine have their default values, which are zero.
+    /// does not determine have their default values, which are zero. A socket
+    /// that replaces a TCP socket has the domain and protocol of that socket,
+    /// and zeros for the options of the IP levels.
     pub fn getsockopt(&self, level: i32, optname: i32, optlen: u32) -> Result<Vec<u8>> {
+        let inet = self.inet_view();
+        if let Some(inet) = &inet {
+            match level {
+                libc::IPPROTO_TCP | libc::IPPROTO_IP | libc::IPPROTO_IPV6 => {
+                    return Ok(vec![0; (optlen as usize).min(256)]);
+                }
+                _ => (),
+            }
+        }
         if level != libc::SOL_SOCKET {
             return_errno!(EOPNOTSUPP, "unix sockets have no options at this level");
         }
@@ -85,8 +130,8 @@ impl Stream {
 
         Ok(match opt {
             SockOptName::SO_TYPE => int(libc::SOCK_STREAM),
-            SockOptName::SO_DOMAIN => int(libc::AF_UNIX),
-            SockOptName::SO_PROTOCOL => int(0),
+            SockOptName::SO_DOMAIN => int(inet.as_ref().map_or(libc::AF_UNIX, InetView::family)),
+            SockOptName::SO_PROTOCOL => int(inet.as_ref().map_or(0, |_| libc::IPPROTO_TCP)),
             // Connecting never fails asynchronously, see connect()
             SockOptName::SO_ERROR => int(0),
             SockOptName::SO_ACCEPTCONN => {
@@ -118,7 +163,11 @@ impl Stream {
                 .concat()
             }
             SockOptName::SO_PEERNAME => {
-                let (storage, len) = self.peer_addr()?.to_c_storage();
+                let (storage, len) = match inet.as_ref().map(|inet| inet.peer.as_ref()) {
+                    Some(Some(peer)) => peer.to_c_storage(),
+                    Some(None) => return_errno!(ENOTCONN, "the socket is not connected"),
+                    None => self.peer_addr()?.to_c_storage(),
+                };
                 // Like Linux, which does not truncate the address
                 if len < optlen as usize {
                     return_errno!(EINVAL, "the address is shorter than the buffer");
@@ -274,6 +323,7 @@ impl Stream {
                     Self {
                         inner: SgxMutex::new(Status::Connected(endpoint)),
                         notifier: notifier,
+                        inet: SgxMutex::new(None),
                     },
                     peer_addr,
                 ))
@@ -290,11 +340,11 @@ impl Stream {
     // TODO: handle flags
     pub fn recvfrom(&self, buf: &mut [u8], flags: RecvFlags) -> Result<(usize, Option<UnixAddr>)> {
         let data_len = self.read(buf)?;
-        // Like Linux, no address for an unnamed peer
+        // Like Linux, no address for an unnamed peer, nor for a TCP socket
         let addr = self
             .peer_addr()
             .ok()
-            .filter(|addr| *addr != UnixAddr::Unnamed);
+            .filter(|addr| *addr != UnixAddr::Unnamed && self.inet_view().is_none());
 
         debug!("recvfrom {:?}", addr);
 

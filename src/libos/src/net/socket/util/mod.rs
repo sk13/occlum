@@ -15,8 +15,8 @@ mod shutdown;
 mod r#type;
 
 pub use self::addr::{
-    Addr, CSockAddr, Ipv4Addr, Ipv4SocketAddr, Ipv6SocketAddr, LinkLayerSocketAddr,
-    NetlinkSocketAddr, SockAddr, UnixAddr,
+    Addr, CSockAddr, Ipv4Addr, Ipv4SocketAddr, Ipv6Addr, Ipv6SocketAddr, LinkLayerSocketAddr,
+    NetlinkSocketAddr, SockAddr, UnixAddr, UnixPath,
 };
 pub use self::any_addr::AnyAddr;
 pub use self::domain::Domain;

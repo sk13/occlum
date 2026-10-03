@@ -588,6 +588,18 @@ pub struct InputConfigNetworkRule {
     pub connect: Vec<String>,
     #[serde(default)]
     pub raw: bool,
+    #[serde(default)]
+    pub redirect: Vec<InputConfigNetworkRedirect>,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct InputConfigNetworkRedirect {
+    #[serde(default)]
+    pub bind: Option<String>,
+    #[serde(default)]
+    pub connect: Option<String>,
+    pub to: String,
 }
 
 impl Default for InputConfigFeature {

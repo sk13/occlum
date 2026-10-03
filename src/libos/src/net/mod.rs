@@ -15,10 +15,12 @@ pub use self::socket::{
     SetRecvTimeoutCmd, SetSendBufSizeCmd, SetSendTimeoutCmd, SetSockOptRawCmd, Shutdown,
     SliceAsLibcIovec, SockAddr, SockOptName, SocketFile, SocketType, UnixAddr, UringSocketType,
 };
+pub(crate) use self::socket::{InetView, UnixPath, UnixStream};
 pub use self::syscalls::*;
 
 mod io_multiplexing;
 mod policy;
+mod redirect;
 mod socket;
 mod syscalls;
 

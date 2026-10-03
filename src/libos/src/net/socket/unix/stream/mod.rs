@@ -5,4 +5,4 @@ mod endpoint;
 mod file;
 mod stream;
 
-pub use stream::Stream;
+pub use stream::{InetView, Stream};

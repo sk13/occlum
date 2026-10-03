@@ -43,7 +43,7 @@ pub use self::ipv6::{Ipv6Addr, Ipv6SocketAddr};
 pub use self::ll_addr::LinkLayerSocketAddr;
 pub use self::netlink_addr::NetlinkSocketAddr;
 pub use self::raw_addr::SockAddr;
-pub use self::unix_addr::UnixAddr;
+pub use self::unix_addr::{UnixAddr, UnixPath};
 
 #[cfg(test)]
 mod tests {

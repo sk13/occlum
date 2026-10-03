@@ -840,6 +840,18 @@ struct OcclumNetworkRule {
     connect: Vec<String>,
     #[serde(default)]
     raw: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    redirect: Vec<OcclumNetworkRedirect>,
+}
+
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct OcclumNetworkRedirect {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    bind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    connect: Option<String>,
+    to: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

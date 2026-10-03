@@ -55,6 +55,9 @@ pub struct EpollFile {
     interest: SgxMutex<HashMap<FileDesc, Arc<EpollEntry>>>,
     // Entries that are probably ready (having events happened).
     ready: SgxMutex<VecDeque<Arc<EpollEntry>>>,
+    // The events and flags of the fds whose files were replaced, which are to
+    // be monitored with the new files (see reattach_replaced()).
+    replaced: SgxMutex<Vec<(FileDesc, EpollEvent, EpollFlags)>>,
     // All threads that are waiting on this epoll file.
     waiters: WaiterQueue,
     // A notifier to broadcast events on this epoll file.
@@ -71,6 +74,7 @@ impl EpollFile {
     pub fn new() -> Arc<Self> {
         let interest = Default::default();
         let ready = Default::default();
+        let replaced = Default::default();
         let waiters = WaiterQueue::new();
         let notifier = IoNotifier::new();
         let host_file_epoller = HostFileEpoller::new();
@@ -80,6 +84,7 @@ impl EpollFile {
         let arc_self = Self {
             interest,
             ready,
+            replaced,
             waiters,
             notifier,
             host_file_epoller,
@@ -121,6 +126,7 @@ impl EpollFile {
 
     pub fn control(&self, cmd: &EpollCtl) -> Result<()> {
         debug!("epoll control: cmd = {:?}", cmd);
+        self.reattach_replaced();
 
         match cmd {
             EpollCtl::Add(fd, event, flags) => {
@@ -159,6 +165,10 @@ impl EpollFile {
 
             // Prepare for the waiter.wait_mut() at the end of the loop
             self.waiters.reset_and_enqueue(waiter.as_ref());
+
+            // Monitor the new files of replaced fds. After the waiter is
+            // enqueued, as a replacement wakes up the waiters.
+            self.reattach_replaced();
 
             // Pop from the ready list to find as many results as possible
             let mut count = 0;
@@ -244,7 +254,16 @@ impl EpollFile {
 
         self.check_flags(&flags);
         self.prepare_event(&mut event);
+        self.add_entry(fd, file, event, flags)
+    }
 
+    fn add_entry(
+        &self,
+        fd: FileDesc,
+        file: FileRef,
+        event: EpollEvent,
+        flags: EpollFlags,
+    ) -> Result<()> {
         let ep_entry = Arc::new(EpollEntry::new(fd, file, event, flags));
 
         // A critical section protected by the lock of self.interest
@@ -485,10 +504,57 @@ impl Observer<IoEvents> for EpollFile {
     }
 }
 
+impl EpollFile {
+    /// Stops monitoring the fd, whose file was replaced, and remembers its
+    /// events and flags to monitor the new file. The file table is locked
+    /// meanwhile, so the new file is monitored later, by the next call of
+    /// control() or wait(), which the waiting threads are woken up for.
+    fn detach_replaced(&self, fd: FileDesc) {
+        let (event, flags) = match self.interest.lock().unwrap().get(&fd) {
+            Some(ep_entry) => {
+                let inner = ep_entry.inner.lock().unwrap();
+                (inner.event, inner.flags)
+            }
+            None => return,
+        };
+        if self.del_interest(fd).is_ok() {
+            self.replaced.lock().unwrap().push((fd, event, flags));
+            self.waiters.dequeue_and_wake_all();
+        }
+    }
+
+    /// Monitors the new files of the fds whose files were replaced. A new
+    /// file is polled right away, so that its events are reported even with
+    /// EPOLLET.
+    fn reattach_replaced(&self) {
+        let replaced = {
+            let mut replaced = self.replaced.lock().unwrap();
+            if replaced.is_empty() {
+                return;
+            }
+            std::mem::take(&mut *replaced)
+        };
+        for (fd, event, flags) in replaced {
+            // A closed fd is no longer in the list, see on_event()
+            if let Ok(file) = current!().file(fd) {
+                let _ = self.add_entry(fd, file, event, flags);
+            }
+        }
+    }
+}
+
 impl Observer<FileTableEvent> for EpollFile {
     fn on_event(&self, event: &FileTableEvent, _metadata: &Option<Weak<dyn Any + Send + Sync>>) {
-        let FileTableEvent::Del(fd) = event;
-        let _ = self.del_interest(*fd);
+        match *event {
+            FileTableEvent::Del(fd) => {
+                let _ = self.del_interest(fd);
+                self.replaced
+                    .lock()
+                    .unwrap()
+                    .retain(|(replaced_fd, _, _)| *replaced_fd != fd);
+            }
+            FileTableEvent::Replace(fd) => self.detach_replaced(fd),
+        }
     }
 }
 

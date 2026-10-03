@@ -59,6 +59,19 @@
                 "program": "/bin/network_policy",
                 "bind": ["127.0.0.1:8443", "127.0.0.1:9000-9001", "[::1]:8443"],
                 "connect": ["127.0.0.1:8443", "127.0.0.1:9000-9001", "10.0.0.0/8:53"]
+            },
+            {
+                "program": "/bin/network_redirect",
+                "bind": ["127.0.0.1:9200"],
+                "connect": ["127.0.0.1:9200"],
+                "redirect": [
+                    {"bind": "127.0.0.1:9100", "to": "/tmp/network_redirect_9100.sock"},
+                    {"connect": "127.0.0.1:9100", "to": "/tmp/network_redirect_9100.sock"},
+                    {"bind": "[::1]:9100", "to": "@network-redirect-v6"},
+                    {"connect": "[::1]:9100", "to": "@network-redirect-v6"},
+                    {"connect": "10.0.0.0/8:*", "to": "@network-redirect-%a-%p"},
+                    {"bind": "127.0.0.1:9200", "to": "@network-redirect-9200"}
+                ]
             }
         ]
     },

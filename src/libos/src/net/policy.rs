@@ -34,12 +34,25 @@
 //! The host sees all data sent with host sockets and decides where the packets
 //! go. So the policy restricts which programs hand which data to the host, and
 //! for which destinations, but not where the host delivers the packets.
+//!
+//! A rule may also redirect TCP sockets to AF_UNIX sockets, so that a program
+//! that uses TCP, e.g., for a proxy in the same enclave, does not use host
+//! sockets for it: a `redirect` of a rule has a pattern for `bind` or for
+//! `connect` and a Unix socket address `to` (a path, or an abstract name after
+//! "@"), in which "%a" stands for the IP address, "%p" for the port and "%%"
+//! for "%". When a TCP socket of the program binds or connects to an address
+//! that the pattern matches, the LibOS replaces it with a Unix socket bound or
+//! connected to that Unix address (see `net::redirect`). The first matching
+//! redirect of the program's rules applies, and a redirected address needs no
+//! `bind` or `connect` pattern, as the data stays in the enclave.
 
 use std::fmt;
 use std::ops::RangeInclusive;
 
-use super::{AnyAddr, Domain, SockAddr, SocketType};
-use crate::config::{InputConfigNetworkPolicy, InputConfigNetworkRule, LIBOS_CONFIG};
+use super::{AnyAddr, Domain, SockAddr, SocketType, UnixAddr, UnixPath};
+use crate::config::{
+    InputConfigNetworkPolicy, InputConfigNetworkRedirect, InputConfigNetworkRule, LIBOS_CONFIG,
+};
 use crate::fs::normalize_abs_path;
 use crate::prelude::*;
 
@@ -54,7 +67,28 @@ struct Rule {
     bind: Vec<AddrPattern>,
     connect: Vec<AddrPattern>,
     raw: bool,
+    redirects: Vec<Redirect>,
 }
+
+/// The socket operation that a redirect applies to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RedirectOp {
+    Bind,
+    Connect,
+}
+
+/// A redirect of the TCP sockets that bind or connect to the addresses of a
+/// pattern to a Unix socket address, e.g., from "*:8080" to "/run/nf.sock".
+#[derive(Debug)]
+struct Redirect {
+    op: RedirectOp,
+    pattern: AddrPattern,
+    to: String,
+}
+
+/// The longest path or abstract name of a Unix socket address, without the
+/// null byte that ends a path or starts an abstract name
+const MAX_UNIX_NAME_LEN: usize = 107;
 
 /// A pattern of IP socket addresses, e.g., "*:8443", "10.0.0.0/8:80-89" or
 /// "[::1]:*".
@@ -163,7 +197,104 @@ impl Rule {
             bind: parse_patterns(&input.bind)?,
             connect: parse_patterns(&input.connect)?,
             raw: input.raw,
+            redirects: input
+                .redirect
+                .iter()
+                .map(Redirect::from_input)
+                .collect::<Result<Vec<_>>>()?,
         })
+    }
+}
+
+impl Redirect {
+    fn from_input(input: &InputConfigNetworkRedirect) -> Result<Self> {
+        let (op, pattern) = match (&input.bind, &input.connect) {
+            (Some(pattern), None) => (RedirectOp::Bind, pattern),
+            (None, Some(pattern)) => (RedirectOp::Connect, pattern),
+            _ => {
+                eprintln!(
+                    "network_policy: a redirect needs either \"bind\" or \"connect\": {:?}",
+                    input
+                );
+                return_errno!(EINVAL, "invalid redirect in the network policy");
+            }
+        };
+        let pattern = AddrPattern::parse(pattern)?;
+        if let Err(reason) = Self::check_to(&input.to) {
+            eprintln!(
+                "network_policy: invalid redirect target {:?}: {}",
+                input.to, reason
+            );
+            return_errno!(EINVAL, "invalid redirect target in the network policy");
+        }
+        Ok(Self {
+            op,
+            pattern,
+            to: input.to.clone(),
+        })
+    }
+
+    fn check_to(to: &str) -> std::result::Result<(), &'static str> {
+        let name = if let Some(name) = to.strip_prefix('@') {
+            name
+        } else if to.starts_with('/') {
+            to
+        } else {
+            return Err("expected an absolute path or \"@\" and an abstract name");
+        };
+        if name.is_empty() {
+            return Err("empty abstract name");
+        }
+        let mut chars = name.chars();
+        while let Some(c) = chars.next() {
+            match c {
+                '\0' => return Err("null byte"),
+                '%' => match chars.next() {
+                    Some('a') | Some('p') | Some('%') => (),
+                    _ => return Err("\"%\" must be followed by \"a\", \"p\" or \"%\""),
+                },
+                _ => (),
+            }
+        }
+        if Self::expand(name, "", "").len() > MAX_UNIX_NAME_LEN {
+            return Err("too long");
+        }
+        Ok(())
+    }
+
+    fn expand(template: &str, ip: &str, port: &str) -> String {
+        let mut expanded = String::with_capacity(template.len());
+        let mut chars = template.chars();
+        while let Some(c) = chars.next() {
+            match (c, chars.clone().next()) {
+                ('%', Some('a')) => expanded.push_str(ip),
+                ('%', Some('p')) => expanded.push_str(port),
+                ('%', Some('%')) => expanded.push('%'),
+                _ => {
+                    expanded.push(c);
+                    continue;
+                }
+            }
+            chars.next();
+        }
+        expanded
+    }
+
+    /// Returns the Unix socket address for an IP address and port.
+    fn unix_addr(&self, ip: Ip, port: u16) -> Result<UnixAddr> {
+        let ip = match ip {
+            Ip::V4(ip) => std::net::Ipv4Addr::from(ip).to_string(),
+            Ip::V6(ip) => std::net::Ipv6Addr::from(ip).to_string(),
+        };
+        let port = port.to_string();
+        let addr = match self.to.strip_prefix('@') {
+            Some(name) => UnixAddr::Abstract(Self::expand(name, &ip, &port)),
+            None => UnixAddr::File(None, UnixPath::new(&Self::expand(&self.to, &ip, &port))),
+        };
+        if addr.path_str()?.len() > MAX_UNIX_NAME_LEN {
+            return_errno!(ENAMETOOLONG, "the redirect target is too long");
+        }
+        Ok(addr)
     }
 }
 
@@ -319,6 +450,47 @@ impl fmt::Display for Target {
             Some(port) => write!(f, ":{}", port),
             None => write!(f, ":?"),
         }
+    }
+}
+
+/// Returns the Unix socket address to which the network policy redirects a TCP
+/// socket of the current program that binds or connects to the address, if
+/// any.
+pub fn redirect(op: RedirectOp, addr: &AnyAddr) -> Result<Option<UnixAddr>> {
+    let policy = match policy() {
+        Some(policy) => policy,
+        None => return Ok(None),
+    };
+    let (ip, port) = match Target::from_addr(addr) {
+        Some(Target {
+            ip: Some(ip),
+            port: Some(port),
+        }) => (ip, port),
+        _ => return Ok(None),
+    };
+    let target = Target {
+        ip: Some(ip),
+        port: Some(port),
+    };
+    let current = current!();
+    let process = current.process();
+    let redirect = policy
+        .rules_of(process.exec_path())
+        .flat_map(|rule| rule.redirects.iter())
+        .find(|redirect| redirect.op == op && redirect.pattern.matches(&target));
+    match redirect {
+        Some(redirect) => {
+            let unix_addr = redirect.unix_addr(ip, port)?;
+            debug!(
+                "network policy: {:?} of {} to {} redirected to {:?}",
+                op,
+                process.exec_path(),
+                target,
+                unix_addr
+            );
+            Ok(Some(unix_addr))
+        }
+        None => Ok(None),
     }
 }
 

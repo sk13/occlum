@@ -201,6 +201,17 @@ In Occlum, all sockets except those of `AF_UNIX` are sockets of the host: the da
                 "connect": ["*:8443"],
                 // Whether raw IP, AF_PACKET and other sockets are allowed (default: false)
                 "raw": false
+            },
+            {
+                "program": "/bin/app",
+                // Connecting to DNS on the host is allowed
+                "connect": ["127.0.0.11:53"],
+                // TCP sockets that bind or connect to these addresses are
+                // replaced with Unix sockets (optional)
+                "redirect": [
+                    {"bind": "*:8080", "to": "/run/app.sock"},
+                    {"connect": "10.0.0.0/8:8443", "to": "/run/proxy/%a_%p.sock"}
+                ]
             }
         ]
     }
@@ -225,6 +236,17 @@ The rules with a `program` apply to the processes that run it, i.e., whose execu
 `AF_UNIX` sockets, which stay inside the enclave, are not restricted, nor are `AF_NETLINK` sockets, which reach the kernel of the host, but not the network. The LibOS logs denied operations as warnings (`OCCLUM_LOG_LEVEL=warn`), and fails to start if the policy is invalid; unknown fields in `network_policy` make `occlum build` fail.
 
 The host sees all data that programs send with IP sockets and decides where the packets go. So the policy restricts which programs hand which data to the host, and for which destinations, but not where the host delivers the packets.
+
+### Redirects to Unix sockets
+
+A `redirect` of a rule lets a program use TCP where the data should stay in the enclave, e.g., with a TLS proxy in the same enclave, without changing the program, like [ip2unix](https://github.com/nixcloud/ip2unix) does with `LD_PRELOAD`, but for all programs, including statically linked ones and Go programs. When a TCP socket of the program binds or connects to an address that the `bind` or `connect` pattern of a redirect matches, the LibOS replaces the socket with an `AF_UNIX` socket that is bound or connected to the address `to`:
+
+* `to` is an absolute path, or `@` and a name in the abstract namespace. `%a` stands for the IP address and `%p` for the port of the address, `%%` for `%`.
+* The first matching redirect of the program's rules applies. A redirected address needs no `bind` or `connect` pattern, as the data stays in the enclave.
+* Redirects apply to TCP sockets only; other sockets, e.g., of UDP, are checked against `bind` and `connect` as usual.
+* The Unix socket shows IP addresses to the program: `getsockname()` returns the address bound to, or `127.0.0.1` (`::1`) with an ephemeral port after `connect()`, and `getpeername()` the address connected to, or `127.0.0.1` (`::1`) with an ephemeral port for an accepted socket. Its `SO_DOMAIN` and `SO_PROTOCOL` are those of TCP, and it accepts the options of the IP levels, e.g., `TCP_NODELAY`, and returns zeros for them.
+* Connecting fails with `ECONNREFUSED` if nothing listens on the Unix address.
+* The socket is replaced at the same file descriptor, and the epoll files that monitor it go on monitoring it. It is nonblocking and close-on-exec if the TCP socket was; other options of the TCP socket, and other file descriptors for it, e.g., from `dup()` before `bind()` or `connect()`, are not carried over.
 
 ## Runtime Resource Configuration for Occlum process
 

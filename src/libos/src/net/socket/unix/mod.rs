@@ -2,7 +2,7 @@ use super::*;
 
 mod stream;
 
-pub use self::stream::Stream;
+pub use self::stream::{InetView, Stream};
 
 //TODO: rewrite this file when a new kind of uds is added
 pub fn unix_socket(socket_type: SocketType, flags: SocketFlags, protocol: i32) -> Result<Stream> {

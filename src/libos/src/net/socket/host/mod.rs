@@ -60,6 +60,24 @@ impl HostSocket {
         Ok(())
     }
 
+    /// Returns whether the socket is a TCP socket.
+    pub fn is_tcp(&self) -> Result<bool> {
+        let get_int = |optname: i32| -> Result<i32> {
+            let mut value: i32 = 0;
+            let mut len = mem::size_of::<i32>() as u32;
+            try_libc!(libc::ocall::getsockopt(
+                self.raw_host_fd() as i32,
+                libc::SOL_SOCKET,
+                optname,
+                &mut value as *mut i32 as *mut c_void,
+                &mut len
+            ));
+            Ok(value)
+        };
+        Ok(get_int(libc::SO_TYPE)? == libc::SOCK_STREAM
+            && get_int(libc::SO_PROTOCOL)? == libc::IPPROTO_TCP)
+    }
+
     pub fn listen(&self, backlog: i32) -> Result<()> {
         let ret = try_libc!(libc::ocall::listen(self.raw_host_fd() as i32, backlog));
         Ok(())

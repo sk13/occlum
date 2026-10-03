@@ -18,6 +18,7 @@ use time::{timespec_t, timeval_t};
 use util::mem_util::from_user;
 
 use super::policy;
+use super::redirect;
 use super::*;
 
 use crate::fs::StatusFlags;
@@ -123,9 +124,12 @@ pub fn do_bind(fd: c_int, addr: *const libc::sockaddr, addr_len: libc::socklen_t
     };
 
     trace!("bind to addr: {:?}", addr);
+    let file_ref = current!().file(fd as FileDesc)?;
+    if redirect::redirect_bind(fd as FileDesc, &file_ref, &addr)? {
+        return Ok(0);
+    }
     policy::check_bind(&addr)?;
 
-    let file_ref = current!().file(fd as FileDesc)?;
     if let Ok(socket) = file_ref.as_host_socket() {
         let raw_addr = addr.to_raw();
         socket.bind(&raw_addr)?;
@@ -187,6 +191,16 @@ pub fn do_connect(
     }
 
     let file_ref = current!().file(fd as FileDesc)?;
+    // The addresses of TCP sockets that the network policy redirects
+    if addr_set && policy::is_enabled() {
+        let addr = copy_sock_addr_from_user(addr, addr_len as usize)
+            .and_then(|storage| AnyAddr::from_c_storage(&storage, addr_len as usize));
+        if let Ok(addr) = addr {
+            if redirect::redirect_connect(fd as FileDesc, &file_ref, &addr)? {
+                return Ok(0);
+            }
+        }
+    }
     if let Ok(socket) = file_ref.as_host_socket() {
         let addr_option = if addr_set {
             Some(unsafe { SockAddr::try_from_raw(addr, addr_len as u32)? })
@@ -252,10 +266,20 @@ pub fn do_accept4(
             )
         } else if let Ok(unix_socket) = file_ref.as_unix_socket() {
             let (new_socket_file, sock_addr_option) = unix_socket.accept(sock_flags)?;
-            (
-                Arc::new(new_socket_file),
-                sock_addr_option.map(|unix_addr| AnyAddr::Unix(unix_addr)),
-            )
+            match unix_socket.inet_view() {
+                // A socket that replaces a TCP socket accepts sockets that
+                // show IP addresses, too
+                Some(listener) => {
+                    let view = redirect::accepted_view(&listener);
+                    let peer = view.peer.clone();
+                    new_socket_file.set_inet_view(view);
+                    (Arc::new(new_socket_file), peer)
+                }
+                None => (
+                    Arc::new(new_socket_file),
+                    sock_addr_option.map(|unix_addr| AnyAddr::Unix(unix_addr)),
+                ),
+            }
         } else if let Ok(uring_socket) = file_ref.as_uring_socket() {
             let nonblocking = sock_flags.contains(SocketFlags::SOCK_NONBLOCK);
             let accepted_socket = uring_socket.accept(nonblocking)?;
@@ -325,7 +349,10 @@ pub fn do_setsockopt(
         let mut cmd = new_host_setsockopt_cmd(level, optname, optval)?;
         host_socket.ioctl(cmd.as_mut())?;
     } else if let Ok(unix_socket) = file_ref.as_unix_socket() {
-        warn!("setsockopt for unix socket is unimplemented");
+        // A socket that replaces a TCP socket takes its options silently
+        if unix_socket.inet_view().is_none() {
+            warn!("setsockopt for unix socket is unimplemented");
+        }
     } else if let Ok(uring_socket) = file_ref.as_uring_socket() {
         let mut cmd = new_uring_setsockopt_cmd(level, optname, optval, uring_socket.get_type())?;
         uring_socket.ioctl(cmd.as_mut())?;
@@ -393,7 +420,13 @@ pub fn do_getpeername(
     let (src_addr, src_addr_len) = if let Ok(host_socket) = file_ref.as_host_socket() {
         host_socket.peer_addr()?.to_c_storage()
     } else if let Ok(unix_socket) = file_ref.as_unix_socket() {
-        unix_socket.peer_addr()?.to_c_storage()
+        match unix_socket.inet_view() {
+            Some(inet) => match inet.peer {
+                Some(peer) => peer.to_c_storage(),
+                None => return_errno!(ENOTCONN, "the socket is not connected"),
+            },
+            None => unix_socket.peer_addr()?.to_c_storage(),
+        }
     } else if let Ok(uring_socket) = file_ref.as_uring_socket() {
         uring_socket.peer_addr()?.to_c_storage()
     } else {
@@ -421,7 +454,10 @@ pub fn do_getsockname(
     let (src_addr, src_addr_len) = if let Ok(host_socket) = file_ref.as_host_socket() {
         host_socket.addr()?.to_c_storage()
     } else if let Ok(unix_socket) = file_ref.as_unix_socket() {
-        unix_socket.addr().to_c_storage()
+        match unix_socket.inet_view() {
+            Some(inet) => inet.local.to_c_storage(),
+            None => unix_socket.addr().to_c_storage(),
+        }
     } else if let Ok(uring_socket) = file_ref.as_uring_socket() {
         uring_socket.addr()?.to_c_storage()
     } else {
