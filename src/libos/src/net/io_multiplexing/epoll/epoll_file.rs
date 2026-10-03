@@ -55,9 +55,9 @@ pub struct EpollFile {
     interest: SgxMutex<HashMap<FileDesc, Arc<EpollEntry>>>,
     // Entries that are probably ready (having events happened).
     ready: SgxMutex<VecDeque<Arc<EpollEntry>>>,
-    // The events and flags of the fds whose files were replaced, which are to
-    // be monitored with the new files (see reattach_replaced()).
-    replaced: SgxMutex<Vec<(FileDesc, EpollEvent, EpollFlags)>>,
+    // The fds whose files were replaced, whose entries are to monitor the new
+    // files (see reattach_replaced()).
+    replaced: SgxMutex<Vec<FileDesc>>,
     // All threads that are waiting on this epoll file.
     waiters: WaiterQueue,
     // A notifier to broadcast events on this epoll file.
@@ -505,40 +505,97 @@ impl Observer<IoEvents> for EpollFile {
 }
 
 impl EpollFile {
-    /// Stops monitoring the fd, whose file was replaced, and remembers its
-    /// events and flags to monitor the new file. The file table is locked
-    /// meanwhile, so the new file is monitored later, by the next call of
-    /// control() or wait(), which the waiting threads are woken up for.
+    /// Remembers that the file of the fd was replaced. The entry of the fd
+    /// keeps monitoring the old file until reattach_replaced() moves it to the
+    /// new file, which the next call of control() or wait() does, which the
+    /// waiting threads are woken up for. It cannot be done here, as the file
+    /// table is locked meanwhile.
     fn detach_replaced(&self, fd: FileDesc) {
-        let (event, flags) = match self.interest.lock().unwrap().get(&fd) {
-            Some(ep_entry) => {
-                let inner = ep_entry.inner.lock().unwrap();
-                (inner.event, inner.flags)
+        if !self.interest.lock().unwrap().contains_key(&fd) {
+            return;
+        }
+        self.replaced.lock().unwrap().push(fd);
+        self.waiters.dequeue_and_wake_all();
+    }
+
+    /// Moves the entries of the fds whose files were replaced to the new
+    /// files.
+    ///
+    /// The file table stays locked meanwhile, so that no close() or dup2()
+    /// of a fd comes in between (their Del events are serialized with it),
+    /// and each entry is replaced in one step under the lock of the interest
+    /// list, so that a concurrent epoll_ctl() always finds the fd.
+    fn reattach_replaced(&self) {
+        if self.replaced.lock().unwrap().is_empty() {
+            return;
+        }
+        let current = current!();
+        let files = current.files().lock();
+        let replaced = std::mem::take(&mut *self.replaced.lock().unwrap());
+        for fd in replaced {
+            if let Ok(file) = files.get(fd) {
+                self.replace_entry(fd, file);
             }
-            None => return,
-        };
-        if self.del_interest(fd).is_ok() {
-            self.replaced.lock().unwrap().push((fd, event, flags));
-            self.waiters.dequeue_and_wake_all();
         }
     }
 
-    /// Monitors the new files of the fds whose files were replaced. A new
-    /// file is polled right away, so that its events are reported even with
-    /// EPOLLET.
-    fn reattach_replaced(&self) {
-        let replaced = {
-            let mut replaced = self.replaced.lock().unwrap();
-            if replaced.is_empty() {
+    /// Replaces the entry of the fd with one that monitors `file`, with the
+    /// same events and flags, if the fd is still in the interest list and its
+    /// entry monitors another file. The new file is polled right away, so
+    /// that its events are reported even with EPOLLET.
+    fn replace_entry(&self, fd: FileDesc, file: FileRef) {
+        if file.notifier().is_none() {
+            // Cannot be monitored, like in add_entry()
+            let _ = self.del_interest(fd);
+            return;
+        }
+        let weak_observer = self.weak_self.clone() as Weak<dyn Observer<_>>;
+
+        // A critical section protected by the lock of self.interest
+        let (old_entry, new_entry) = {
+            let mut interest_entries = self.interest.lock().unwrap();
+            let old_entry = match interest_entries.get(&fd) {
+                // Deleted by epoll_ctl(EPOLL_CTL_DEL) meanwhile
+                None => return,
+                Some(old_entry) => old_entry.clone(),
+            };
+            if Arc::ptr_eq(&old_entry.file, &file) {
                 return;
             }
-            std::mem::take(&mut *replaced)
-        };
-        for (fd, event, flags) in replaced {
-            // A closed fd is no longer in the list, see on_event()
-            if let Ok(file) = current!().file(fd) {
-                let _ = self.add_entry(fd, file, event, flags);
+            let new_entry = {
+                let inner = old_entry.inner.lock().unwrap();
+                Arc::new(EpollEntry::new(fd, file, inner.event, inner.flags))
+            };
+            interest_entries.insert(fd, new_entry.clone());
+
+            old_entry.is_deleted.store(true, Ordering::Release);
+            if let Some(old_notifier) = old_entry.file.notifier() {
+                old_notifier.unregister(&weak_observer);
             }
+            if old_entry.file.host_fd().is_some() {
+                self.host_file_epoller.del_file(&old_entry.file);
+            }
+
+            let weak_new_entry = Arc::downgrade(&new_entry);
+            new_entry.file.notifier().unwrap().register(
+                weak_observer,
+                Some(IoEvents::all()),
+                Some(weak_new_entry),
+            );
+            if new_entry.file.host_fd().is_some() {
+                let inner = new_entry.inner.lock().unwrap();
+                self.host_file_epoller
+                    .add_file(new_entry.file.clone(), inner.event, inner.flags);
+            }
+            (old_entry, new_entry)
+        };
+
+        self.ready
+            .lock()
+            .unwrap()
+            .retain(|entry| !Arc::ptr_eq(entry, &old_entry));
+        if new_entry.file.host_fd().is_none() {
+            self.push_ready(new_entry);
         }
     }
 }
@@ -551,7 +608,7 @@ impl Observer<FileTableEvent> for EpollFile {
                 self.replaced
                     .lock()
                     .unwrap()
-                    .retain(|(replaced_fd, _, _)| *replaced_fd != fd);
+                    .retain(|replaced_fd| *replaced_fd != fd);
             }
             FileTableEvent::Replace(fd) => self.detach_replaced(fd),
         }

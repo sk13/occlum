@@ -391,6 +391,76 @@ static int test_epoll_before_redirect() {
     return 0;
 }
 
+static volatile int stop_waiting;
+
+// Waits on the epoll file in a loop, like the thread of an event loop, so
+// that the replacements of sockets race with its epoll_wait()
+static void *wait_in_loop(void *arg) {
+    struct epoll_event events[8];
+    while (!stop_waiting) {
+        epoll_wait(wait_epfd, events, 8, 1);
+    }
+    return NULL;
+}
+
+static int test_epoll_replace_races() {
+    // A socket replaced while another thread waits on the epoll file, then
+    // modified and closed right away: EPOLL_CTL_MOD must find it, the closed
+    // socket must not stay monitored (the next socket at the same fd gets
+    // EEXIST from EPOLL_CTL_ADD then), and the peer must get end of file
+    int listen_fd = listen_redirected();
+    int epfd = epoll_create1(0);
+    if (listen_fd < 0 || epfd < 0) {
+        THROW_ERROR("listening or creating the epoll file failed");
+    }
+    pthread_t thread;
+    wait_epfd = epfd;
+    stop_waiting = 0;
+    if (pthread_create(&thread, NULL, wait_in_loop, NULL) != 0) {
+        THROW_ERROR("pthread_create failed");
+    }
+
+    int ret = 0;
+    struct sockaddr_in addr = addr4("127.0.0.1", REDIRECTED_PORT);
+    for (int i = 0; i < 300 && ret == 0; i++) {
+        int fd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
+        struct epoll_event event = { .events = EPOLLIN | EPOLLOUT | EPOLLET, .data.fd = fd };
+        if (fd < 0 || epoll_ctl(epfd, EPOLL_CTL_ADD, fd, &event) < 0) {
+            printf("round %d: adding the socket failed: %s\n", i, strerror(errno));
+            ret = -1;
+            break;
+        }
+        if (connect(fd, SA(addr), sizeof(addr)) < 0 && errno != EINPROGRESS) {
+            printf("round %d: connect failed: %s\n", i, strerror(errno));
+            ret = -1;
+        }
+        event.events = EPOLLIN | EPOLLET;
+        if (ret == 0 && epoll_ctl(epfd, EPOLL_CTL_MOD, fd, &event) < 0) {
+            printf("round %d: EPOLL_CTL_MOD failed: %s\n", i, strerror(errno));
+            ret = -1;
+        }
+        close(fd);
+
+        int accepted_fd = accept(listen_fd, NULL, NULL);
+        struct pollfd pfd = { .fd = accepted_fd, .events = POLLIN };
+        char c;
+        if (accepted_fd < 0 || poll(&pfd, 1, 2000) != 1 || read(accepted_fd, &c, 1) != 0) {
+            printf("round %d: no end of file at the peer\n", i);
+            ret = -1;
+        }
+        close(accepted_fd);
+    }
+
+    stop_waiting = 1;
+    pthread_join(thread, NULL);
+    close(epfd);
+    close(listen_fd);
+    if (ret < 0) {
+        THROW_ERROR("a replaced socket raced with epoll");
+    }
+    return 0;
+}
+
 static int test_other_sockets_and_addresses() {
     // Without a redirect or a bind pattern, binding is still denied
     int fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -485,6 +555,7 @@ static test_case_t test_cases[] = {
     TEST_CASE(test_ipv6),
     TEST_CASE(test_nonblocking),
     TEST_CASE(test_epoll_before_redirect),
+    TEST_CASE(test_epoll_replace_races),
     TEST_CASE(test_other_sockets_and_addresses),
     TEST_CASE(test_program_rules),
 };
