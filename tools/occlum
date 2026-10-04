@@ -218,25 +218,13 @@ gen_initfs_grpc_ratls()
     mkdir -p initfs/etc
     # add default timezone file
     cp /etc/localtime initfs/etc/
-    # add ssl ca-certificates
-    mkdir -p initfs/etc/ssl/certs
-    cp /etc/ssl/certs/ca-certificates.crt initfs/etc/ssl/certs
 
-    # add musl
+    # add musl, the RA-TLS client is a Rust program which needs nothing else
     local occlum_musl_lib=/usr/local/occlum/x86_64-linux-musl/lib
     cp -t initfs/lib \
         /lib/ld-musl-x86_64.so.1 \
         "$occlum_musl_lib/libc.so" \
-        "$occlum_musl_lib/libstdc++.so.6" \
-        "$occlum_musl_lib/libgcc_s.so.1" \
-        "$occlum_musl_lib/libgomp.so.1"
-
-    # add grpc_ratls required libs
-    cp -t initfs/lib \
-        "$occlum_dir"/toolchains/grpc_ratls/musl/libgrpc_ratls_client.so \
-        "$occlum_dir"/toolchains/grpc_ratls/musl/libhw_grpc_proto.so \
-        "$occlum_dir"/toolchains/dcap_lib/musl/libocclum_dcap.so.0.1.0 \
-        "$occlum_dir"/toolchains/gcc/x86_64-linux-musl/lib/libcjson.so.1
+        "$occlum_musl_lib/libgcc_s.so.1"
 
     # add template init_ra_conf
     cp "$occlum_dir"/etc/template/init_grpc_ratls.json "$instance_dir"/init_ra_conf.json

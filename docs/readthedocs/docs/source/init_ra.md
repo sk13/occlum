@@ -76,9 +76,9 @@ There is a demo [init_aecs_client](https://github.com/occlum/occlum/tree/master/
 
 ## GRPC-RATLS Init-RA
 
-It is based on a GRPC-RATLS implementation.
+It is based on a GRPC-RATLS implementation. The client in the Init process is written in Rust, with [rustls](https://github.com/rustls/rustls) for TLS and [h2](https://github.com/hyperium/h2) for the gRPC call, so it does not need any C or C++ library. It gets all the secrets over one connection, and its own RA-TLS certificate and quote are generated once. The KMS server is the `server` of the [`grpc_ratls`](../../../../tools/toolchains/grpc_ratls) toolchain.
 
-Occlum provides a way to embed the AECS client function in Occlum Init process by simply running `occlum new occlum_instance --init-ra grpc_ratls` to initiate an Occlum instance.
+Occlum provides a way to embed the GRPC-RATLS client function in Occlum Init process by simply running `occlum new occlum_instance --init-ra grpc_ratls` to initiate an Occlum instance.
 
 Then, users can modify the template `init_ra_conf.json` in oclcum_instance accordingly.
 

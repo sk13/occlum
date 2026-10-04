@@ -2,69 +2,38 @@ extern crate libc;
 extern crate serde;
 extern crate serde_json;
 
+mod grpc;
+mod ratls;
+
 use libc::syscall;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 use std::env;
-use std::error::Error;
 use std::fs;
 use std::fs::File;
 use std::io::{ErrorKind, Read};
 use std::str;
+use std::sync::Arc;
 
-use std::ffi::CString;
-use std::os::raw::{c_char, c_int};
+use ratls::{Dcap, Policy, RAConfig, Result};
 
-#[link(name = "grpc_ratls_client")]
-extern "C" {
-    fn grpc_ratls_get_secret_to_buf(
-        server_addr: *const c_char, // grpc server address+port, such as "localhost:50051"
-        config_json: *const c_char, // ratls handshake config json file
-        name: *const c_char,        // secret name to be requested
-        secret_buf: *const u8,      // secret buffer provided by user
-        buf_len: *mut u32,          // buffer size
-    ) -> c_int;
-}
+/// The longest secret accepted
+const MAX_SECRET_LEN: usize = 10240;
 
-#[derive(Deserialize, Serialize, Debug)]
-#[warn(dead_code)]
-struct MRsValue {
-    pub mr_enclave: String,
-    pub mr_signer: String,
-    pub isv_prod_id: u32,
-    pub isv_svn: u32,
-    pub config_svn: u32,
-    pub debuggable: bool,
-}
-
-#[derive(Deserialize, Serialize, Debug)]
-#[warn(dead_code)]
-struct RAConfig {
-    verify_mr_enclave: String,
-    verify_mr_signer: String,
-    verify_isv_prod_id: String,
-    verify_isv_svn: String,
-    verify_config_svn: String,
-    verify_enclave_debuggable: String,
-    sgx_mrs: Vec<MRsValue>,
-}
-
-#[derive(Deserialize, Serialize, Debug, Clone)]
-#[warn(dead_code)]
+#[derive(Deserialize, Debug, Clone)]
 struct KmsKeys {
     key: String,
     path: String,
 }
 
-#[derive(Deserialize, Serialize, Debug)]
-#[warn(dead_code)]
+#[derive(Deserialize, Debug)]
 struct InitRAConfig {
     kms_server: String,
     kms_keys: Vec<KmsKeys>,
     ra_config: RAConfig,
 }
 
-fn load_ra_config(ra_conf_path: &str) -> Result<InitRAConfig, Box<dyn Error>> {
+fn load_ra_config(ra_conf_path: &str) -> Result<InitRAConfig> {
     let mut ra_conf_file = File::open(ra_conf_path)?;
     let ra_conf = {
         let mut ra_conf = String::new();
@@ -75,51 +44,36 @@ fn load_ra_config(ra_conf_path: &str) -> Result<InitRAConfig, Box<dyn Error>> {
     Ok(config)
 }
 
-struct KeyInfo {
-    path: String,
-    val_buf: Vec<u8>,
-}
-
-fn get_kms_keys(
-    kms_keys: Vec<KmsKeys>,
-    kms_server: CString,
-    kms_config: CString,
-) -> Result<Vec<KeyInfo>, Box<dyn Error>> {
-    let mut keys_info: Vec<KeyInfo> = Vec::new();
-    for keys in kms_keys {
-        let key = CString::new(&*keys.key).unwrap();
-        // Max key length is 10K
-        let mut buffer: Vec<u8> = vec![0; 10240];
-        let mut buffer_len: u32 = buffer.len() as u32;
-
-        let ret = unsafe {
-            grpc_ratls_get_secret_to_buf(
-                kms_server.as_ptr(),
-                kms_config.as_ptr(),
-                key.as_ptr(),
-                buffer.as_ptr(),
-                &mut buffer_len,
-            )
-        };
-
-        if ret != 0 {
-            let err_msg = format!("grpc_ratls client get secret error: {}", ret);
-            return Err(Box::new(std::io::Error::new(ErrorKind::Other, err_msg)));
-        }
-
-        buffer.resize(buffer_len as usize, 0);
-
-        let key_info: KeyInfo = KeyInfo {
-            path: keys.path.clone(),
-            val_buf: buffer.clone(),
-        };
-
-        keys_info.push(key_info);
+/// Request the secrets from the server at `server_addr`, which has to be
+/// attested as the configuration says. One connection and one quote of ours
+/// are enough for all of them.
+fn get_secrets(server_addr: &str, ra_config: &RAConfig, names: &[&str]) -> Result<Vec<Vec<u8>>> {
+    if names.is_empty() {
+        return Ok(Vec::new());
     }
-    Ok(keys_info)
+    let tls = ratls::client_config(Arc::new(Dcap), Policy::from_config(ra_config)?)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(async {
+        let mut client = grpc::SecretClient::connect(server_addr, tls).await?;
+        let mut secrets = Vec::with_capacity(names.len());
+        for name in names {
+            // Keep the secrets in buffers, not in the file system, for better security
+            secrets.push(client.get_secret(name, MAX_SECRET_LEN).await?);
+        }
+        Ok(secrets)
+    })
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
+fn main() {
+    if let Err(e) = run() {
+        eprintln!("Error: {}", e);
+        std::process::exit(1);
+    }
+}
+
+fn run() -> Result<()> {
     // Load the configuration from initfs
     const IMAGE_CONFIG_FILE: &str = "/etc/image_config.json";
     const INIT_RA_CONF: &str = "/etc/init_ra_conf.json";
@@ -127,61 +81,40 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // Do parse to get Init RA information
     let init_ra_conf = load_ra_config(INIT_RA_CONF)?;
-    // Extract RA config part
-    let ra_conf_string = serde_json::to_string_pretty(&init_ra_conf.ra_config).unwrap();
-    fs::write("ra_config.json", ra_conf_string.clone().into_bytes())?;
-    let config_json = CString::new("ra_config.json").unwrap();
 
     // grpc server address from environment has higher priority
-    let server_addr =
-        CString::new(env::var("OCCLUM_INIT_RA_KMS_SERVER").unwrap_or(init_ra_conf.kms_server))
-            .unwrap();
+    let server_addr = env::var("OCCLUM_INIT_RA_KMS_SERVER").unwrap_or(init_ra_conf.kms_server);
 
-    // Get the key of FS image if needed
-    let key = match &image_config.image_type[..] {
-        "encrypted" => {
-            // Get the image encrypted key through RA
-            let secret = CString::new("image_key").unwrap();
-            let mut buffer: Vec<u8> = vec![0; 256];
-            let mut buffer_len: u32 = buffer.len() as u32;
-
-            //Read to buffer instead of file system for better security
-            let ret = unsafe {
-                grpc_ratls_get_secret_to_buf(
-                    server_addr.as_ptr(),
-                    config_json.as_ptr(),
-                    secret.as_ptr(),
-                    buffer.as_ptr(),
-                    &mut buffer_len,
-                )
-            };
-
-            if ret != 0 {
-                let err_msg = format!("grpc_ratls client get secret error: {}", ret);
-                return Err(Box::new(std::io::Error::new(ErrorKind::Other, err_msg)));
-            }
-
-            buffer.resize(buffer_len as usize, 0);
-            let key_string = String::from_utf8(buffer).expect("error converting to string");
-            let key_str = key_string
-                .trim_end_matches(|c| c == '\r' || c == '\n')
-                .to_string();
-            let mut key: sgx_key_128bit_t = Default::default();
-            parse_str_to_bytes(&key_str, &mut key)?;
-            Some(key)
-        }
-        "integrity-only" => None,
+    // The key of the FS image is the first secret, if needed
+    let encrypted = match &image_config.image_type[..] {
+        "encrypted" => true,
+        "integrity-only" => false,
         _ => unreachable!(),
+    };
+    let mut names: Vec<&str> = Vec::new();
+    if encrypted {
+        names.push("image_key");
+    }
+    names.extend(init_ra_conf.kms_keys.iter().map(|keys| keys.key.as_str()));
+
+    let mut secrets = get_secrets(&server_addr, &init_ra_conf.ra_config, &names)?.into_iter();
+
+    let key = if encrypted {
+        let key_string = String::from_utf8(secrets.next().unwrap())
+            .map_err(|_| "the image key is not a string")?;
+        let key_str = key_string
+            .trim_end_matches(|c| c == '\r' || c == '\n')
+            .to_string();
+        let mut key: sgx_key_128bit_t = Default::default();
+        parse_str_to_bytes(&key_str, &mut key)?;
+        Some(key)
+    } else {
+        None
     };
     let key_ptr = key
         .as_ref()
         .map(|key| key as *const sgx_key_128bit_t)
         .unwrap_or(std::ptr::null());
-
-    // Get keys from kms if any
-    let keys_info: Vec<KeyInfo> = get_kms_keys(init_ra_conf.kms_keys, server_addr, config_json)?;
-    // Remove config file
-    fs::remove_file("ra_config.json")?;
 
     // Mount the image
     const SYS_MOUNT_FS: i64 = 363;
@@ -193,9 +126,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         return Err(Box::new(std::io::Error::last_os_error()));
     }
 
-    // Get keys and save to path
-    for key_info in keys_info {
-        fs::write(key_info.path, key_info.val_buf.as_slice())?;
+    // Save the keys to their paths
+    for (keys, secret) in init_ra_conf.kms_keys.iter().zip(secrets) {
+        fs::write(&keys.path, secret)?;
     }
 
     Ok(())
@@ -210,7 +143,7 @@ struct ImageConfig {
     image_type: String,
 }
 
-fn load_config(config_path: &str) -> Result<ImageConfig, Box<dyn Error>> {
+fn load_config(config_path: &str) -> Result<ImageConfig> {
     let mut config_file = File::open(config_path)?;
     let config_json = {
         let mut config_json = String::new();
@@ -221,7 +154,7 @@ fn load_config(config_path: &str) -> Result<ImageConfig, Box<dyn Error>> {
     Ok(config)
 }
 
-fn parse_str_to_bytes(arg_str: &str, bytes: &mut [u8]) -> Result<(), Box<dyn Error>> {
+fn parse_str_to_bytes(arg_str: &str, bytes: &mut [u8]) -> Result<()> {
     let bytes_str_vec = {
         let bytes_str_vec: Vec<&str> = arg_str.split('-').collect();
         if bytes_str_vec.len() != bytes.len() {
