@@ -4,21 +4,9 @@ use super::*;
 pub const SGX_CMD_NUM_IS_EDMM_SUPPORTED: u32 =
     StructuredIoctlNum::new::<i32>(0, SGX_MAGIC_CHAR, StructuredIoctlArgType::Output).as_u32();
 
-/// Ioctl to get the EPID group ID
-pub const SGX_CMD_NUM_GET_EPID_GROUP_ID: u32 = StructuredIoctlNum::new::<sgx_epid_group_id_t>(
-    1,
-    SGX_MAGIC_CHAR,
-    StructuredIoctlArgType::Output,
-)
-.as_u32();
-
-/// Ioctl to get EPID quote
-pub const SGX_CMD_NUM_GEN_EPID_QUOTE: u32 = StructuredIoctlNum::new::<IoctlGenEPIDQuoteArg>(
-    2,
-    SGX_MAGIC_CHAR,
-    StructuredIoctlArgType::InputOutput,
-)
-.as_u32();
+// The ioctl numbers 1 and 2 were SGXIOC_GET_EPID_GROUP_ID and SGXIOC_GEN_EPID_QUOTE, for the EPID
+// attestation that Intel discontinued (the attestation service on 2 April 2025). They are not
+// reused: the other numbers are part of the ABI of the applications.
 
 /// Ioctl to get the target info of the current enclave
 pub const SGX_CMD_NUM_SELF_TARGET: u32 =

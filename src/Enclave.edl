@@ -199,20 +199,6 @@ enclave {
         ) propagate_errno;
         int occlum_ocall_ncores(void);
 
-        sgx_status_t occlum_ocall_sgx_init_quote(
-            [out] sgx_target_info_t* target_info,
-            [out] sgx_epid_group_id_t* epid_group_id);
-        sgx_status_t occlum_ocall_sgx_get_epid_quote(
-            [in, size=sigrl_len] uint8_t* sigrl,
-            uint32_t sigrl_len,
-            [in] sgx_report_t* report,
-            sgx_quote_sign_type_t quote_type,
-            [in] sgx_spid_t* spid,
-            [in] sgx_quote_nonce_t* nonce,
-            [out] sgx_report_t* qe_report,
-            [out, size=quote_buf_len] sgx_quote_t* quote_buf,
-            uint32_t quote_buf_len);
-
         int occlum_ocall_detect_dcap_driver() propagate_errno;
         quote3_error_t occlum_ocall_init_dcap_quote_generator(
             [out] sgx_target_info_t* qe_target_info,
@@ -310,11 +296,5 @@ enclave {
         ) propagate_errno;
 
         int occlum_ocall_tkill(int tid, int signum) propagate_errno;
-
-        sgx_status_t occlum_ocall_sgx_calc_quote_size (
-           [in, size=sig_rl_size] uint8_t * p_sig_rl,
-           uint32_t sig_rl_size,
-           [out] uint32_t* p_quote_size
-        );
     };
 };

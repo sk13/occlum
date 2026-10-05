@@ -124,20 +124,6 @@ int test_ioctl_TCGETS_TCSETS(void) {
 // ============================================================================
 
 typedef struct {
-    sgx_report_data_t           report_data;        // input
-    sgx_quote_sign_type_t       quote_type;         // input
-    sgx_spid_t                  spid;               // input
-    sgx_quote_nonce_t           nonce;              // input
-    const uint8_t              *sigrl_ptr;          // input (optional)
-    uint32_t                    sigrl_len;          // input (optional)
-    uint32_t                    quote_buf_len;      // input
-    union {
-        uint8_t                *as_buf;
-        sgx_quote_t            *as_quote;
-    } quote;                                        // output
-} sgxioc_gen_epid_quote_arg_t;
-
-typedef struct {
     const sgx_target_info_t    *target_info;        // input (optinal)
     const sgx_report_data_t    *report_data;        // input (optional)
     sgx_report_t               *report;             // output
@@ -166,8 +152,6 @@ typedef struct {
 #endif
 
 #define SGXIOC_IS_EDMM_SUPPORTED          _IOR('s', 0, int)
-#define SGXIOC_GET_EPID_GROUP_ID          _IOR('s', 1, sgx_epid_group_id_t)
-#define SGXIOC_GEN_EPID_QUOTE             _IOWR('s', 2, sgxioc_gen_epid_quote_arg_t)
 #define SGXIOC_SELF_TARGET                _IOR('s', 3, sgx_target_info_t)
 #define SGXIOC_CREATE_REPORT              _IOWR('s', 4, sgxioc_create_report_arg_t)
 #define SGXIOC_VERIFY_REPORT              _IOW('s', 5, sgx_report_t)
@@ -194,72 +178,6 @@ static int do_SGXIOC_IS_EDMM_SUPPORTED(int sgx_fd) {
     }
 
     printf("    SGX EDMM support: %d\n", is_edmm_supported);
-    return 0;
-}
-
-static int do_SGXIOC_GET_EPID_GROUP_ID(int sgx_fd) {
-    int nretries = 0;
-    while (nretries < IOCTL_MAX_RETRIES) {
-        sgx_epid_group_id_t epid_group_id = { 0 };
-        int ret = ioctl(sgx_fd, SGXIOC_GET_EPID_GROUP_ID, &epid_group_id);
-        if (ret == 0) {
-            break;
-        } else if (errno != EBUSY) {
-            THROW_ERROR("failed to ioctl /dev/sgx");
-        }
-
-        printf("WARN: /dev/sgx is temporarily busy. Try again after 1 second.");
-        sleep(1);
-        nretries++;
-    }
-    if (nretries == IOCTL_MAX_RETRIES) {
-        THROW_ERROR("failed to ioctl /dev/sgx due to timeout");
-    }
-    return 0;
-}
-
-static int do_SGXIOC_GEN_QUOTE(int sgx_fd) {
-    uint8_t quote_buf[2048] = { 0 };
-    sgxioc_gen_epid_quote_arg_t gen_quote_arg = {
-        .report_data = { { 0 } },                       // input (empty is ok)
-        .quote_type = SGX_LINKABLE_SIGNATURE,           // input
-        .spid = { { 0 } },                              // input (empty is ok)
-        .nonce = { { 0 } },                             // input (empty is ok)
-        .sigrl_ptr = NULL,                              // input (optional)
-        .sigrl_len = 0,                                 // input (optional)
-        .quote_buf_len = sizeof(quote_buf),             // input
-        .quote = { .as_buf = (uint8_t *) quote_buf }    // output
-    };
-    int nretries = 0;
-    while (nretries < IOCTL_MAX_RETRIES) {
-        int ret = ioctl(sgx_fd, SGXIOC_GEN_EPID_QUOTE, &gen_quote_arg);
-        if (ret == 0) {
-            break;
-        } else if (errno != EBUSY) {
-            THROW_ERROR("failed to ioctl /dev/sgx");
-        }
-
-        printf("WARN: /dev/sgx is temporarily busy. Try again after 1 second.");
-        sleep(1);
-        nretries++;
-    }
-    if (nretries == IOCTL_MAX_RETRIES) {
-        THROW_ERROR("failed to ioctl /dev/sgx due to timeout");
-    }
-
-    sgx_quote_t *quote = (sgx_quote_t *)quote_buf;
-#ifndef SGX_MODE_HYPER
-    if (quote->sign_type != SGX_LINKABLE_SIGNATURE) {
-        THROW_ERROR("invalid quote: wrong sign type");
-    }
-#endif
-    if (quote->signature_len == 0) {
-        THROW_ERROR("invalid quote: zero-length signature");
-    }
-    if (memcmp(&gen_quote_arg.report_data, &quote->report_body.report_data,
-               sizeof(sgx_report_data_t)) != 0) {
-        THROW_ERROR("invalid quote: wrong report data");
-    }
     return 0;
 }
 
@@ -470,24 +388,6 @@ int test_sgx_ioctl_SGXIOC_IS_EDMM_SUPPORTED(void) {
     return do_sgx_ioctl_test(do_SGXIOC_IS_EDMM_SUPPORTED);
 }
 
-int test_sgx_ioctl_SGXIOC_GET_EPID_GROUP_ID(void) {
-    // skip the EPID test on SGX2 HW
-    if (is_sgx2_supported()) {
-        printf("Warning: test_sgx_ioctl_SGXIOC_GET_EPID_GROUP_ID is skipped\n");
-        return 0;
-    }
-    return do_sgx_ioctl_test(do_SGXIOC_GET_EPID_GROUP_ID);
-}
-
-int test_sgx_ioctl_SGXIOC_GEN_EPID_QUOTE(void) {
-    // skip the EPID test on SGX2 HW
-    if (is_sgx2_supported()) {
-        printf("Warning: test_sgx_ioctl_SGXIOC_GEN_EPID_QUOTE is skipped\n");
-        return 0;
-    }
-    return do_sgx_ioctl_test(do_SGXIOC_GEN_QUOTE);
-}
-
 int test_sgx_ioctl_SGXIOC_SELF_TARGET(void) {
     return do_sgx_ioctl_test(do_SGXIOC_SELF_TARGET);
 }
@@ -659,8 +559,6 @@ static test_case_t test_cases[] = {
     TEST_CASE(test_tty_ioctl_TIOCGWINSZ),
     TEST_CASE(test_ioctl_TCGETS_TCSETS),
     TEST_CASE(test_sgx_ioctl_SGXIOC_IS_EDMM_SUPPORTED),
-    TEST_CASE(test_sgx_ioctl_SGXIOC_GET_EPID_GROUP_ID),
-    TEST_CASE(test_sgx_ioctl_SGXIOC_GEN_EPID_QUOTE),
     TEST_CASE(test_sgx_ioctl_SGXIOC_SELF_TARGET),
     TEST_CASE(test_sgx_ioctl_SGXIOC_CREATE_AND_VERIFY_REPORT),
     TEST_CASE(test_sgx_ioctl_SGXIOC_GET_KEY),

@@ -70,43 +70,6 @@ impl DevSgx {
                 let arg = nonbuiltin_cmd.arg_mut::<i32>()?;
                 *arg = unsafe { EDMM_supported };
             }
-            SGX_CMD_NUM_GET_EPID_GROUP_ID => {
-                let arg = nonbuiltin_cmd.arg_mut::<sgx_epid_group_id_t>()?;
-                *arg = SGX_EPID_ATTEST_AGENT.lock().unwrap().get_epid_group_id()?;
-            }
-            SGX_CMD_NUM_GEN_EPID_QUOTE => {
-                // Prepare the arguments
-                let arg = nonbuiltin_cmd.arg_mut::<IoctlGenEPIDQuoteArg>()?;
-                let sigrl = {
-                    let sigrl_ptr = arg.sigrl_ptr;
-                    let sigrl_len = arg.sigrl_len as usize;
-                    if !sigrl_ptr.is_null() && sigrl_len > 0 {
-                        let sigrl_slice =
-                            unsafe { std::slice::from_raw_parts(sigrl_ptr, sigrl_len) };
-                        Some(sigrl_slice)
-                    } else {
-                        None
-                    }
-                };
-                let mut quote_output_buf = unsafe {
-                    let quote_ptr = arg.quote_buf;
-                    if quote_ptr.is_null() {
-                        return_errno!(EINVAL, "the output buffer for quote cannot point to NULL");
-                    }
-                    let quote_len = arg.quote_buf_len as usize;
-                    std::slice::from_raw_parts_mut(quote_ptr, quote_len)
-                };
-
-                // Generate the quote
-                let quote = SGX_EPID_ATTEST_AGENT.lock().unwrap().generate_quote(
-                    sigrl,
-                    &arg.report_data,
-                    arg.quote_type,
-                    &arg.spid,
-                    &arg.nonce,
-                )?;
-                quote.dump_to_buf(quote_output_buf)?;
-            }
             SGX_CMD_NUM_SELF_TARGET => {
                 let arg = nonbuiltin_cmd.arg_mut::<sgx_target_info_t>()?;
                 *arg = get_self_target()?;
@@ -268,29 +231,12 @@ impl DevSgx {
     }
 }
 
-lazy_static! {
-    pub static ref SGX_EPID_ATTEST_AGENT: SgxMutex<SgxEPIDAttestationAgent> =
-        { SgxMutex::new(SgxEPIDAttestationAgent::new()) };
-}
-
 #[cfg(feature = "dcap")]
 lazy_static! {
     pub static ref SGX_DCAP_QUOTE_GENERATOR: Option<SgxDCAPQuoteGenerator> =
         { SgxDCAPQuoteGenerator::new() };
     pub static ref SGX_DCAP_QUOTE_VERIFIER: Option<SgxDCAPQuoteVerifier> =
         { SgxDCAPQuoteVerifier::new() };
-}
-
-#[repr(C)]
-struct IoctlGenEPIDQuoteArg {
-    report_data: sgx_report_data_t,    // Input
-    quote_type: sgx_quote_sign_type_t, // Input
-    spid: sgx_spid_t,                  // Input
-    nonce: sgx_quote_nonce_t,          // Input
-    sigrl_ptr: *const u8,              // Input (optional)
-    sigrl_len: u32,                    // Input (optional)
-    quote_buf_len: u32,                // Input
-    quote_buf: *mut u8,                // Output
 }
 
 #[repr(C)]
