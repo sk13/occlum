@@ -114,7 +114,7 @@ ifeq ($(SGX_MODE), HW)
 else ifeq ($(SGX_MODE), HYPER)
 	SGX_LFLAGS_U := $(SGX_COMMON_CFLAGS) -lpthread -L$(SGX_LIBRARY_PATH) -Wl,-Bstatic -lsgx_urts_hyper -Wl,-Bdynamic -lsgx_uae_service_hyper
 else
-	SGX_LFLAGS_U := $(SGX_COMMON_CFLAGS) -lpthread -L$(SGX_LIBRARY_PATH) -Wl,-Bstatic -lsgx_urts_sim -Wl,-Bdynamic -lsgx_uae_service_sim
+	SGX_LFLAGS_U := $(SGX_COMMON_CFLAGS) -lpthread -L$(SGX_LIBRARY_PATH) -Wl,-Bstatic -lsgx_urts_sim -lcrypto -Wl,-Bdynamic -ldl -lsgx_uae_service_sim
 endif
 
 #
