@@ -6,7 +6,8 @@
 //! the usual PKI is checked (chain, names, validity); the trust decision is
 //! made on the quote and the measurements allowed by the configuration.
 //!
-//! This is wire compatible with the grpc_ratls server of the toolchain.
+//! This is wire compatible with the C grpc_ratls server that Occlum had before
+//! (a patched gRPC), which the client was tested against.
 
 use std::error::Error;
 use std::fmt;

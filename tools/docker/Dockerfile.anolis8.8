@@ -185,9 +185,6 @@ RUN cd dcap_lib && ./build.sh && cd .. && rm -rf dcap_lib
 WORKDIR /root/occlum/tools/toolchains
 RUN cd aecs_client && ./build.sh && cd .. && rm -rf aecs_client
 
-# Install GRPC RATLS
-WORKDIR /root/occlum/tools/toolchains
-RUN cd grpc_ratls && ./build.sh && cd .. && rm -rf grpc_ratls && rm -rf /tmp/grpc*
 
 # Build and install Occlum
 WORKDIR /root

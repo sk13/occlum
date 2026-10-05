@@ -1,6 +1,5 @@
-//! A key server for enclaves with remote attestation: the server of the
-//! grpc_ratls toolchain, which `init_grpc_ratls` is the client of, with
-//! secrets for several enclaves in one server. An enclave that asks for a
+//! A key server for enclaves with remote attestation, which `init_grpc_ratls`
+//! is the client of, with secrets for several enclaves in one server. An enclave that asks for a
 //! secret gets the one of that name of the client it is (see
 //! `occlum_ratls::server`), so all clients can have an `image_key`.
 //!
@@ -30,7 +29,7 @@
 //! ```
 //!
 //! `ra` is the configuration of the verification of the peers as in the one of
-//! `init_grpc_ratls` and of the server of the toolchain; a peer is the client
+//! `init_grpc_ratls`; a peer is the client
 //! if it is allowed by it. A peer which is allowed by the `ra` of several
 //! clients, or of none, gets nothing. It has to verify MRENCLAVE or MRSIGNER.
 //! The secrets are in `secrets`, by name with the base64 of their value, and

@@ -44,7 +44,7 @@ docker run --network host \
         --device /dev/sgx/enclave --device /dev/sgx/provision \
         --env PCCS_URL=${pccs_url} \
         ${registry}/init_ra_server:${tag} \
-        occlum run /bin/server ${grpc_domain}:${grpc_port} &
+        occlum run /bin/ratls_kms ${grpc_domain}:${grpc_port} /kms.json &
 
 sleep 3
 

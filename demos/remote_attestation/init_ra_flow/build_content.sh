@@ -104,6 +104,12 @@ function build_server_instance()
         .sgx_mrs[0].config_svn = 1234 |
         .sgx_mrs[0].debuggable = true ' ../ra_config_template.json > dynamic_config.json
 
+    # The configuration of ratls_kms: the client with the enclave it is (the
+    # RA verify config) and its secrets
+    jq -n --slurpfile ra dynamic_config.json --slurpfile secrets ../secret_config.json \
+        '{clients: [{name: "flask", ra: $ra[0], secrets: $secrets[0]}]}' > kms.json
+    rm dynamic_config.json
+
     new_json="$(jq '.resource_limits.user_space_size = "1MB" |
                     .resource_limits.user_space_max_size = "500MB" |
                     .metadata.debuggable = true ' Occlum.json)" && \

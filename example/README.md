@@ -7,7 +7,7 @@ This example introduces the development and deployment of a whole-flow confident
 
 ## Highlights
 
-* Whole-flow sensitive data protection by utilizing the Occlum [`GRPC RATLS`](../../tools/toolchains/grpc_ratls/) solution.
+* Whole-flow sensitive data protection by utilizing the Occlum GRPC RATLS solution ([`ratls_kms`](../tools/ratls_kms) as the server).
 
 * Directly generate inference service (`Tensorflow-serving`) running in TEE from Docker image (`tensorflow/serving`) without modification.
 
@@ -88,7 +88,7 @@ Below are the two Occlum images.
 * **occlum_server**
 
 It works as the role of GRPC-RATLS server.
-The primary content are from toolchain [`ra_tls`](../tools/toolchains/grpc_ratls).
+It runs [`ratls_kms`](../tools/ratls_kms) with a configuration (`kms.json`) made of the RA verify config and the secrets.
 
 * **occlum_tf**
 

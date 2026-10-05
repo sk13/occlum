@@ -105,7 +105,13 @@ function build_server_instance()
         .verify_enclave_debuggable = "on" |
         .sgx_mrs[0].mr_enclave = ''"'`get_mr tf mrenclave`'" |
         .sgx_mrs[0].mr_signer = ''"'`get_mr tf mrsigner`'" |
-        .sgx_mrs[0].debuggable = false ' ../ra_config_template.json > dynamic_config.json 
+        .sgx_mrs[0].debuggable = false ' ../ra_config_template.json > dynamic_config.json
+
+    # The configuration of ratls_kms: the client with the enclave it is (the
+    # RA verify config) and its secrets
+    jq -n --slurpfile ra dynamic_config.json --slurpfile secrets ../secret_config.json \
+        '{clients: [{name: "tf", ra: $ra[0], secrets: $secrets[0]}]}' > kms.json
+    rm dynamic_config.json
 
     new_json="$(jq '.resource_limits.user_space_size = "1MB" |
                     .resource_limits.user_space_max_size = "500MB" |

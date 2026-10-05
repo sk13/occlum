@@ -7,9 +7,9 @@
 //! of that client, so the clients need no different names for their secrets
 //! (they all ask for "image_key", for example).
 //!
-//! The protocol is the one of the server of the grpc_ratls toolchain, with
-//! `init_grpc_ratls` as the client (the replies are the same, but this is not
-//! tested with the C client library).
+//! The protocol is the one of the C grpc_ratls server and client that Occlum
+//! had before (a patched gRPC with RA-TLS), with `init_grpc_ratls` as the
+//! client.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -42,7 +42,7 @@ pub struct Client {
     name: String,
     policy: Policy,
     /// The reply for each secret, which is its base64 encoding as a JSON
-    /// string, as the server of the toolchain sends it
+    /// string, as the C server sent it
     replies: HashMap<String, String>,
 }
 

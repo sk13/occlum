@@ -8,7 +8,7 @@ GRPC_SERVER="${GRPC_SERVER_DOMAIN}:${GRPC_SERVER_PORT}"
 echo "Start GRPC server on backgound ..."
 
 pushd occlum_server
-occlum run /bin/server ${GRPC_SERVER} &
+occlum run /bin/ratls_kms ${GRPC_SERVER} /kms.json &
 popd
 
 sleep 10

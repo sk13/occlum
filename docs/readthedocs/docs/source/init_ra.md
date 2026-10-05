@@ -76,7 +76,7 @@ There is a demo [init_aecs_client](https://github.com/occlum/occlum/tree/master/
 
 ## GRPC-RATLS Init-RA
 
-It is based on a GRPC-RATLS implementation. The client in the Init process is written in Rust, with [rustls](https://github.com/rustls/rustls) for TLS and [h2](https://github.com/hyperium/h2) for the gRPC call, so it does not need any C or C++ library. It gets all the secrets over one connection, and its own RA-TLS certificate and quote are generated once. The KMS server is the `server` of the [`grpc_ratls`](../../../../tools/toolchains/grpc_ratls) toolchain.
+It is based on a GRPC-RATLS implementation. The client in the Init process is written in Rust, with [rustls](https://github.com/rustls/rustls) for TLS and [h2](https://github.com/hyperium/h2) for the gRPC call, so it does not need any C or C++ library. It gets all the secrets over one connection, and its own RA-TLS certificate and quote are generated once. The KMS server is [`ratls_kms`](../../../../tools/ratls_kms) (see below). Before, the client and the server were C++ programs with a patched gRPC (the `grpc_ratls` toolchain), which is gone.
 
 Occlum provides a way to embed the GRPC-RATLS client function in Occlum Init process by simply running `occlum new occlum_instance --init-ra grpc_ratls` to initiate an Occlum instance.
 
@@ -130,9 +130,7 @@ Details please refer to the demo [init_ra_flow](https://github.com/occlum/occlum
 
 ### One key server for several enclaves
 
-The `server` of the `grpc_ratls` toolchain gives all its secrets to every enclave it accepts, and its configuration says which enclaves it accepts only as a whole. For enclaves with different secrets, e.g. each with the key of its own encrypted image (which `init_grpc_ratls` always requests as `image_key`), that needs one server process per enclave.
-
-`ratls_kms` (in `tools/ratls_kms`, installed as `/opt/occlum/build/bin/ratls_kms`, for glibc enclaves) is a server for all of them: it takes the measurements of a peer from its verified quote, finds the one client whose policy allows them, and answers a request with the secret of that name of that client. A peer which is allowed by no client, or by several, gets nothing. It speaks the same protocol, so `init_grpc_ratls` is its client, with the same `init_ra_conf.json`.
+`ratls_kms` (in `tools/ratls_kms`, installed as `/opt/occlum/build/bin/ratls_kms`, for glibc enclaves) is a server for any number of enclaves, which may have different secrets, e.g. each the key of its own encrypted image (which `init_grpc_ratls` always requests as `image_key`): it takes the measurements of a peer from its verified quote, finds the one client whose policy allows them, and answers a request with the secret of that name of that client. A peer which is allowed by no client, or by several, gets nothing. It speaks the same protocol, so `init_grpc_ratls` is its client, with the same `init_ra_conf.json`.
 
 ```
 ratls_kms <address to listen on> <configuration>

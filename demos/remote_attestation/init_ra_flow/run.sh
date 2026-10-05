@@ -6,7 +6,7 @@ GRPC_ADDR="localhost:50051"
 echo "Start GRPC server on backgound ..."
 
 pushd occlum_server
-occlum run /bin/server ${GRPC_ADDR} &
+occlum run /bin/ratls_kms ${GRPC_ADDR} /kms.json &
 popd
 
 sleep 3

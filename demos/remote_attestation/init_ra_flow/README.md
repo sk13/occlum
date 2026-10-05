@@ -6,7 +6,7 @@ Remote attestation is a key part in the confidential computing. Occlum provides 
 
 Occlum provides a `Init RA` way to separate the RA operation and the actual application. With this way, the APP developers don't need know too much about the RA and the application doesn't need to be modified for RA.
 
-This demo shows the `Init RA` way with a sample [`Flask TLS web application`](../../python/flask/), based on [`GRPC-RATLS`](../../../tools/toolchains/grpc_ratls) server/client implementation and a customized [`init`](../../../tools/init_grpc_ratls) for Occlum InitFS.
+This demo shows the `Init RA` way with a sample [`Flask TLS web application`](../../python/flask/), based on a GRPC-RATLS server ([`ratls_kms`](../../../tools/ratls_kms)) and client implementation and a customized [`init`](../../../tools/init_grpc_ratls) for Occlum InitFS.
 
 Note: users could choose different `init` by passing parameters on `occlum init` or `occlum new`. In this demo, **grpc-ratls** client is chosen.
 
@@ -16,7 +16,7 @@ The GRPC-RATLS server holds some sensitive data thus it is usually deployed on s
 
 ## Flow
 
-* Starts the GRPC-RATLS server. It holds `RA Verify Config` JSON and `Secrets` JSON files. The `RA Verify Config` JSON records which SGX quote part should be verified. The template is [`ra_config_template.json`](./ra_config_template.json), all supported `verify_xxx` are on in default.
+* Starts the GRPC-RATLS server. It holds `RA Verify Config` JSON and `Secrets` JSON, which `build_server_instance` puts together into the configuration file `kms.json` of `ratls_kms`. The `RA Verify Config` JSON records which SGX quote part should be verified. The template is [`ra_config_template.json`](./ra_config_template.json), all supported `verify_xxx` are on in default.
 ```
 {
     "verify_mr_enclave" : "on",
@@ -91,7 +91,7 @@ occlum_server
 * Starts the GRPC-RATLS server in background.
 ```
 cd occlum_server
-occlum run /bin/server localhost:50051 &
+occlum run /bin/ratls_kms localhost:50051 /kms.json &
 ```
 
 * Starts the Flask-TLS web portal in backgroud.
