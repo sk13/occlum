@@ -81,11 +81,12 @@ To use another development image, set the `OCCLUM_DEV_IMAGE` environment
 variable, which is passed to the `OCCLUM_DEV_IMAGE` build argument of
 `Dockerfile.ubuntu22.04-rt`.
 
-Use the SGX PSW and DCAP versions of the development image, see
-`Dockerfile.ubuntu22.04`. For example, the following command builds
-`occlum/occlum:sk13-rt-ubuntu22.04`:
+The SGX PSW and DCAP packages of the runtime image are the ones of the
+development image, in exactly the versions installed there (read from its
+package database), so no versions are given. For example, the following command
+builds `occlum/occlum:sk13-rt-ubuntu22.04`:
 ```
-./build_rt_image.sh sk13 ubuntu22.04 2.21.100.1 1.18.100.1
+./build_rt_image.sh sk13 ubuntu22.04
 ```
 
 The runtime image only provides the `occlum` command line tool. `occlum run`

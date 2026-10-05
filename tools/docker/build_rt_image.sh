@@ -12,7 +12,7 @@ build_image
 Build an Occlum Docker runtime image for a specific OS
 
 USAGE:
-    build_rt_image.sh <OCCLUM_VERSION> <OS_NAME> <SGX_PSW_VERSION> <SGX_DCAP_VERSION>
+    build_rt_image.sh <OCCLUM_VERSION> <OS_NAME> [<SGX_PSW_VERSION> <SGX_DCAP_VERSION>]
 
 <OCCLUM_VERSION>:
     For ubuntu20.04, the version of the Occlum debian packages to install, e.g "0.29.7".
@@ -28,14 +28,16 @@ USAGE:
 
 <SGX_PSW_VERSION>:
     The SGX PSW version libraries expected to be installed in the runtime docker image.
+    Required for ubuntu20.04. Not for ubuntu22.04, where the runtime image gets the
+    SGX packages in the versions that are installed in the Occlum development image.
 
 <SGX_DCAP_VERSION>:
     The SGX DCAP version libraries expected to be installed in the runtime docker image.
+    Required for ubuntu20.04. Not for ubuntu22.04, see above.
 
 
 Note: <OCCLUM_VERSION>, <SGX_PSW_VERSION> and <SGX_DCAP_VERSION> have dependencies. Details
-please refer to Dockerfile.ubuntu20.04. For ubuntu22.04, use the SGX PSW and DCAP versions of
-the Occlum development image, see Dockerfile.ubuntu22.04.
+please refer to Dockerfile.ubuntu20.04.
 
 The resulting Docker image will have "occlum/occlum:<OCCLUM_VERSION>-rt-<OS_NAME>" as its label.
 EOF
@@ -44,7 +46,7 @@ EOF
 
 set -e
 
-if [[ ( "$#" != 4 ) ]] ; then
+if [[ ( "$#" < 2 ) || ( "$#" > 4 ) ]] ; then
     report_error
 fi
 
@@ -62,6 +64,11 @@ function check_item_in_list() {
 check_item_in_list "$os_name" "ubuntu20.04 ubuntu22.04" || report_error
 
 extra_build_args=()
+if [[ "$os_name" == "ubuntu20.04" ]]; then
+    # The Dockerfile of ubuntu22.04 takes the versions from the development image
+    [[ "$#" == 4 ]] || report_error
+    extra_build_args+=(--build-arg PSW_VERSION="$sgx_psw_version" --build-arg DCAP_VERSION="$sgx_dcap_version")
+fi
 if [ -n "$OCCLUM_DEV_IMAGE" ]; then
     extra_build_args+=(--build-arg OCCLUM_DEV_IMAGE="$OCCLUM_DEV_IMAGE")
 fi
@@ -70,7 +77,5 @@ cd "$script_dir"
 docker build -f "$script_dir/Dockerfile.$os_name-rt" \
     -t "occlum/occlum:$occlum_version-rt-$os_name" \
     --build-arg OCCLUM_VERSION=$occlum_version \
-    --build-arg PSW_VERSION=$sgx_psw_version \
-    --build-arg DCAP_VERSION=$sgx_dcap_version \
     "${extra_build_args[@]}" \
     .

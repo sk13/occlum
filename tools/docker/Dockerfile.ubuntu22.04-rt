@@ -4,38 +4,32 @@
 ARG OCCLUM_DEV_IMAGE=docker.io/sk13sk13/occlum:sk13-ubuntu22.04
 FROM ${OCCLUM_DEV_IMAGE} AS occlum-dev
 
+# The versions of the SGX packages that the runtime needs, as installed in the
+# development image
+FROM occlum-dev AS sgx-packages
+RUN dpkg-query -W -f='${Package}=${Version}\n' \
+        libsgx-launch libsgx-epid libsgx-quote-ex libsgx-urts \
+        libsgx-enclave-common libsgx-uae-service libsgx-ae-pce \
+        libsgx-ae-qe3 libsgx-ae-id-enclave libsgx-ae-qve libsgx-dcap-ql \
+        libsgx-pce-logic libsgx-qe3-logic libsgx-dcap-default-qpl \
+        libsgx-dcap-quote-verify > /sgx-packages
+
 FROM ubuntu:22.04
 LABEL maintainer="Qi Zheng <huaiqing.zq@antgroup.com>"
 
-# Install SGX DCAP and PSW
+# Install SGX DCAP and PSW: the packages of the development image, in exactly
+# the versions installed there (PSW, DCAP, and the older EPID and launch
+# packages), so that the runtime cannot differ from the image Occlum was built
+# in. The SGX SDK is not part of the runtime; the enclave's libraries come with
+# the Occlum instance.
 ENV APT_KEY_DONT_WARN_ON_DANGEROUS_USAGE=1
-# As in Dockerfile.ubuntu22.04: DCAP 1.27 needs PSW 2.30, whose EPID and launch
-# packages stop at 2.27
-ARG PSW_VERSION=2.30.101.1
-ARG PSW_LEGACY_VERSION=2.27.100.1
-ARG DCAP_VERSION=1.27.101.1
+COPY --from=sgx-packages /sgx-packages /tmp/sgx-packages
 RUN apt update && DEBIAN_FRONTEND="noninteractive" apt install -y --no-install-recommends gnupg wget ca-certificates jq && \
     echo 'deb [arch=amd64] https://download.01.org/intel-sgx/sgx_repo/ubuntu jammy main' | tee /etc/apt/sources.list.d/intel-sgx.list && \
     wget -qO - https://download.01.org/intel-sgx/sgx_repo/ubuntu/intel-sgx-deb.key | apt-key add - && \
-    apt update && apt install -y --no-install-recommends \
-        libsgx-launch=$PSW_LEGACY_VERSION-jammy1 \
-        libsgx-epid=$PSW_LEGACY_VERSION-jammy1 \
-        libsgx-quote-ex=$PSW_VERSION-jammy1 \
-        libsgx-urts=$PSW_VERSION-jammy1 \
-        libsgx-enclave-common=$PSW_VERSION-jammy1 \
-        libsgx-uae-service=$PSW_VERSION-jammy1 \
-        libsgx-ae-pce=$PSW_VERSION-jammy1 \
-        libsgx-ae-qe3=$DCAP_VERSION-jammy1 \
-        libsgx-ae-id-enclave=$DCAP_VERSION-jammy1 \
-        libsgx-ae-qve=$DCAP_VERSION-jammy1 \
-        libsgx-dcap-ql=$DCAP_VERSION-jammy1 \
-        libsgx-pce-logic=$DCAP_VERSION-jammy1 \
-        libsgx-qe3-logic=$DCAP_VERSION-jammy1 \
-        libsgx-dcap-default-qpl=$DCAP_VERSION-jammy1 \
-        libsgx-dcap-quote-verify=$DCAP_VERSION-jammy1 \
-        && \
+    apt update && apt install -y --no-install-recommends $(cat /tmp/sgx-packages) && \
     apt clean && \
-    rm -rf /var/lib/apt/lists/*
+    rm -rf /var/lib/apt/lists/* /tmp/sgx-packages
 
 # Install the files of the occlum-runtime package
 COPY --from=occlum-dev \
