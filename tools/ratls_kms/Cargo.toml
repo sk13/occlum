@@ -1,12 +1,11 @@
 [package]
-name = "init_grpc_ratls"
+name = "ratls_kms"
 version = "0.1.0"
 authors = ["Zheng Qi huaiqing.zq@antgroup.com"]
 edition = "2021"
 
 [dependencies]
-libc = "0.2.84"
 occlum_ratls = { path = "../ratls" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-tokio = { version = "1", default-features = false, features = ["rt", "net", "io-util", "time"] }
+tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-thread", "net", "io-util", "time", "signal", "macros"] }

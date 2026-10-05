@@ -1,6 +1,6 @@
 include ../../src/sgxenv.mk
 
-SRC_FILES := $(shell find . -type f -name '*.rs') Cargo.toml
+SRC_FILES := $(shell find . ../ratls -type f -name '*.rs') Cargo.toml ../ratls/Cargo.toml
 RUST_TARGET_DIR := $(BUILD_DIR)/internal/tools/init_grpc_ratls/cargo-target
 RUST_OUT_DIR := $(BUILD_DIR)/bin
 TARGET_BINARY := $(RUST_OUT_DIR)/init_grpc_ratls

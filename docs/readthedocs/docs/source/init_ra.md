@@ -127,3 +127,46 @@ The json file specifies:
 
 
 Details please refer to the demo [init_ra_flow](https://github.com/occlum/occlum/tree/master/demos/remote_attestation/init_ra_flow).
+
+### One key server for several enclaves
+
+The `server` of the `grpc_ratls` toolchain gives all its secrets to every enclave it accepts, and its configuration says which enclaves it accepts only as a whole. For enclaves with different secrets, e.g. each with the key of its own encrypted image (which `init_grpc_ratls` always requests as `image_key`), that needs one server process per enclave.
+
+`ratls_kms` (in `tools/ratls_kms`, installed as `/opt/occlum/build/bin/ratls_kms`, for glibc enclaves) is a server for all of them: it takes the measurements of a peer from its verified quote, finds the one client whose policy allows them, and answers a request with the secret of that name of that client. A peer which is allowed by no client, or by several, gets nothing. It speaks the same protocol, so `init_grpc_ratls` is its client, with the same `init_ra_conf.json`.
+
+```
+ratls_kms <address to listen on> <configuration>
+```
+
+```json
+{
+    "clients": [
+        {
+            "name": "app1",
+            "ra": {
+                "verify_mr_enclave": "on",
+                "verify_mr_signer": "on",
+                "verify_isv_prod_id": "off",
+                "verify_isv_svn": "off",
+                "verify_config_svn": "off",
+                "verify_enclave_debuggable": "on",
+                "sgx_mrs": [
+                    {
+                        "mr_enclave": "<MRENCLAVE of app1>",
+                        "mr_signer": "<MRSIGNER of app1>",
+                        "isv_prod_id": 0, "isv_svn": 0, "config_svn": 0,
+                        "debuggable": false
+                    }
+                ]
+            },
+            "secrets": { "demo_key": "<base64 of the secret>" },
+            "secrets_dir": "/kms/app1"
+        }
+    ]
+}
+```
+
+* **"ra"** has the format of `ra_config` of `init_ra_conf.json` and says which enclaves are this client. It has to verify MRENCLAVE or MRSIGNER.
+* **"secrets"** are the secrets of the client by name, base64 encoded. The files of the directory **"secrets_dir"** are secrets too, named after the files, with the contents as they are (no base64 needed).
+
+The clients attest the server as before, with the `ra_config` of their `init_ra_conf.json`. The server verifies a quote outside of the threads that serve connections, but a quote with the verification result of a revoked platform, an invalid signature or an unspecified one is refused, as the Rust client of the init does.

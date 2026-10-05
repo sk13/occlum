@@ -2,9 +2,6 @@ extern crate libc;
 extern crate serde;
 extern crate serde_json;
 
-mod grpc;
-mod ratls;
-
 use libc::syscall;
 use serde::Deserialize;
 
@@ -15,7 +12,8 @@ use std::io::{ErrorKind, Read};
 use std::str;
 use std::sync::Arc;
 
-use ratls::{Dcap, Policy, RAConfig, Result};
+use occlum_ratls::grpc;
+use occlum_ratls::ratls::{self, Dcap, Policy, RAConfig, Result};
 
 /// The longest secret accepted
 const MAX_SECRET_LEN: usize = 10240;

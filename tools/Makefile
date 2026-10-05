@@ -15,6 +15,7 @@ all:
 ifndef OCCLUM_DISABLE_DCAP
 ifndef OCCLUM_NO_INIT_RA_TLS
 	@$(MAKE) --no-print-directory -C init_grpc_ratls
+	@$(MAKE) --no-print-directory -C ratls_kms
 endif
 endif
 ifndef OCCLUM_NO_INIT_RA_AECS
@@ -35,6 +36,7 @@ clean:
 ifndef OCCLUM_DISABLE_DCAP
 ifndef OCCLUM_NO_INIT_RA_TLS
 	@$(MAKE) --no-print-directory -C init_grpc_ratls clean
+	@$(MAKE) --no-print-directory -C ratls_kms clean
 endif
 endif
 ifndef OCCLUM_NO_INIT_RA_AECS

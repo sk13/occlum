@@ -20,7 +20,11 @@ use rustls::crypto::{ring as ring_provider, verify_tls13_signature_with_raw_key}
 use rustls::pki_types::{
     CertificateDer, PrivatePkcs8KeyDer, ServerName, SubjectPublicKeyInfoDer, UnixTime,
 };
-use rustls::{CertificateError, ClientConfig, DigitallySignedStruct, OtherError, SignatureScheme};
+use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
+use rustls::{
+    CertificateError, ClientConfig, DigitallySignedStruct, DistinguishedName, OtherError,
+    ServerConfig, SignatureScheme,
+};
 use serde::Deserialize;
 use x509_parser::der_parser::oid::Oid;
 use x509_parser::prelude::{FromDer, X509Certificate};
@@ -317,6 +321,12 @@ impl Policy {
         })
     }
 
+    /// Whether the policy checks which enclave the peer is (MRENCLAVE or
+    /// MRSIGNER), and not only things like its SVN
+    pub fn verifies_identity(&self) -> bool {
+        self.verify_mr_enclave || self.verify_mr_signer
+    }
+
     /// The peer is accepted if it matches one of the allowed sets on every
     /// measurement to verify. With no set at all, no peer is accepted.
     pub fn allows(&self, m: &Measurement) -> bool {
@@ -365,13 +375,13 @@ impl Identity {
 }
 
 /// Check the certificate of the peer: the quote it carries must be valid and
-/// bound to the certificate, and its measurements allowed. Returns the SPKI
-/// of the certificate, which is the key the peer proves possession of.
-pub(crate) fn verify_peer_cert(
+/// bound to the certificate. Returns the measurements of the peer and the
+/// SPKI of the certificate, which is the key the peer proves possession of.
+/// The measurements are not judged here.
+pub fn verify_peer_quote(
     cert_der: &[u8],
     attestation: &dyn Attestation,
-    policy: &Policy,
-) -> Result<Vec<u8>> {
+) -> Result<(Measurement, Vec<u8>)> {
     let (_, cert) = X509Certificate::from_der(cert_der)
         .map_err(|e| ra_err!("cannot parse the certificate of the peer: {}", e))?;
 
@@ -393,7 +403,17 @@ pub(crate) fn verify_peer_cert(
             "the quote of the peer does not belong to the public key of its certificate"
         ));
     }
+    Ok((measurement, spki.to_vec()))
+}
 
+/// Check the certificate of the peer as `verify_peer_quote` does, and that
+/// its measurements are allowed by the policy
+pub(crate) fn verify_peer_cert(
+    cert_der: &[u8],
+    attestation: &dyn Attestation,
+    policy: &Policy,
+) -> Result<Vec<u8>> {
+    let (measurement, spki) = verify_peer_quote(cert_der, attestation)?;
     if !policy.allows(&measurement) {
         return Err(ra_err!(
             "the SGX measurements of the peer are not in the allowable list\n{}",
@@ -401,7 +421,23 @@ pub(crate) fn verify_peer_cert(
         ));
     }
     println!("RA-TLS: verified the peer\n{}", measurement);
-    Ok(spki.to_vec())
+    Ok(spki)
+}
+
+/// The signature is checked against the key the certificate carries. That the
+/// key is the one of an attested enclave is checked with the certificate. The
+/// raw key is used since the certificate is not issued by anyone and is not
+/// made for the PKI libraries.
+fn verify_signature_with_cert_key(
+    message: &[u8],
+    cert: &CertificateDer<'_>,
+    dss: &DigitallySignedStruct,
+    algorithms: &WebPkiSupportedAlgorithms,
+) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
+    let (_, parsed) = X509Certificate::from_der(cert)
+        .map_err(|_| rustls::Error::InvalidCertificate(CertificateError::BadEncoding))?;
+    let spki = SubjectPublicKeyInfoDer::from(parsed.tbs_certificate.subject_pki.raw);
+    verify_tls13_signature_with_raw_key(message, &spki, dss, algorithms)
 }
 
 fn rejected(e: Box<dyn Error + Send + Sync>) -> rustls::Error {
@@ -462,14 +498,7 @@ impl ServerCertVerifier for RaVerifier {
         cert: &CertificateDer<'_>,
         dss: &DigitallySignedStruct,
     ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
-        // The signature is checked against the key the certificate carries.
-        // That the key is the one of an attested enclave was checked with the
-        // certificate. The raw key is used since the certificate is not
-        // issued by anyone and is not made for the PKI libraries.
-        let (_, parsed) = X509Certificate::from_der(cert)
-            .map_err(|_| rustls::Error::InvalidCertificate(CertificateError::BadEncoding))?;
-        let spki = SubjectPublicKeyInfoDer::from(parsed.tbs_certificate.subject_pki.raw);
-        verify_tls13_signature_with_raw_key(message, &spki, dss, &self.algorithms)
+        verify_signature_with_cert_key(message, cert, dss, &self.algorithms)
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
@@ -497,6 +526,75 @@ pub fn client_config(
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(verifier))
         .with_client_auth_cert(vec![identity.cert], identity.key.into())?;
+    config.alpn_protocols = vec![ALPN_H2.to_vec()];
+    Ok(Arc::new(config))
+}
+
+/// The verifier of the certificate of a client in the server. It has no say
+/// on the measurements of the client: with the certificate, the server only
+/// checks that the client has the key of the certificate (the signature of
+/// the handshake), so that the certificate has to be verified, with
+/// `verify_peer_quote`, by the user of the connection, before anything is
+/// served on it. That is done outside of the TLS handshake, as the
+/// verification of a quote may take long.
+#[derive(Debug)]
+struct RaClientVerifier {
+    algorithms: WebPkiSupportedAlgorithms,
+}
+
+impl ClientCertVerifier for RaClientVerifier {
+    fn root_hint_subjects(&self) -> &[DistinguishedName] {
+        &[]
+    }
+
+    fn verify_client_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _now: UnixTime,
+    ) -> std::result::Result<ClientCertVerified, rustls::Error> {
+        Ok(ClientCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
+        Err(rustls::Error::PeerIncompatible(
+            rustls::PeerIncompatible::Tls12NotOffered,
+        ))
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
+        verify_signature_with_cert_key(message, cert, dss, &self.algorithms)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.algorithms.supported_schemes()
+    }
+}
+
+/// The TLS configuration of an RA-TLS server: it presents a certificate with
+/// our own quote and requires a certificate of the client. The certificate of
+/// the client must be verified (`verify_peer_quote`) after the handshake, with
+/// `ServerConnection::peer_certificates`.
+pub fn server_config(attestation: &dyn Attestation) -> Result<Arc<ServerConfig>> {
+    let identity = Identity::generate(attestation)?;
+    let provider = Arc::new(ring_provider::default_provider());
+    let verifier = RaClientVerifier {
+        algorithms: provider.signature_verification_algorithms,
+    };
+    let mut config = ServerConfig::builder_with_provider(provider)
+        .with_protocol_versions(&[&rustls::version::TLS13])?
+        .with_client_cert_verifier(Arc::new(verifier))
+        .with_single_cert(vec![identity.cert], identity.key.into())?;
     config.alpn_protocols = vec![ALPN_H2.to_vec()];
     Ok(Arc::new(config))
 }
