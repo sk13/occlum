@@ -206,8 +206,12 @@ WORKDIR /root/occlum/tools/toolchains
 RUN cd dcap_lib && ./build.sh && cd .. && rm -rf dcap_lib
 
 # Install AECS Client library
-WORKDIR /root/occlum/tools/toolchains
-RUN cd aecs_client && ./build.sh && cd .. && rm -rf aecs_client
+# Disabled: AECS is hardly maintained (last upstream commit 2024-01) and its C++
+# client needs a recursive clone and a build of its own. Without it, init_aecs
+# cannot be built (OCCLUM_NO_INIT_RA_AECS below), so "occlum new --init-ra aecs"
+# is not available; "--init-ra grpc_ratls" is.
+# WORKDIR /root/occlum/tools/toolchains
+# RUN cd aecs_client && ./build.sh && cd .. && rm -rf aecs_client
 
 
 # Install Occlum
@@ -217,7 +221,7 @@ RUN cp /root/occlum/tools/docker/start_aesm.sh /opt/occlum/ && \
     cd occlum && \
     source /opt/intel/sgxsdk/environment && \
     make submodule && \
-    OCCLUM_RELEASE_BUILD=1 make install && \
+    OCCLUM_NO_INIT_RA_AECS=1 OCCLUM_RELEASE_BUILD=1 make install && \
     cp -r demos /root/demos && \
     rm -rf /root/occlum
 
