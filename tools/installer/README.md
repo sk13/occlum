@@ -45,7 +45,7 @@ Please follow [Intel SGX Installation Guide](https://download.01.org/intel-sgx/s
 To install PSW, follow the guide to add Intel® SGX repository to apt source. And then run:
 ```
 apt-get update
-apt-get install -y libsgx-epid libsgx-urts libsgx-quote-ex libsgx-uae-service libsgx-dcap-ql
+apt-get install -y libsgx-urts libsgx-quote-ex libsgx-uae-service libsgx-dcap-ql
 ```
 
 After installing PSW, please make sure that the aesm service is running:

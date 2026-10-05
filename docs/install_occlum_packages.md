@@ -25,7 +25,7 @@ Please follow [Intel SGX Installation Guide](https://download.01.org/intel-sgx/s
 
 After adding SGX RPM local repository to yum source, run the below command to install PSW:
 ```
-yum --nogpgcheck install -y libsgx-dcap-ql libsgx-epid libsgx-urts libsgx-quote-ex libsgx-dcap-quote-verify-dev
+yum --nogpgcheck install -y libsgx-dcap-ql libsgx-urts libsgx-quote-ex libsgx-dcap-quote-verify-dev
 ```
 
 Also, UAE service libraries are needed but may not installed together with SGX PSW if SGX PSW installer is used. Go to SGX RPM local repo and run:
@@ -74,7 +74,7 @@ Please follow [Intel SGX Installation Guide](https://download.01.org/intel-sgx/s
 To install PSW, follow the guide to add Intel® SGX repository to APT source. And then run:
 ```
 apt-get update
-apt-get install -y libsgx-dcap-ql libsgx-epid libsgx-urts libsgx-quote-ex libsgx-uae-service libsgx-dcap-quote-verify-dev
+apt-get install -y libsgx-dcap-ql libsgx-urts libsgx-quote-ex libsgx-uae-service libsgx-dcap-quote-verify-dev
 ```
 
 After installing PSW, please make sure `aesm` service is in `active (running)` state by checking:
