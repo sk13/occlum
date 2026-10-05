@@ -9,14 +9,17 @@ LABEL maintainer="Qi Zheng <huaiqing.zq@antgroup.com>"
 
 # Install SGX DCAP and PSW
 ENV APT_KEY_DONT_WARN_ON_DANGEROUS_USAGE=1
-ARG PSW_VERSION=2.21.100.1
-ARG DCAP_VERSION=1.18.100.1
+# As in Dockerfile.ubuntu22.04: DCAP 1.27 needs PSW 2.30, whose EPID and launch
+# packages stop at 2.27
+ARG PSW_VERSION=2.30.101.1
+ARG PSW_LEGACY_VERSION=2.27.100.1
+ARG DCAP_VERSION=1.27.101.1
 RUN apt update && DEBIAN_FRONTEND="noninteractive" apt install -y --no-install-recommends gnupg wget ca-certificates jq && \
     echo 'deb [arch=amd64] https://download.01.org/intel-sgx/sgx_repo/ubuntu jammy main' | tee /etc/apt/sources.list.d/intel-sgx.list && \
     wget -qO - https://download.01.org/intel-sgx/sgx_repo/ubuntu/intel-sgx-deb.key | apt-key add - && \
     apt update && apt install -y --no-install-recommends \
-        libsgx-launch=$PSW_VERSION-jammy1 \
-        libsgx-epid=$PSW_VERSION-jammy1 \
+        libsgx-launch=$PSW_LEGACY_VERSION-jammy1 \
+        libsgx-epid=$PSW_LEGACY_VERSION-jammy1 \
         libsgx-quote-ex=$PSW_VERSION-jammy1 \
         libsgx-urts=$PSW_VERSION-jammy1 \
         libsgx-enclave-common=$PSW_VERSION-jammy1 \
