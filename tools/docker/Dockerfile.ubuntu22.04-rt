@@ -8,7 +8,7 @@ FROM ${OCCLUM_DEV_IMAGE} AS occlum-dev
 # development image
 FROM occlum-dev AS sgx-packages
 RUN dpkg-query -W -f='${Package}=${Version}\n' \
-        libsgx-launch libsgx-epid libsgx-quote-ex libsgx-urts \
+        libsgx-quote-ex libsgx-urts \
         libsgx-enclave-common libsgx-uae-service libsgx-ae-pce \
         libsgx-ae-qe3 libsgx-ae-id-enclave libsgx-ae-qve libsgx-dcap-ql \
         libsgx-pce-logic libsgx-qe3-logic libsgx-dcap-default-qpl \
@@ -18,8 +18,8 @@ FROM ubuntu:22.04
 LABEL maintainer="Qi Zheng <huaiqing.zq@antgroup.com>"
 
 # Install SGX DCAP and PSW: the packages of the development image, in exactly
-# the versions installed there (PSW, DCAP, and the older EPID and launch
-# packages), so that the runtime cannot differ from the image Occlum was built
+# the versions installed there (PSW and DCAP), so that the runtime cannot
+# differ from the image Occlum was built
 # in. The SGX SDK is not part of the runtime; the enclave's libraries come with
 # the Occlum instance.
 ENV APT_KEY_DONT_WARN_ON_DANGEROUS_USAGE=1
