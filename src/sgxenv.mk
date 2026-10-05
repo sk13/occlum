@@ -110,7 +110,7 @@ SGX_CFLAGS_U := $(SGX_COMMON_CFLAGS) -fPIC -Wno-attributes \
 SGX_CXXFLAGS_U := $(SGX_CFLAGS_U) -std=c++11
 
 ifeq ($(SGX_MODE), HW)
-	SGX_LFLAGS_U := $(SGX_COMMON_CFLAGS) -lpthread -L$(SGX_LIBRARY_PATH) -Wl,-Bstatic -lsgx_urts -Wl,-Bdynamic -lsgx_epid -lsgx_uae_service -lsgx_enclave_common
+	SGX_LFLAGS_U := $(SGX_COMMON_CFLAGS) -lpthread -L$(SGX_LIBRARY_PATH) -Wl,-Bstatic -lsgx_urts -lcrypto -Wl,-Bdynamic -ldl -lsgx_epid -lsgx_uae_service -lsgx_enclave_common
 else ifeq ($(SGX_MODE), HYPER)
 	SGX_LFLAGS_U := $(SGX_COMMON_CFLAGS) -lpthread -L$(SGX_LIBRARY_PATH) -Wl,-Bstatic -lsgx_urts_hyper -Wl,-Bdynamic -lsgx_uae_service_hyper
 else
