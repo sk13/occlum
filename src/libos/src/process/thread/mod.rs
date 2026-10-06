@@ -13,6 +13,7 @@ use crate::net::AsEpollFile;
 use crate::net::THREAD_NOTIFIERS;
 use crate::prelude::*;
 use crate::signal::{SigQueues, SigSet, SigStack};
+use crate::syscall::PendingFpAreas;
 use crate::time::ThreadProfiler;
 use crate::untrusted::{UntrustedSliceAlloc, UntrustedSliceAllocGuard};
 
@@ -29,6 +30,8 @@ pub const IO_BUF_SIZE: usize = 128 * 1024;
 pub struct Thread {
     // Low-level info
     task: Task,
+    // The saved floating point registers that are restored but not freed yet
+    pending_fp_areas: PendingFpAreas,
     // Immutable info
     tid: ThreadId,
     // Mutable info
@@ -78,6 +81,10 @@ impl Thread {
 
     pub fn task(&self) -> &Task {
         &self.task
+    }
+
+    pub fn pending_fp_areas(&self) -> &PendingFpAreas {
+        &self.pending_fp_areas
     }
 
     pub fn tid(&self) -> pid_t {

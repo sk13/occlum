@@ -18,6 +18,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::mem::{ManuallyDrop, MaybeUninit};
 use std::ptr;
 use std::ptr::NonNull;
+use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 use time::{clockid_t, itimerspec_t, timespec_t, timeval_t};
 use util::log::{self, LevelFilter};
 use util::mem_util::from_user::*;
@@ -782,6 +783,18 @@ fn do_sysret(user_context: &mut CpuContext) -> ! {
         fn do_exit_task() -> !;
     }
     if current!().status() != ThreadStatus::Exited {
+        // Once the floating point registers of the user are restored, no code that may use
+        // them must run until the control is back in the user space. That includes freeing
+        // the heap memory of the saved registers, as the allocator can use SSE registers
+        // (e.g., if it is compiled with GCC 12 or later, which vectorizes at -O2). So the
+        // memory is not freed after the restore, but by the next return of this thread
+        // before its restore, or when the thread is dropped.
+        let pending_areas: &PendingFpAreas = {
+            let areas = current!().pending_fp_areas() as *const PendingFpAreas;
+            // The thread lives at least as long as it runs
+            unsafe { &*areas }
+        };
+        pending_areas.free();
         if user_context.extra_context_ptr != ptr::null_mut() {
             match user_context.extra_context {
                 ExtraContext::Fpregs => {
@@ -789,10 +802,7 @@ fn do_sysret(user_context: &mut CpuContext) -> ! {
                     let fpregs =
                         unsafe { Box::from_raw(user_context.extra_context_ptr as *mut FpRegs) };
                     unsafe { fpregs.restore() };
-                    // Drop automatically
-                    // Note: Manually-drop could modify some of the context registers.
-                    // For example, we observe using $XMM0 register when drop manually with debug build.
-                    // Same for the xsave area
+                    pending_areas.set_fpregs(Box::into_raw(fpregs));
                 }
                 ExtraContext::XsaveOnStack => {
                     let xsave_area = user_context.extra_context_ptr;
@@ -809,7 +819,8 @@ fn do_sysret(user_context: &mut CpuContext) -> ! {
                         )
                     };
                     xsave_area.restore();
-                    // This heap memory will finally be dropped and freed.
+                    let (ptr, size) = xsave_area.into_raw();
+                    pending_areas.set_xsave(ptr, size);
                 }
             }
             user_context.extra_context_ptr = ptr::null_mut();
@@ -1091,6 +1102,57 @@ impl FpRegs {
     }
 }
 
+/// The heap memory that holds the saved floating point registers of a thread, which the
+/// thread has restored on its way back to the user space but has not freed yet.
+///
+/// The memory cannot be freed after the restore, as the allocator may use the registers
+/// that have just been restored (see `do_sysret`), and not before it, as the restore reads
+/// it. So the thread keeps the memory here and frees it at its next return to the user
+/// space, before the restore, or when the thread is dropped.
+///
+/// The areas are only accessed by the thread itself while it runs, and by its drop.
+#[derive(Debug, Default)]
+pub struct PendingFpAreas {
+    fpregs: AtomicPtr<FpRegs>,
+    xsave_ptr: AtomicPtr<u8>,
+    xsave_size: AtomicUsize,
+}
+
+impl PendingFpAreas {
+    /// Free the areas that are pending, if any
+    pub fn free(&self) {
+        let fpregs = self.fpregs.swap(ptr::null_mut(), Ordering::Relaxed);
+        if !fpregs.is_null() {
+            drop(unsafe { Box::from_raw(fpregs) });
+        }
+        let xsave_ptr = self.xsave_ptr.swap(ptr::null_mut(), Ordering::Relaxed);
+        if !xsave_ptr.is_null() {
+            let size = self.xsave_size.load(Ordering::Relaxed);
+            drop(unsafe { BoxXsaveArea::from_raw(xsave_ptr, size) });
+        }
+    }
+
+    /// Keep the memory of the restored fpregs. Nothing but stores of single words, as it
+    /// is called with the registers of the user restored.
+    #[inline(always)]
+    pub fn set_fpregs(&self, fpregs: *mut FpRegs) {
+        self.fpregs.store(fpregs, Ordering::Relaxed);
+    }
+
+    /// Keep the memory of the restored xsave area, see `set_fpregs`
+    #[inline(always)]
+    pub fn set_xsave(&self, ptr: *mut u8, size: usize) {
+        self.xsave_size.store(size, Ordering::Relaxed);
+        self.xsave_ptr.store(ptr, Ordering::Relaxed);
+    }
+}
+
+impl Drop for PendingFpAreas {
+    fn drop(&mut self) {
+        self.free();
+    }
+}
+
 // This is used to represent the xsave area on heap.
 #[derive(Debug)]
 pub struct BoxXsaveArea {
@@ -1128,6 +1190,14 @@ impl BoxXsaveArea {
 
     pub fn raw_ptr(&self) -> *mut u8 {
         self.ptr.as_ptr()
+    }
+
+    /// Give up the ownership of the heap memory, which is not freed.
+    /// It can be reconstructed with `from_raw` from the pointer and the size.
+    pub fn into_raw(self) -> (*mut u8, usize) {
+        let raw = (self.ptr.as_ptr(), self.layout.size());
+        std::mem::forget(self);
+        raw
     }
 
     /// Restore the current CPU floating pointer states from this FpRegs instance

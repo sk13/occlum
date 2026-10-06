@@ -148,6 +148,7 @@ impl ThreadBuilder {
 
         let new_thread = Arc::new(Thread {
             task,
+            pending_fp_areas: Default::default(),
             tid,
             clear_ctid,
             robust_list,
