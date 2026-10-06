@@ -45,7 +45,8 @@ run_poi_font() {
     check_file_exist ${jar_path}
     jar_file=`basename "${jar_path}"`
     cp -r ./font-lib /opt/occlum
-    /opt/occlum/start_aesm.sh
+    # The images of Occlum for Ubuntu 22.04 have no AESM service, which Occlum does not need
+    [ -x /opt/occlum/start_aesm.sh ] && /opt/occlum/start_aesm.sh
     init_instance
     build_poi_font
     echo -e "${BLUE}occlum run JVM poi font app${NC}"

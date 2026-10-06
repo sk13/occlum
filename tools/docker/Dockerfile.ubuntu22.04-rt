@@ -8,8 +8,8 @@ FROM ${OCCLUM_DEV_IMAGE} AS occlum-dev
 # development image
 FROM occlum-dev AS sgx-packages
 RUN dpkg-query -W -f='${Package}=${Version}\n' \
-        libsgx-quote-ex libsgx-urts \
-        libsgx-enclave-common libsgx-uae-service libsgx-ae-pce \
+        libsgx-urts \
+        libsgx-enclave-common libsgx-ae-pce \
         libsgx-ae-qe3 libsgx-ae-id-enclave libsgx-ae-qve libsgx-dcap-ql \
         libsgx-pce-logic libsgx-qe3-logic libsgx-dcap-default-qpl \
         libsgx-dcap-quote-verify > /sgx-packages

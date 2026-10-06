@@ -95,18 +95,17 @@ RUN curl https://sh.rustup.rs -sSf | \
 # DCAP 1.N needs PSW 2.(N+3), so DCAP 1.27 needs PSW 2.30. The packages of EPID
 # and of the launch enclave (both end at PSW 2.27) are not installed: Occlum has
 # no EPID support, and the SGX SDK 2.28 has none for the launch enclave either.
+# The AESM service (sgx-aesm-service and its plugins) is not installed either:
+# Occlum loads the quoting enclaves of DCAP itself and does not talk to AESM.
+# -R is needed for that, as libsgx-dcap-ql recommends libsgx-quote-ex, which
+# recommends the AESM service. Only the out-of-process mode of the DCAP quote
+# library (SGX_AESM_ADDR) needs it.
 ARG PSW_VERSION=2.30.101.1
 ARG DCAP_VERSION=1.27.101.1
-RUN apt-get update && aptitude install -y \
-        libsgx-quote-ex-dev=$PSW_VERSION-jammy1 \
+RUN apt-get update && aptitude -R install -y \
         libsgx-urts=$PSW_VERSION-jammy1 \
         libsgx-enclave-common=$PSW_VERSION-jammy1 \
-        libsgx-uae-service=$PSW_VERSION-jammy1 \
         libsgx-ae-pce=$PSW_VERSION-jammy1 \
-        sgx-aesm-service=$PSW_VERSION-jammy1 \
-        libsgx-aesm-pce-plugin=$PSW_VERSION-jammy1 \
-        libsgx-aesm-ecdsa-plugin=$PSW_VERSION-jammy1 \
-        libsgx-aesm-quote-ex-plugin=$PSW_VERSION-jammy1 \
         libsgx-ae-id-enclave=$DCAP_VERSION-jammy1 \
         libsgx-ae-qe3=$DCAP_VERSION-jammy1 \
         libsgx-ae-qve=$DCAP_VERSION-jammy1 \
@@ -114,7 +113,6 @@ RUN apt-get update && aptitude install -y \
         libsgx-dcap-quote-verify-dev=$DCAP_VERSION-jammy1 \
         libsgx-dcap-ql=$DCAP_VERSION-jammy1 \
         libsgx-dcap-ql-dev=$DCAP_VERSION-jammy1 \
-        libsgx-quote-ex=$PSW_VERSION-jammy1 \
         libsgx-pce-logic=$DCAP_VERSION-jammy1 \
         libsgx-qe3-logic=$DCAP_VERSION-jammy1 \
         libsgx-dcap-default-qpl=$DCAP_VERSION-jammy1 \
@@ -217,20 +215,12 @@ RUN cd dcap_lib && ./build.sh && cd .. && rm -rf dcap_lib
 # Install Occlum
 ADD --keep-git-dir=true ${OCCLUM_REPO}#${OCCLUM_BRANCH} /root/occlum
 WORKDIR /root
-RUN cp /root/occlum/tools/docker/start_aesm.sh /opt/occlum/ && \
-    cd occlum && \
+RUN cd occlum && \
     source /opt/intel/sgxsdk/environment && \
     export OCCLUM_NO_INIT_RA_AECS=1 && \
     make submodule && \
     OCCLUM_RELEASE_BUILD=1 make install && \
     cp -r demos /root/demos && \
     rm -rf /root/occlum
-
-# Start AESM service automatically
-#
-# To do so, we add the script to ~/.bashrc. We cannot use systemd to run AESM
-# as a "real" service since the pid 1 is not systemd in Docker. So we start
-# up AESM service when an user login with an interactive shell.
-RUN mkdir -p /var/run/aesmd && echo '/opt/occlum/start_aesm.sh' >> /root/.bashrc
 
 WORKDIR /root
