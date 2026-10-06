@@ -3,6 +3,7 @@ SRC_DIR=/tmp/glibc/glibc
 BUILD_DIR=/tmp/glibc/glibc_build
 INSTALL_DIR=/opt/occlum/glibc
 GLIBC_BRANCH=${1:-"occlum-glibc-2.31"}
+GLIBC_REPO=${GLIBC_REPO:-"https://github.com/occlum/glibc"}
 
 # GCC 9/10 introduces many new checkings and will cause the build to fail.
 if [ "$(gcc -dumpversion)" = "9" ] || \
@@ -23,7 +24,7 @@ rm -rf ${INSTALL_DIR}
 mkdir -p ${SRC_DIR}
 cd ${SRC_DIR}
 # Download glibc
-git clone -b ${GLIBC_BRANCH} https://github.com/occlum/glibc .
+git clone --depth 1 -b ${GLIBC_BRANCH} ${GLIBC_REPO} .
 
 mkdir -p ${BUILD_DIR}
 cd ${BUILD_DIR}

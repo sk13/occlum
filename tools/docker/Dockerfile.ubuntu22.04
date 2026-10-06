@@ -163,8 +163,11 @@ RUN cd musl-gcc && ./build.sh && ./install_zlib.sh && cd .. && rm -rf musl-gcc
 ENV PATH="/opt/occlum/build/bin:/usr/local/occlum/bin:$PATH"
 
 # Install glibc
+# Build with e.g. --build-arg GLIBC_BRANCH=occlum-glibc-2.36 to use another version
+ARG GLIBC_REPO=https://github.com/occlum/glibc
+ARG GLIBC_BRANCH=occlum-glibc-2.35
 WORKDIR /root/occlum/tools/toolchains
-RUN cd glibc && ./build.sh occlum-glibc-2.35 && cd .. && rm -rf glibc && rm -rf /tmp/glibc*
+RUN cd glibc && GLIBC_REPO=$GLIBC_REPO ./build.sh $GLIBC_BRANCH && cd .. && rm -rf glibc && rm -rf /tmp/glibc*
 
 # Install Occlum Golang toolchain
 WORKDIR /root/occlum/tools/toolchains
