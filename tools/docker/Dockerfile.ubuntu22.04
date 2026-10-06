@@ -123,18 +123,21 @@ RUN apt-get update && aptitude -R install -y \
     rm -rf /var/lib/apt/lists/* && \
     ln -s /usr/lib/x86_64-linux-gnu/libsgx_enclave_common.so.1 /usr/lib/x86_64-linux-gnu/libsgx_enclave_common.so
 
-# Install SGX SDK: Occlum's fork of Intel SGX SDK 2.29 (the sk13 fork, which
-# carries the Occlum patches on top of Intel's sgx_2.29).
+# Install SGX SDK: Occlum's fork of Intel SGX SDK 2.30 (the sk13 fork of the SDK
+# repository, which carries the Occlum patches on top of Intel's sgx_2.30). From
+# 2.30 on, the SDK is a repository of its own; the PSW and DCAP are installed
+# from the packages above. The SDK is built with USE_OPT_LIBS=1 (IPP), as the
+# values 2 and 3 do not exist anymore.
 # The preparation clones the submodules from GitHub, which sometimes refuses
 # unauthenticated clones for a while; it can simply be repeated.
 WORKDIR /tmp
-RUN git clone -b sgx_2.29_for_occlum https://github.com/sk13/occlum-linux-sgx linux-sgx && \
+RUN git clone -b sgx_2.30_for_occlum https://github.com/sk13/occlum-intel-confidential-computing.sgx.sdk linux-sgx && \
     mkdir /etc/init && \
     cd linux-sgx && \
     for i in 1 2 3; do \
         make preparation && break || { [ $i -eq 3 ] && exit 1; sleep 30; }; \
     done && \
-    ./compile_and_install.sh no_mitigation USE_OPT_LIBS=3 && \
+    ./compile_and_install.sh && \
     echo 'source /opt/intel/sgxsdk/environment' >> /root/.bashrc && \
     rm -rf /tmp/linux-sgx
 
