@@ -394,8 +394,10 @@ int test_poll() {
         ssize_t count;
         char buf[512];
         if ((count = read(client_fd, buf, sizeof buf)) != 0) {
-            if (strcmp(buf, DEFAULT_MSG) != 0) {
-                printf("%s", buf);
+            // The message is sent without the terminating NUL
+            if (count != (ssize_t)strlen(DEFAULT_MSG) ||
+                    strncmp(buf, DEFAULT_MSG, count) != 0) {
+                printf("%.*s", count > 0 ? (int)count : 0, buf);
                 THROW_ERROR("msg mismatched");
             }
         } else {
