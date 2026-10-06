@@ -39,6 +39,26 @@ grep -qF "${SAVANNAH_CONFIG_SUB}" Makefile
 sed -i "s|${SAVANNAH_CONFIG_SUB}|${MIRROR_CONFIG_SUB}|" Makefile
 grep -qF "${MIRROR_CONFIG_SUB}" Makefile
 
+# musl-cross-make downloads the sources of GCC, binutils, GMP, MPC and MPFR from
+# ftp.gnu.org, which is often unreachable, and has been down completely at times
+# (the whole of gnu.org). It checks the SHA-1 of every source (hashes/), so any
+# mirror of the GNU archive can serve them: use the first one that has GCC. The
+# list can be replaced with GNU_MIRRORS in the environment.
+GNU_MIRRORS=${GNU_MIRRORS:-"https://mirrors.kernel.org/gnu https://ftp.fau.de/gnu https://mirror.ibcp.fr/pub/gnu https://mirrors.ocf.berkeley.edu/gnu https://mirrors.tuna.tsinghua.edu.cn/gnu https://ftp.gnu.org/pub/gnu"}
+GNU_SITE=
+for mirror in ${GNU_MIRRORS}; do
+    if wget -q --spider --timeout=20 --tries=1 "${mirror}/gcc/gcc-${GCC_VER}/gcc-${GCC_VER}.tar.xz"; then
+        GNU_SITE=${mirror}
+        break
+    fi
+    echo "The GNU mirror ${mirror} is not reachable"
+done
+if [ -z "${GNU_SITE}" ]; then
+    echo "None of the GNU mirrors is reachable: ${GNU_MIRRORS}" >&2
+    exit 1
+fi
+echo "Downloading the sources of the GNU tools from ${GNU_SITE}"
+
 # Build musl-gcc toolchain for Occlum
 cat > config.mak <<EOF
 TARGET = ${TARGET}
@@ -49,6 +69,9 @@ GCC_VER = ${GCC_VER}
 
 MUSL_VER = git-${MUSL_VER}
 MUSL_REPO = ${MUSL_REPO}
+
+GNU_SITE = ${GNU_SITE}
+DL_CMD = wget -c --tries=5 --waitretry=5 --timeout=30 -O
 EOF
 make -j$(nproc)
 make install
