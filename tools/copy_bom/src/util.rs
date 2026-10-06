@@ -444,6 +444,11 @@ pub fn extract_dependencies_from_output(
         let captures = DEPENDENCY_REGEX.captures(line);
         if let Some(captures) = captures {
             let raw_path = (&captures["path"]).to_string();
+            // glibc 2.36 lists the vDSO, which is not a file, as "name => name"
+            if raw_path == &captures["name"] {
+                debug!("skip {}, it is not a file", raw_path);
+                continue;
+            }
             if let Some(absolute_path) = convert_to_absolute(file_path, &raw_path) {
                 match default_lib_dirs {
                     None => {
