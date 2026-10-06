@@ -166,7 +166,7 @@ ENV PATH="/opt/occlum/build/bin:/usr/local/occlum/bin:$PATH"
 # Build with e.g. --build-arg GLIBC_REPO=https://github.com/occlum/glibc
 # --build-arg GLIBC_BRANCH=occlum-glibc-2.35 to use the upstream Occlum glibc
 ARG GLIBC_REPO=https://github.com/sk13/occlum-glibc
-ARG GLIBC_BRANCH=occlum-glibc-2.37
+ARG GLIBC_BRANCH=occlum-glibc-2.38
 WORKDIR /root/occlum/tools/toolchains
 RUN cd glibc && GLIBC_REPO=$GLIBC_REPO ./build.sh $GLIBC_BRANCH && cd .. && rm -rf glibc && rm -rf /tmp/glibc*
 
