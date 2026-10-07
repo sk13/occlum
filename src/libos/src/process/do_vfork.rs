@@ -35,6 +35,20 @@ use std::mem;
 // process ends. The levels cost memory of the LibOS, so there are at most MAX_VFORK_DEPTH of them. A child that a signal
 // kills never returns to its parent: its thread ends, and with it the process (see exit_thread, which frees the levels and
 // resumes the other threads, so that they can end, too).
+// 4. A vforked child ends with exit_group or exit (see do_exit_group and do_exit), e.g., with syscall(SYS_exit), which the Go
+// runtime makes in the child when its execve fails. Both return to the parent: the child has no thread to end, it runs on the
+// thread of its parent, and the clear_child_tid and the robust list of the thread are those of the parent, too. What libc does
+// before it makes the system call is not for the LibOS to undo: pthread_exit runs the destructors of the thread and unwinds its
+// stack, which are those of the parent, so the parent is not as it was when it returns (glibc aborts with a smashed stack if
+// the parent has no other thread, musl hangs when the program ends). As in Linux, nothing but _exit and execve is safe in a
+// vforked child. The signal handlers of the parent can run in the child, as the child runs on the thread of the parent. A
+// handler that ends the child does not return (no rt_sigreturn), so the signal mask and the saved context of the handler stay on
+// the thread when it returns to the parent. After a number of such children (the nested handlers are limited) the enclave aborts.
+// 5. The threads that a vforked child creates are threads of the process, which the vfork does not freeze. They run on when the
+// child has returned to its parent, also after exit_group, which ends them in Linux, and wait4 does not wait for them. An
+// exit_group of one of them ends the process, with the parent. Creating a thread in the child with clone works, but not
+// necessarily with libc: musl's pthread_create has been seen to hang in a vforked child (not investigated; the other threads
+// are frozen wherever they were, e.g., while they hold a lock of libc).
 
 // The exit status of the child process which directly calls exit after vfork.
 struct ChildExitStatus {
@@ -300,6 +314,11 @@ pub fn resume_frozen_threads(current: &ThreadRef) {
     // The process is gone if the other threads have ended meanwhile (they can, if the child has created them)
     if let Some(child_threads) = process_inner.threads() {
         child_threads.iter().for_each(|thread| {
+            // Only the threads that the vfork has frozen wait for the event. A thread that the child has created since is
+            // running, or has not started yet, and then it has no event to wake it (set_event fails, which ends the enclave).
+            if !thread.is_stopped() {
+                return;
+            }
             thread.resume();
             let thread_ptr = thread.raw_ptr();
             if current.raw_ptr() != thread_ptr {

@@ -15,11 +15,19 @@ use crate::signal::{KernelSignal, SigNum};
 use crate::syscall::CpuContext;
 use crate::vm::USER_SPACE_VM_MANAGER;
 
+// A vforked child ends with exit_group or exit: it returns to its parent, which the vfork has suspended, with
+// the exit status that wait4 reports. The child has no thread of its own, it runs on the thread of its parent,
+// so there is no thread to end. The thread must not be touched here, e.g., its clear_child_tid and robust list,
+// which belong to the parent.
+fn vfork_child_exit(status: i32, curr_user_ctxt: &mut CpuContext) -> Result<isize> {
+    let current = current!();
+    let child_exit_status = TermStatus::Exited(status as u8);
+    vfork_return_to_parent(curr_user_ctxt as *mut _, &current, Some(child_exit_status))
+}
+
 pub fn do_exit_group(status: i32, curr_user_ctxt: &mut CpuContext) -> Result<isize> {
     if is_vforked_child_process() {
-        let current = current!();
-        let child_exit_status = TermStatus::Exited(status as u8);
-        return vfork_return_to_parent(curr_user_ctxt as *mut _, &current, Some(child_exit_status));
+        return vfork_child_exit(status, curr_user_ctxt);
     } else {
         let term_status = TermStatus::Exited(status as u8);
         current!().process().force_exit(term_status);
@@ -37,9 +45,16 @@ pub fn do_exit_group(status: i32, curr_user_ctxt: &mut CpuContext) -> Result<isi
     }
 }
 
-pub fn do_exit(status: i32) {
+pub fn do_exit(status: i32, curr_user_ctxt: &mut CpuContext) -> Result<isize> {
+    // The exit of a thread that runs a vforked child (see do_vfork.rs) ends the child, not the thread, as
+    // the thread is the one of the parent. The user space can end up here, e.g., with pthread_exit or
+    // syscall(SYS_exit). Other threads, including those that the child has created, end as usual.
+    if is_vforked_child_process() {
+        return vfork_child_exit(status, curr_user_ctxt);
+    }
     let term_status = TermStatus::Exited(status as u8);
     exit_thread(term_status);
+    Ok(0)
 }
 
 /// Exit this thread if its has been forced to exit.

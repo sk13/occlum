@@ -355,10 +355,10 @@ pub fn do_set_tid_address(tidptr: *mut pid_t) -> Result<isize> {
     super::do_set_tid_address::do_set_tid_address(tidptr).map(|tid| tid as isize)
 }
 
-pub fn do_exit(status: i32) -> Result<isize> {
+pub fn do_exit(status: i32, user_context: *mut CpuContext) -> Result<isize> {
     debug!("exit: {}", status);
-    super::do_exit::do_exit(status);
-    Ok(0)
+    let user_context = unsafe { &mut *user_context };
+    return super::do_exit::do_exit(status, user_context);
 }
 
 pub fn do_exit_group(status: i32, user_context: *mut CpuContext) -> Result<isize> {

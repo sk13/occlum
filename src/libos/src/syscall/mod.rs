@@ -161,7 +161,7 @@ macro_rules! process_syscall_table_with_callback {
             (Fork = 57) => handle_unsupported(),
             (Vfork = 58) => do_vfork(context: *mut CpuContext),
             (Execve = 59) => do_execve(path: *const i8, argv: *const *const i8, envp: *const *const i8, context: *mut CpuContext),
-            (Exit = 60) => do_exit(exit_status: i32),
+            (Exit = 60) => do_exit(exit_status: i32, user_context: *mut CpuContext),
             (Wait4 = 61) => do_wait4(pid: i32, _exit_status: *mut i32, options: u32),
             (Kill = 62) => do_kill(pid: i32, sig: c_int),
             (Uname = 63) => do_uname(name: *mut utsname_t),
@@ -660,7 +660,7 @@ fn do_syscall(user_context: &mut CpuContext) {
             // syscall.args[1] == argv
             // syscall.args[2] == envp
             syscall.args[3] = user_context as *mut _ as isize;
-        } else if syscall_num == SyscallNum::ExitGroup {
+        } else if syscall_num == SyscallNum::Exit || syscall_num == SyscallNum::ExitGroup {
             // syscall.args[0] == status
             syscall.args[1] = user_context as *mut _ as isize;
         } else if syscall_num == SyscallNum::HandleException {
