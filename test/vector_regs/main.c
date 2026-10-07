@@ -26,7 +26,9 @@
 //      and makes (emulated) system calls, and the parent must still get its own vector
 //      state back. This is also tested for a child that calls vfork itself (a nested
 //      vfork): the child and the parent get their own vector state back, each from the
-//      context that the LibOS saved at its vfork.
+//      context that the LibOS saved at its vfork. The child ends with exit_group, or with
+//      exit, which ends the calling thread only (it ends the thread of the parent, if the
+//      LibOS does not know that the thread runs a child).
 //
 // The cases that execute the "syscall" instruction (1 and 4) only run in the HW mode. In the
 // other modes (e.g., the simulation mode, where there is no enclave) the CPU executes the
@@ -73,10 +75,13 @@ struct vr_op {
     void *out;              // 32: where the values of the registers are stored
     const void *in2;        // 40: the values for the registers of the child of a nested vfork
     void *out2;             // 48: where the values of the registers of that child are stored
+    long exit_nr;           // 56: the system call that ends a child (if it does not execve)
+    long exit_code;         // 64: the exit code that it passes to the system call
 };
 
 _Static_assert(offsetof(struct vr_op, in) == 24 && offsetof(struct vr_op, out) == 32 &&
-               offsetof(struct vr_op, in2) == 40 && offsetof(struct vr_op, out2) == 48,
+               offsetof(struct vr_op, in2) == 40 && offsetof(struct vr_op, out2) == 48 &&
+               offsetof(struct vr_op, exit_nr) == 56 && offsetof(struct vr_op, exit_code) == 64,
                "the assembly uses the offsets of struct vr_op");
 
 #define REGS_0_15   "0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15"
@@ -205,8 +210,9 @@ __asm__(
 
     // long vr_vfork_<sym>(struct vr_op *op)
     // Load the registers, execute vfork with the "syscall" instruction. The child
-    // overwrites all registers and exits with the "syscall" instruction. The parent
-    // stores the registers and returns the pid of the child (or a negative error).
+    // overwrites all registers and exits with the "syscall" instruction (the system
+    // call is op->exit_nr, with the status op->exit_code). The parent stores the
+    // registers and returns the pid of the child (or a negative error).
     // The child shares the stack of the parent: it must not use it, not even a call.
     ".globl vr_vfork_\\sym\n"
     ".type vr_vfork_\\sym, @function\n"
@@ -222,8 +228,8 @@ __asm__(
     "   jnz 1f\n"
     // The child
     "   VR_CLOBBER_\\level\n"
-    "   mov $" STR(__NR_exit_group) ", %eax\n"
-    "   xor %edi, %edi\n"
+    "   mov 56(%rdi), %rax\n"
+    "   mov 64(%rdi), %rdi\n"
     "   syscall\n"
     "   ud2\n"
     // The parent
@@ -273,12 +279,12 @@ __asm__(
     // long vr_vforknest_<sym>(struct vr_op *op)
     // Nested vfork: the parent loads the registers from in and executes vfork with the "syscall"
     // instruction, its child loads the registers from in2 and executes vfork, too. The
-    // grandchild overwrites all registers and exits (if op->nr is 0), or executes a program
-    // (op->arg1 is its path and op->arg2 its argv). When the grandchild is gone, the child stores
-    // its registers to out2 and does the same as the grandchild. The parent stores its
-    // registers to out and returns the pid of the child (or a negative error). The children
-    // exit with 77 if they fail to execute the program. The children share the stack of the
-    // parent: they must not use it, not even a call.
+    // grandchild overwrites all registers and exits (if op->nr is 0) with the system call
+    // op->exit_nr and the status op->exit_code, or executes a program (op->arg1 is its path and
+    // op->arg2 its argv). When the grandchild is gone, the child stores its registers to out2 and
+    // does the same as the grandchild. The parent stores its registers to out and returns the pid
+    // of the child (or a negative error). The children exit with 77 if they fail to execute the
+    // program. The children share the stack of the parent: they must not use it, not even a call.
     ".globl vr_vforknest_\\sym\n"
     ".type vr_vforknest_\\sym, @function\n"
     "vr_vforknest_\\sym:\n"
@@ -317,8 +323,8 @@ __asm__(
     "   syscall\n"
     "   ud2\n"
     "3:\n"
-    "   mov $" STR(__NR_exit_group) ", %eax\n"
-    "   xor %edi, %edi\n"
+    "   mov 56(%rdi), %rax\n"
+    "   mov 64(%rdi), %rdi\n"
     "   syscall\n"
     "   ud2\n"
     // The child, after the grandchild
@@ -337,8 +343,8 @@ __asm__(
     "   syscall\n"
     "   ud2\n"
     "4:\n"
-    "   mov $" STR(__NR_exit_group) ", %eax\n"
-    "   xor %edi, %edi\n"
+    "   mov 56(%rdi), %rax\n"
+    "   mov 64(%rdi), %rdi\n"
     "   syscall\n"
     "   ud2\n"
     // The parent
@@ -826,6 +832,8 @@ static int test_async_signals(int level) {
 // ============================================================================
 
 #define VFORK_REPS  20
+// The exit code of the children that end with exit
+#define SYS_EXIT_CODE   3
 
 // The vfork_exec cases execute this program with this argument, and it does nothing
 #define EXEC_CHILD_PATH "/bin/vector_regs"
@@ -833,20 +841,22 @@ static int test_async_signals(int level) {
 
 // Calls a function that executes vfork many times with random values in the vector
 // registers. The child overwrites the vector registers and makes a system call on the
-// thread of the parent: exit, or execve of the program that is given by path and argv.
-// When the child has exited or executed the program, the parent must get all its vector
-// registers back.
+// thread of the parent: exit_group or exit (the number is exit_nr) with the exit code
+// exit_code, or execve of the program that is given by path and argv. When the child has
+// exited or executed the program, the parent must get all its vector registers back.
 //
 // The child has to overwrite the vector registers. The vector state of the parent that
 // the LibOS saved when the "syscall" instruction was emulated may be in memory that the
 // next exception (like the emulated exit of the child) overwrites. That would not make a
 // difference if the child still had the same values in its registers as the parent.
-static int run_vfork(int level, op_func_t vfork_op, const char *path,
-                     char *const argv[]) {
+static int run_vfork(int level, op_func_t vfork_op, long exit_nr, long exit_code,
+                     const char *path, char *const argv[]) {
     for (int i = 0; i < VFORK_REPS; i++) {
         fill_random(g_in, sizeof(g_in));
         memset(g_out, 0, sizeof(g_out));
         struct vr_op op = { 0, (long)path, (long)argv, g_in, g_out };
+        op.exit_nr = exit_nr;
+        op.exit_code = exit_code;
 
         long child_pid = vfork_op(&op);
 
@@ -855,21 +865,32 @@ static int run_vfork(int level, op_func_t vfork_op, const char *path,
         }
         int status = 0;
         pid_t waited_pid = waitpid(child_pid, &status, 0);
-        if (waited_pid != child_pid || !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-            THROW_ERROR("the child %ld did not exit with 0 (waitpid returned %d, status 0x%x, "
-                        "run %d)", child_pid, waited_pid, status, i);
+        if (waited_pid != child_pid || !WIFEXITED(status) ||
+                WEXITSTATUS(status) != (path != NULL ? 0 : exit_code)) {
+            THROW_ERROR("the child %ld did not exit with the right code (waitpid returned %d, "
+                        "status 0x%x, run %d)", child_pid, waited_pid, status, i);
         }
         CHECK_REGS(level, g_in, g_out, "vector registers of the parent changed (run %d)", i);
     }
     return 0;
 }
 
-// The child exits
+// The child exits with exit_group
 static int test_vfork(int level) {
     if (skip_no_syscall_emulation() || skip_level(level)) {
         return 0;
     }
-    return run_vfork(level, LEVELS[level].vfork_op, NULL, NULL);
+    return run_vfork(level, LEVELS[level].vfork_op, __NR_exit_group, 0, NULL, NULL);
+}
+
+// The child exits with exit, which ends only the thread that the child runs on. The exit code is
+// not 0, so that a process that the LibOS ends with the child does not look like one that has
+// passed.
+static int test_vfork_sys_exit(int level) {
+    if (skip_no_syscall_emulation() || skip_level(level)) {
+        return 0;
+    }
+    return run_vfork(level, LEVELS[level].vfork_op, __NR_exit, SYS_EXIT_CODE, NULL, NULL);
 }
 
 // The child executes a program
@@ -878,7 +899,8 @@ static int test_vfork_exec(int level) {
         return 0;
     }
     char *const argv[] = { EXEC_CHILD_PATH, EXEC_CHILD_ARG, NULL };
-    return run_vfork(level, LEVELS[level].vforkexec_op, EXEC_CHILD_PATH, argv);
+    return run_vfork(level, LEVELS[level].vforkexec_op, __NR_exit_group, 0, EXEC_CHILD_PATH,
+                     argv);
 }
 
 // Like run_vfork, with a nested vfork: the child calls vfork, too. The parent and the child
@@ -887,13 +909,16 @@ static int test_vfork_exec(int level) {
 // program, the child must get all its vector registers back, and when the child has, the
 // parent must get its own. The LibOS saves the registers of each of them separately. In the
 // vfork_exec variant, the grandchild and the child execute the program.
-static int run_vfork_nested(int level, const char *path, char *const argv[]) {
+static int run_vfork_nested(int level, long exit_nr, long exit_code, const char *path,
+                            char *const argv[]) {
     for (int i = 0; i < VFORK_REPS; i++) {
         fill_random(g_in, sizeof(g_in));
         fill_random(g_in2, sizeof(g_in2));
         memset(g_out, 0, sizeof(g_out));
         memset(g_out2, 0, sizeof(g_out2));
         struct vr_op op = { path != NULL, (long)path, (long)argv, g_in, g_out, g_in2, g_out2 };
+        op.exit_nr = exit_nr;
+        op.exit_code = exit_code;
 
         long child_pid = LEVELS[level].vforknest_op(&op);
 
@@ -902,9 +927,10 @@ static int run_vfork_nested(int level, const char *path, char *const argv[]) {
         }
         int status = 0;
         pid_t waited_pid = waitpid(child_pid, &status, 0);
-        if (waited_pid != child_pid || !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-            THROW_ERROR("the child %ld did not exit with 0 (waitpid returned %d, status 0x%x, "
-                        "run %d)", child_pid, waited_pid, status, i);
+        if (waited_pid != child_pid || !WIFEXITED(status) ||
+                WEXITSTATUS(status) != (path != NULL ? 0 : exit_code)) {
+            THROW_ERROR("the child %ld did not exit with the right code (waitpid returned %d, "
+                        "status 0x%x, run %d)", child_pid, waited_pid, status, i);
         }
         CHECK_REGS(level, g_in2, g_out2, "vector registers of the child changed (run %d)", i);
         CHECK_REGS(level, g_in, g_out, "vector registers of the parent changed (run %d)", i);
@@ -912,12 +938,20 @@ static int run_vfork_nested(int level, const char *path, char *const argv[]) {
     return 0;
 }
 
-// The child and the grandchild exit
+// The child and the grandchild exit with exit_group
 static int test_vfork_nested(int level) {
     if (skip_no_syscall_emulation() || skip_level(level)) {
         return 0;
     }
-    return run_vfork_nested(level, NULL, NULL);
+    return run_vfork_nested(level, __NR_exit_group, 0, NULL, NULL);
+}
+
+// The child and the grandchild exit with exit
+static int test_vfork_sys_exit_nested(int level) {
+    if (skip_no_syscall_emulation() || skip_level(level)) {
+        return 0;
+    }
+    return run_vfork_nested(level, __NR_exit, SYS_EXIT_CODE, NULL, NULL);
 }
 
 // The child and the grandchild execute a program
@@ -926,7 +960,7 @@ static int test_vfork_nested_exec(int level) {
         return 0;
     }
     char *const argv[] = { EXEC_CHILD_PATH, EXEC_CHILD_ARG, NULL };
-    return run_vfork_nested(level, EXEC_CHILD_PATH, argv);
+    return run_vfork_nested(level, __NR_exit_group, 0, EXEC_CHILD_PATH, argv);
 }
 
 // ============================================================================
@@ -950,8 +984,10 @@ DEFINE_LEVEL_TESTS(syscall_insn_with_signal)
 DEFINE_LEVEL_TESTS(exception_with_signal)
 DEFINE_LEVEL_TESTS(async_signals)
 DEFINE_LEVEL_TESTS(vfork)
+DEFINE_LEVEL_TESTS(vfork_sys_exit)
 DEFINE_LEVEL_TESTS(vfork_exec)
 DEFINE_LEVEL_TESTS(vfork_nested)
+DEFINE_LEVEL_TESTS(vfork_sys_exit_nested)
 DEFINE_LEVEL_TESTS(vfork_nested_exec)
 
 static test_case_t test_cases[] = {
@@ -961,8 +997,10 @@ static test_case_t test_cases[] = {
     LEVEL_TEST_CASES(exception_with_signal),
     LEVEL_TEST_CASES(async_signals),
     LEVEL_TEST_CASES(vfork),
+    LEVEL_TEST_CASES(vfork_sys_exit),
     LEVEL_TEST_CASES(vfork_exec),
     LEVEL_TEST_CASES(vfork_nested),
+    LEVEL_TEST_CASES(vfork_sys_exit_nested),
     LEVEL_TEST_CASES(vfork_nested_exec),
 };
 
@@ -971,6 +1009,8 @@ int main(int argc, const char *argv[]) {
     if (argc >= 2 && strcmp(argv[1], EXEC_CHILD_ARG) == 0) {
         return 0;
     }
+    // What a test case has printed must not be lost if the case ends the process
+    setvbuf(stdout, NULL, _IOLBF, 0);
     test_case_t selected[ARRAY_SIZE(test_cases)];
     int num_selected = 0;
     for (int i = 0; i < ARRAY_SIZE(test_cases); i++) {
