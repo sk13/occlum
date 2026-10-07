@@ -60,6 +60,7 @@ To build an Occlum runtime Docker image, run the following command
     The name of the OS distribution that the Docker image is based on. Currently, <OS_NAME> must be one of the following values:
         ubuntu20.04         Use Ubuntu 20.04 as the base image
         ubuntu22.04         Use Ubuntu 22.04 as the base image
+        ubuntu24.04         Use Ubuntu 24.04 as the base image
 
 <SGX_PSW_VERSION>:
     The SGX PSW version libraries expected to be installed in the runtime docker image.
@@ -95,6 +96,19 @@ package database), so no versions are given. For example, the following command
 builds `occlum/occlum:sk13-rt-ubuntu22.04`:
 ```
 ./build_rt_image.sh sk13 ubuntu22.04
+```
+
+#### Ubuntu 24.04
+
+The Ubuntu 24.04 runtime image is built the same way, with
+`Dockerfile.ubuntu24.04-rt`: it copies the `occlum-runtime` files from the
+development image built with `Dockerfile.ubuntu24.04` (by default
+`docker.io/sk13sk13/occlum:sk13-ubuntu24.04`; set `OCCLUM_DEV_IMAGE` to use
+another one) and installs the SGX PSW and DCAP packages of the `noble`
+repository in the versions of the development image. For example, the following
+command builds `occlum/occlum:sk13-rt-ubuntu24.04`:
+```
+./build_rt_image.sh sk13 ubuntu24.04
 ```
 
 The runtime image only provides the `occlum` command line tool. `occlum run`
