@@ -5,11 +5,11 @@ INSTALL_DIR=/opt/occlum/glibc
 GLIBC_BRANCH=${1:-"occlum-glibc-2.31"}
 GLIBC_REPO=${GLIBC_REPO:-"https://github.com/occlum/glibc"}
 
-# GCC 9/10 introduces many new checkings and will cause the build to fail.
-if [ "$(gcc -dumpversion)" = "9" ] || \
-  [ "$(gcc -dumpversion)" = "10" ] || \
-  [ "$(gcc -dumpversion)" = "11" ]; then
-    EXTRA_CFLAGS=-fcommon
+# GCC 9 and later introduce many new checkings and will cause the build to fail
+# (the newer glibc versions fail with the newer GCC versions, e.g., GCC 13 of
+# Ubuntu 24.04, because of the warnings that it turns into errors).
+if [ "$(gcc -dumpversion | cut -d. -f1)" -ge 9 ]; then
+    EXTRA_CFLAGS="-fcommon -U_FORTIFY_SOURCE"
     EXTRA_CONFIG_OPTION="--disable-werror"
 fi
 
