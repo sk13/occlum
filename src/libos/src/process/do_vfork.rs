@@ -3,7 +3,7 @@ use super::{ProcessFilter, ProcessRef, ProcessStatus, TermStatus, ThreadId, Thre
 use crate::fs::FileTable;
 use crate::interrupt::broadcast_interrupts;
 use crate::prelude::*;
-use crate::syscall::CpuContext;
+use crate::syscall::{BoxXsaveArea, CpuContext, ExtraContext};
 use std::collections::HashMap;
 use std::mem;
 
@@ -75,20 +75,95 @@ pub fn do_vfork(mut context: *mut CpuContext) -> Result<isize> {
         new_tid.as_u32() as pid_t
     };
 
-    // Save parent's context in TLS
-    VFORK_CONTEXT.with(|cell| {
-        let mut ctx = cell.borrow_mut();
-        let new_context = (child_pid, unsafe { (*context).clone() });
-        *ctx = Some(new_context);
-    });
-
     // Save parent's file table.
     vfork_save_file_table(&current)?;
+
+    // Save parent's context in TLS. This is done last, so that no error return can leave
+    // the heap copy of its xsave area behind.
+    let parent_context = save_parent_context(unsafe { &*context });
+    VFORK_CONTEXT.with(|cell| {
+        // There is no saved context here, as reset_vfork_context removes the one that a
+        // LibOS thread leaves behind. If there is one that was never restored, free its xsave
+        // area, as nobody else will.
+        if let Some((_, stale_context)) = cell.replace(Some((child_pid, parent_context))) {
+            free_xsave_area_of_saved_context(&stale_context);
+        }
+    });
 
     // This is the first time return and will return as child.
     // The second time return will return as parent in vfork_return_to_parent.
     info!("vfork child pid = {:?}", child_pid);
     return Ok(0 as isize);
+}
+
+// Make a copy of the parent's context that stays valid while the child runs on the same thread.
+//
+// If the parent called vfork with the emulated "syscall" instruction, its vector registers are
+// in the xsave area of the exception handling of the SDK (ExtraContext::XsaveOnStack). That
+// memory is on the stack and is overwritten by the next exception of this thread, e.g., by the
+// emulated system calls of the child. Restoring the parent's registers from it would give the
+// parent garbage. So the xsave area is copied to the heap, like do_sigreturn does when it must
+// keep one, and the saved context refers to the copy (ExtraContext::XsaveOnHeap).
+//
+// The saved context owns the copy, as the copy has no other owner. restore_parent_process
+// moves the ownership to the context that it restores. do_sysret restores from the copy and
+// hands it to the PendingFpAreas of the thread, which frees it before the next restore (or when
+// the thread is dropped). A saved context that is not restored is freed by
+// free_xsave_area_of_saved_context.
+fn save_parent_context(context: &CpuContext) -> CpuContext {
+    let mut saved_context = *context;
+    if saved_context.extra_context_ptr.is_null() {
+        // vfork through the Occlum entry: the registers of the parent are not in an extra context
+        return saved_context;
+    }
+    match saved_context.extra_context {
+        ExtraContext::XsaveOnStack => {
+            let xsave_size = saved_context.extra_context_size as usize;
+            assert!(xsave_size != 0, "no xsave area size");
+            let xsave_area = BoxXsaveArea::new_with_slice(unsafe {
+                std::slice::from_raw_parts(saved_context.extra_context_ptr, xsave_size)
+            });
+            let (xsave_ptr, xsave_size) = xsave_area.into_raw();
+            saved_context.extra_context = ExtraContext::XsaveOnHeap;
+            saved_context.extra_context_ptr = xsave_ptr;
+            saved_context.extra_context_size = xsave_size as u64;
+        }
+        // The context of a system call comes from the Occlum entry (no extra context) or from
+        // an exception (XsaveOnStack). An extra context on the heap only exists while a system
+        // call returns to the user space, and is owned by the context that is returned with.
+        // A copy of that context would own it, too.
+        ExtraContext::Fpregs | ExtraContext::XsaveOnHeap => {
+            unreachable!("the context of a vfork system call has an extra context on the heap")
+        }
+    }
+    saved_context
+}
+
+// Free the heap copy of the xsave area in a context that save_parent_context returned, if the
+// context is not going to be restored.
+fn free_xsave_area_of_saved_context(context: &CpuContext) {
+    if context.extra_context_ptr.is_null() {
+        return;
+    }
+    debug_assert!(matches!(context.extra_context, ExtraContext::XsaveOnHeap));
+    drop(unsafe {
+        BoxXsaveArea::from_raw(
+            context.extra_context_ptr,
+            context.extra_context_size as usize,
+        )
+    });
+}
+
+// Forget the vfork state of a LibOS thread that ends. A vforked child that does not leave with
+// exit_group or execve, e.g., because a signal kills it, never returns to its parent. Its saved
+// context would stay in the TLS of the host thread, and the next LibOS thread on that host thread
+// would take itself for a vforked child, e.g., in its execve.
+pub fn reset_vfork_context() {
+    VFORK_CONTEXT.with(|cell| {
+        if let Some((_, parent_context)) = cell.take() {
+            free_xsave_area_of_saved_context(&parent_context);
+        }
+    });
 }
 
 // Check if the calling process is a vforked child process that reuse parent's task and pid.
@@ -202,7 +277,9 @@ fn restore_parent_process(mut context: *mut CpuContext, current_ref: &ThreadRef)
     let mut current_file_table = current_ref.files().lock();
     *current_file_table = parent_file_table;
 
-    // Get child pid and restore CpuContext
+    // Get child pid and restore CpuContext. The context of the child owns no extra context
+    // (see save_parent_context). The restored one owns the heap copy of the xsave area of the
+    // parent, if there is one, which do_sysret restores and hands to the PendingFpAreas.
     let mut child_pid = 0;
     VFORK_CONTEXT.with(|cell| {
         let mut ctx = cell.borrow_mut();

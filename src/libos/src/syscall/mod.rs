@@ -1273,6 +1273,8 @@ pub struct CpuContext {
 // a. exception + kernel can handle + find signal when sysret + user signal handler + sigreturn + sysret
 // b. exception + kernel can't handle + signal + user signal handler + sigreturn + sysret
 // c. Interrupt + signal + user signal handler + sigreturn + sysret
+// d. exception (emulated syscall instruction) + vfork + the child exits or execs + sysret as the parent
+//    (vfork copies the xsave area, as the exceptions of the child overwrite the one on the stack)
 #[repr(u64)]
 #[derive(Clone, Copy, Debug)]
 pub enum ExtraContext {

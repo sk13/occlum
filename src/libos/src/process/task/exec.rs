@@ -1,3 +1,4 @@
+use super::super::do_vfork::reset_vfork_context;
 use super::super::do_wait4::idle_wait_for_child;
 use super::super::{current, TermStatus, ThreadRef};
 use super::Task;
@@ -70,6 +71,8 @@ pub fn exec(libos_tid: pid_t, host_tid: pid_t) -> Result<i32> {
 
     // Disable current::get()
     current::reset();
+    // The TLS of this host thread must not keep the vfork state of this LibOS thread
+    reset_vfork_context();
 
     // The host expects the termination status of a process that it created when the
     // process exits, which may be after its main thread exits, e.g., with pthread_exit()
