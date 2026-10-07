@@ -24,7 +24,9 @@
 //      when it creates the child, and restores it when the child exits or executes another
 //      program. The child runs on the thread of the parent, overwrites the vector registers
 //      and makes (emulated) system calls, and the parent must still get its own vector
-//      state back.
+//      state back. This is also tested for a child that calls vfork itself (a nested
+//      vfork): the child and the parent get their own vector state back, each from the
+//      context that the LibOS saved at its vfork.
 //
 // The cases that execute the "syscall" instruction (1 and 4) only run in the HW mode. In the
 // other modes (e.g., the simulation mode, where there is no enclave) the CPU executes the
@@ -69,9 +71,12 @@ struct vr_op {
     long arg2;              // 16: the second argument of the system call
     const void *in;         // 24: the values for the registers
     void *out;              // 32: where the values of the registers are stored
+    const void *in2;        // 40: the values for the registers of the child of a nested vfork
+    void *out2;             // 48: where the values of the registers of that child are stored
 };
 
-_Static_assert(offsetof(struct vr_op, in) == 24 && offsetof(struct vr_op, out) == 32,
+_Static_assert(offsetof(struct vr_op, in) == 24 && offsetof(struct vr_op, out) == 32 &&
+               offsetof(struct vr_op, in2) == 40 && offsetof(struct vr_op, out2) == 48,
                "the assembly uses the offsets of struct vr_op");
 
 #define REGS_0_15   "0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15"
@@ -265,6 +270,89 @@ __asm__(
     "   ret\n"
     ".size vr_vforkexec_\\sym, .-vr_vforkexec_\\sym\n"
 
+    // long vr_vforknest_<sym>(struct vr_op *op)
+    // Nested vfork: the parent loads the registers from in and executes vfork with the "syscall"
+    // instruction, its child loads the registers from in2 and executes vfork, too. The
+    // grandchild overwrites all registers and exits (if op->nr is 0), or executes a program
+    // (op->arg1 is its path and op->arg2 its argv). When the grandchild is gone, the child stores
+    // its registers to out2 and does the same as the grandchild. The parent stores its
+    // registers to out and returns the pid of the child (or a negative error). The children
+    // exit with 77 if they fail to execute the program. The children share the stack of the
+    // parent: they must not use it, not even a call.
+    ".globl vr_vforknest_\\sym\n"
+    ".type vr_vforknest_\\sym, @function\n"
+    "vr_vforknest_\\sym:\n"
+    "   push %r12\n"
+    "   push %r13\n"
+    "   push %r14\n"
+    "   push %r15\n"
+    "   push %rbx\n"
+    "   mov 24(%rdi), %r12\n"
+    "   mov 32(%rdi), %r13\n"
+    "   mov 40(%rdi), %r14\n"
+    "   mov 48(%rdi), %r15\n"
+    "   mov 0(%rdi), %rbx\n"
+    "   VR_LOAD_\\level %r12\n"
+    "   mov $" STR(__NR_vfork) ", %eax\n"
+    "   syscall\n"
+    "   test %rax, %rax\n"
+    "   jnz 1f\n"
+    // The child
+    "   VR_LOAD_\\level %r14\n"
+    "   mov $" STR(__NR_vfork) ", %eax\n"
+    "   syscall\n"
+    "   test %rax, %rax\n"
+    "   jnz 2f\n"
+    // The grandchild
+    "   VR_CLOBBER_\\level\n"
+    "   test %rbx, %rbx\n"
+    "   jz 3f\n"
+    "   mov $" STR(__NR_execve) ", %eax\n"
+    "   mov 16(%rdi), %rsi\n"
+    "   mov 8(%rdi), %rdi\n"
+    "   xor %edx, %edx\n"
+    "   syscall\n"
+    "   mov $" STR(__NR_exit_group) ", %eax\n"
+    "   mov $77, %edi\n"
+    "   syscall\n"
+    "   ud2\n"
+    "3:\n"
+    "   mov $" STR(__NR_exit_group) ", %eax\n"
+    "   xor %edi, %edi\n"
+    "   syscall\n"
+    "   ud2\n"
+    // The child, after the grandchild
+    "2:\n"
+    "   VR_STORE_\\level %r15\n"
+    "   VR_CLOBBER_\\level\n"
+    "   test %rbx, %rbx\n"
+    "   jz 4f\n"
+    "   mov $" STR(__NR_execve) ", %eax\n"
+    "   mov 16(%rdi), %rsi\n"
+    "   mov 8(%rdi), %rdi\n"
+    "   xor %edx, %edx\n"
+    "   syscall\n"
+    "   mov $" STR(__NR_exit_group) ", %eax\n"
+    "   mov $77, %edi\n"
+    "   syscall\n"
+    "   ud2\n"
+    "4:\n"
+    "   mov $" STR(__NR_exit_group) ", %eax\n"
+    "   xor %edi, %edi\n"
+    "   syscall\n"
+    "   ud2\n"
+    // The parent
+    "1:\n"
+    "   VR_STORE_\\level %r13\n"
+    "   VR_END_\\level\n"
+    "   pop %rbx\n"
+    "   pop %r15\n"
+    "   pop %r14\n"
+    "   pop %r13\n"
+    "   pop %r12\n"
+    "   ret\n"
+    ".size vr_vforknest_\\sym, .-vr_vforknest_\\sym\n"
+
     // long vr_spin_<sym>(volatile int *stop, void *out, const void *in)
     // Load the registers from in. Add xmm1 to xmm0 in a loop, until *stop is not 0, which
     // is tested every 65536 iterations. Store the registers to out. Returns the number
@@ -335,6 +423,7 @@ typedef long (*spin_func_t)(volatile int *, void *, const void *);
     extern long vr_div0_##sym(struct vr_op *); \
     extern long vr_vfork_##sym(struct vr_op *); \
     extern long vr_vforkexec_##sym(struct vr_op *); \
+    extern long vr_vforknest_##sym(struct vr_op *); \
     extern long vr_spin_##sym(volatile int *, void *, const void *); \
     extern char vr_spin_end_##sym[]; \
     extern void vr_clobber_##sym(void); \
@@ -364,6 +453,7 @@ typedef struct {
     op_func_t div0_op;
     op_func_t vfork_op;
     op_func_t vforkexec_op;
+    op_func_t vforknest_op;
     spin_func_t spin_op;
     const char *spin_end;
     void (*clobber)(void);
@@ -372,8 +462,8 @@ typedef struct {
 
 #define LEVEL(NAME, prefix, nregs, size, sym) \
     { NAME, prefix, nregs, size, vr_syscall_##sym, vr_div0_##sym, vr_vfork_##sym, \
-      vr_vforkexec_##sym, vr_spin_##sym, vr_spin_end_##sym, vr_clobber_##sym, \
-      vr_check_clobber_##sym }
+      vr_vforkexec_##sym, vr_vforknest_##sym, vr_spin_##sym, vr_spin_end_##sym, \
+      vr_clobber_##sym, vr_check_clobber_##sym }
 
 static const level_t LEVELS[LEVEL_COUNT] = {
     LEVEL("SSE", 'x', 16, 16, sse),
@@ -422,6 +512,8 @@ static int skip_no_syscall_emulation(void) {
 // The values for the registers and the values that are stored after the operation
 static uint8_t g_in[MAX_STATE_SIZE] __attribute__((aligned(64)));
 static uint8_t g_out[MAX_STATE_SIZE] __attribute__((aligned(64)));
+static uint8_t g_in2[MAX_STATE_SIZE] __attribute__((aligned(64)));
+static uint8_t g_out2[MAX_STATE_SIZE] __attribute__((aligned(64)));
 
 static uint64_t g_random_state = 0x9e3779b97f4a7c15ULL;
 
@@ -789,6 +881,54 @@ static int test_vfork_exec(int level) {
     return run_vfork(level, LEVELS[level].vforkexec_op, EXEC_CHILD_PATH, argv);
 }
 
+// Like run_vfork, with a nested vfork: the child calls vfork, too. The parent and the child
+// have different values in their vector registers, and both the child and the grandchild
+// overwrite them and make system calls. When the grandchild has exited or executed the
+// program, the child must get all its vector registers back, and when the child has, the
+// parent must get its own. The LibOS saves the registers of each of them separately. In the
+// vfork_exec variant, the grandchild and the child execute the program.
+static int run_vfork_nested(int level, const char *path, char *const argv[]) {
+    for (int i = 0; i < VFORK_REPS; i++) {
+        fill_random(g_in, sizeof(g_in));
+        fill_random(g_in2, sizeof(g_in2));
+        memset(g_out, 0, sizeof(g_out));
+        memset(g_out2, 0, sizeof(g_out2));
+        struct vr_op op = { path != NULL, (long)path, (long)argv, g_in, g_out, g_in2, g_out2 };
+
+        long child_pid = LEVELS[level].vforknest_op(&op);
+
+        if (child_pid <= 0) {
+            THROW_ERROR("vfork returned %ld (run %d)", child_pid, i);
+        }
+        int status = 0;
+        pid_t waited_pid = waitpid(child_pid, &status, 0);
+        if (waited_pid != child_pid || !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+            THROW_ERROR("the child %ld did not exit with 0 (waitpid returned %d, status 0x%x, "
+                        "run %d)", child_pid, waited_pid, status, i);
+        }
+        CHECK_REGS(level, g_in2, g_out2, "vector registers of the child changed (run %d)", i);
+        CHECK_REGS(level, g_in, g_out, "vector registers of the parent changed (run %d)", i);
+    }
+    return 0;
+}
+
+// The child and the grandchild exit
+static int test_vfork_nested(int level) {
+    if (skip_no_syscall_emulation() || skip_level(level)) {
+        return 0;
+    }
+    return run_vfork_nested(level, NULL, NULL);
+}
+
+// The child and the grandchild execute a program
+static int test_vfork_nested_exec(int level) {
+    if (skip_no_syscall_emulation() || skip_level(level)) {
+        return 0;
+    }
+    char *const argv[] = { EXEC_CHILD_PATH, EXEC_CHILD_ARG, NULL };
+    return run_vfork_nested(level, EXEC_CHILD_PATH, argv);
+}
+
 // ============================================================================
 // Test suite main
 // ============================================================================
@@ -811,6 +951,8 @@ DEFINE_LEVEL_TESTS(exception_with_signal)
 DEFINE_LEVEL_TESTS(async_signals)
 DEFINE_LEVEL_TESTS(vfork)
 DEFINE_LEVEL_TESTS(vfork_exec)
+DEFINE_LEVEL_TESTS(vfork_nested)
+DEFINE_LEVEL_TESTS(vfork_nested_exec)
 
 static test_case_t test_cases[] = {
     LEVEL_TEST_CASES(handlers_overwrite_all_regs),
@@ -820,6 +962,8 @@ static test_case_t test_cases[] = {
     LEVEL_TEST_CASES(async_signals),
     LEVEL_TEST_CASES(vfork),
     LEVEL_TEST_CASES(vfork_exec),
+    LEVEL_TEST_CASES(vfork_nested),
+    LEVEL_TEST_CASES(vfork_nested_exec),
 };
 
 // With an argument, only the test cases with this string in their name are run
