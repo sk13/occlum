@@ -1,0 +1,234 @@
+# syntax=docker/dockerfile:1
+
+FROM alpine:3.11 AS alpine
+
+LABEL maintainer="Qi Zheng <huaiqing.zq@antgroup.com>"
+
+RUN apk update && \
+    apk --no-cache add openjdk11 openjdk8 --repository=http://dl-cdn.alpinelinux.org/alpine/edge/community
+
+FROM ubuntu:24.04
+
+LABEL maintainer="Qi Zheng <huaiqing.zq@antgroup.com>"
+
+#The default shell for the RUN instruction is ["/bin/sh", "-c"], which sometimes cause unexpected error
+#for example "source a_file". Use bash as default shell instead.
+SHELL ["/bin/bash", "-c"]
+
+RUN apt-get update && DEBIAN_FRONTEND="noninteractive" apt-get install -y --no-install-recommends \
+        alien \
+        astyle \
+        autoconf \
+        automake \
+        bison \
+        build-essential \
+        ca-certificates \
+        cmake \
+        curl \
+        debhelper \
+        expect \
+        g++ \
+        gawk \
+        gdb \
+        git \
+        golang-go \
+        jq \
+        kmod \
+        lcov \
+        libboost-system-dev \
+        libboost-thread-dev \
+        libclang-dev \
+        libcurl4-openssl-dev \
+        libfuse-dev \
+        libjsoncpp-dev \
+        liblog4cpp5-dev \
+        libprotobuf-c-dev \
+        libprotobuf-dev \
+        libssl-dev \
+        libtool \
+        libxml2-dev \
+        nano \
+        ocaml \
+        ocamlbuild \
+        pkg-config \
+        protobuf-compiler \
+        python-is-python3 \
+        python3-pip \
+        sudo \
+        unzip \
+        uuid-dev \
+        vim \
+        wget \
+        zip \
+        gnupg \
+        aptitude \
+        rsync \
+        cpuid \
+        && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN echo "ca_directory=/etc/ssl/certs" >> /etc/wgetrc && \
+    mkdir -p /etc/apt/keyrings && \
+    wget -qO /etc/apt/keyrings/intel-sgx.asc https://download.01.org/intel-sgx/sgx_repo/ubuntu/intel-sgx-deb.key --no-check-certificate && \
+    echo 'deb [arch=amd64 signed-by=/etc/apt/keyrings/intel-sgx.asc] https://download.01.org/intel-sgx/sgx_repo/ubuntu noble main' | tee /etc/apt/sources.list.d/intel-sgx.list
+
+# Install cpuid tool for tests
+# WORKDIR /tmp
+# RUN wget http://www.etallen.com/cpuid/cpuid-20200211.x86_64.tar.gz && \
+#    tar -xf ./cpuid-20200211.x86_64.tar.gz && \
+#    cp ./cpuid-20200211/cpuid /usr/bin/ && \
+#    rm -rf /tmp/cpuid-20200211*
+
+# Install Rust
+ENV PATH="/root/.cargo/bin:$PATH"
+ENV OCCLUM_RUST_VERSION=1.98.1
+RUN curl https://sh.rustup.rs -sSf | \
+        sh -s -- --default-toolchain ${OCCLUM_RUST_VERSION} -y && \
+    rm -rf /root/.cargo/registry && rm -rf /root/.cargo/git && \
+    cargo -V
+
+# Install SGX PSW
+# libsgx-headers is pinned too: the latest version breaks
+# libsgx-dcap-quote-verify-dev < 1.26, and aptitude resolves that by silently
+# not installing it. The test makes sure the DCAP headers needed to build the
+# PAL are installed.
+# DCAP 1.N needs PSW 2.(N+3), so DCAP 1.27 needs PSW 2.30. The packages of EPID
+# and of the launch enclave (both end at PSW 2.27) are not installed: Occlum has
+# no EPID support, and the SGX SDK 2.28 has none for the launch enclave either.
+# The AESM service (sgx-aesm-service and its plugins) is not installed either:
+# Occlum loads the quoting enclaves of DCAP itself and does not talk to AESM.
+# -R is needed for that, as libsgx-dcap-ql recommends libsgx-quote-ex, which
+# recommends the AESM service. Only the out-of-process mode of the DCAP quote
+# library (SGX_AESM_ADDR) needs it.
+ARG PSW_VERSION=2.30.101.1
+ARG DCAP_VERSION=1.27.101.1
+RUN apt-get update && aptitude -R install -y \
+        libsgx-urts=$PSW_VERSION-noble1 \
+        libsgx-enclave-common=$PSW_VERSION-noble1 \
+        libsgx-ae-pce=$PSW_VERSION-noble1 \
+        libsgx-ae-id-enclave=$DCAP_VERSION-noble1 \
+        libsgx-ae-qe3=$DCAP_VERSION-noble1 \
+        libsgx-ae-qve=$DCAP_VERSION-noble1 \
+        libsgx-dcap-quote-verify=$DCAP_VERSION-noble1 \
+        libsgx-dcap-quote-verify-dev=$DCAP_VERSION-noble1 \
+        libsgx-dcap-ql=$DCAP_VERSION-noble1 \
+        libsgx-dcap-ql-dev=$DCAP_VERSION-noble1 \
+        libsgx-pce-logic=$DCAP_VERSION-noble1 \
+        libsgx-qe3-logic=$DCAP_VERSION-noble1 \
+        libsgx-dcap-default-qpl=$DCAP_VERSION-noble1 \
+        libsgx-headers=$PSW_VERSION-noble1 \
+        && \
+    test -f /usr/include/sgx_dcap_quoteverify.h && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/* && \
+    ln -s /usr/lib/x86_64-linux-gnu/libsgx_enclave_common.so.1 /usr/lib/x86_64-linux-gnu/libsgx_enclave_common.so
+
+# Install SGX SDK: Occlum's fork of Intel SGX SDK 2.30 (the sk13 fork of the SDK
+# repository, which carries the Occlum patches on top of Intel's sgx_2.30). From
+# 2.30 on, the SDK is a repository of its own; the PSW and DCAP are installed
+# from the packages above. The SDK is built with USE_OPT_LIBS=1 (IPP), as the
+# values 2 and 3 do not exist anymore.
+# The preparation clones the submodules from GitHub, which sometimes refuses
+# unauthenticated clones for a while; it can simply be repeated.
+WORKDIR /tmp
+RUN git clone -b sgx_2.30_for_occlum https://github.com/sk13/occlum-intel-confidential-computing.sgx.sdk linux-sgx && \
+    mkdir /etc/init && \
+    cd linux-sgx && \
+    for i in 1 2 3; do \
+        make preparation && break || { [ $i -eq 3 ] && exit 1; sleep 30; }; \
+    done && \
+    ./compile_and_install.sh && \
+    echo 'source /opt/intel/sgxsdk/environment' >> /root/.bashrc && \
+    rm -rf /tmp/linux-sgx
+
+# The Occlum source: by default the 0.31.0-dev branch of the sk13/occlum fork,
+# which builds with the Rust toolchain installed above. OCCLUM_REPO must be a
+# Git URL, i.e., end with .git.
+#
+# ADD resolves the branch on every build, so that the steps are rebuilt when
+# the files that they use have changed: the toolchains when tools/toolchains
+# (or, for the DCAP library, the sgx_types crate) has changed, Occlum itself
+# when anything has changed.
+ARG OCCLUM_REPO=https://github.com/sk13/occlum.git
+ARG OCCLUM_BRANCH=0.31.0-dev
+ADD ${OCCLUM_REPO}#${OCCLUM_BRANCH}:tools/toolchains /root/occlum/tools/toolchains
+# ADD downloads any other URL as a file
+RUN test -d /root/occlum/tools/toolchains || \
+        { echo "OCCLUM_REPO is not a Git URL ending with .git: $OCCLUM_REPO" >&2; exit 1; } && \
+    mkdir -p /opt/occlum/
+
+# Install Occlum toolchain
+WORKDIR /root/occlum/tools/toolchains
+RUN cd musl-gcc && ./build.sh && ./install_zlib.sh && cd .. && rm -rf musl-gcc
+ENV PATH="/opt/occlum/build/bin:/usr/local/occlum/bin:$PATH"
+
+# Install glibc
+# Build with e.g. --build-arg GLIBC_REPO=https://github.com/occlum/glibc
+# --build-arg GLIBC_BRANCH=occlum-glibc-2.35 to use the upstream Occlum glibc
+ARG GLIBC_REPO=https://github.com/sk13/occlum-glibc
+ARG GLIBC_BRANCH=occlum-glibc-2.39
+WORKDIR /root/occlum/tools/toolchains
+RUN cd glibc && GLIBC_REPO=$GLIBC_REPO ./build.sh $GLIBC_BRANCH && cd .. && rm -rf glibc && rm -rf /tmp/glibc*
+
+# Install Occlum Golang toolchain
+WORKDIR /root/occlum/tools/toolchains
+RUN cd golang && ./build.sh && cd .. && rm -rf golang
+ENV PATH="/opt/occlum/toolchains/golang/bin:$PATH"
+
+# Install Occlum Rust toolchain
+WORKDIR /root/occlum/tools/toolchains
+RUN cd rust && ./build.sh && cd .. && rm -rf rust
+ENV PATH="/opt/occlum/toolchains/rust/bin:$PATH"
+ENV LD_LIBRARY_PATH="/opt/intel/sgxsdk/sdk_libs"
+
+# Install Occlum bash
+WORKDIR /root/occlum/tools/toolchains
+RUN cd bash && ./build.sh && cd .. && rm -rf bash
+
+# Install Occlum busybox
+WORKDIR /root/occlum/tools/toolchains
+RUN cd busybox && ./build.sh && cd .. && rm -rf busybox
+
+# Install Occlum Java toolchain (JDK 11)
+ARG JDK11_PATH=/opt/occlum/toolchains/jvm/java-11-openjdk
+COPY --from=alpine /usr/lib/jvm/java-11-openjdk $JDK11_PATH
+RUN rm $JDK11_PATH/lib/security/cacerts
+COPY --from=alpine /etc/ssl/certs/java/cacerts $JDK11_PATH/lib/security/cacerts
+WORKDIR /root/occlum/tools/toolchains
+RUN cd java && ./install_dragonwell.sh && cd .. && rm -rf java
+ENV PATH="/opt/occlum/toolchains/jvm/bin:$PATH"
+
+# Install OpenJDK 8
+ARG JDK8_PATH=/opt/occlum/toolchains/jvm/java-1.8-openjdk
+COPY --from=alpine /usr/lib/jvm/java-1.8-openjdk $JDK8_PATH
+RUN rm $JDK8_PATH/jre/lib/security/cacerts
+COPY --from=alpine /etc/ssl/certs/java/cacerts $JDK8_PATH/jre/lib/security/cacerts
+
+# Install DCAP library, which uses the sgx_types crate of the Rust SGX SDK
+ADD ${OCCLUM_REPO}#${OCCLUM_BRANCH}:deps/rust-sgx-sdk/sgx_types /root/occlum/deps/rust-sgx-sdk/sgx_types
+WORKDIR /root/occlum/tools/toolchains
+RUN cd dcap_lib && ./build.sh && cd .. && rm -rf dcap_lib
+
+# Install AECS Client library
+# Disabled: AECS is hardly maintained (last upstream commit 2024-01) and its C++
+# client needs a recursive clone and a build of its own. Without it, init_aecs
+# cannot be built, which OCCLUM_NO_INIT_RA_AECS (exported where Occlum is built
+# below) skips, so "occlum new --init-ra aecs" is not available;
+# "--init-ra grpc_ratls" is.
+# WORKDIR /root/occlum/tools/toolchains
+# RUN cd aecs_client && ./build.sh && cd .. && rm -rf aecs_client
+
+
+# Install Occlum
+ADD --keep-git-dir=true ${OCCLUM_REPO}#${OCCLUM_BRANCH} /root/occlum
+WORKDIR /root
+RUN cd occlum && \
+    source /opt/intel/sgxsdk/environment && \
+    export OCCLUM_NO_INIT_RA_AECS=1 && \
+    make submodule && \
+    OCCLUM_RELEASE_BUILD=1 make install && \
+    cp -r demos /root/demos && \
+    rm -rf /root/occlum
+
+WORKDIR /root

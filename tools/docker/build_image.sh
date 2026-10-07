@@ -21,6 +21,7 @@ USAGE:
     The name of the OS distribution that the Docker image is based on. Currently, <OS_NAME> must be one of the following values:
         ubuntu20.04         Use Ubuntu 20.04 as the base image
         ubuntu22.04         Use Ubuntu 22.04 as the base image
+        ubuntu24.04         Use Ubuntu 24.04 as the base image
         aliyunlinux3        Use AliyunLinux 3 as the base image
         anolis8.8           Use Anolis 8.8 as the base image
 
@@ -29,7 +30,7 @@ USAGE:
     It is optional, if not provided, the "0.31.0-dev" branch will be used.
 
 The Occlum repository is https://github.com/sk13/occlum.git unless the OCCLUM_REPO
-environment variable is set. For Ubuntu 22.04, the image is rebuilt from the
+environment variable is set. For Ubuntu 22.04 and 24.04, the image is rebuilt from the
 steps that use files which have changed on the branch since the last build.
 
 The resulting Docker image will have "occlum/occlum:<OCCLUM_LABEL>-<OS_NAME>" as its label.
@@ -53,7 +54,7 @@ function check_item_in_list() {
     [[ $list =~ (^|[[:space:]])$item($|[[:space:]]) ]]
 }
 
-check_item_in_list "$os_name" "ubuntu20.04 ubuntu22.04 aliyunlinux3 anolis8.8" || report_error
+check_item_in_list "$os_name" "ubuntu20.04 ubuntu22.04 ubuntu24.04 aliyunlinux3 anolis8.8" || report_error
 
 # The Dockerfile adds the repository with ADD, which needs a Git URL
 occlum_repo=${OCCLUM_REPO:-https://github.com/sk13/occlum.git}
