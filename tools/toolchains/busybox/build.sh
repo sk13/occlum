@@ -15,6 +15,11 @@ function build_and_install_busybox()
     make clean
     make defconfig
     cp $busybox_config .config
+    # The tc applet needs the CBQ definitions, which Linux 6.8 removed from the
+    # UAPI headers (Ubuntu 24.04), and Occlum has no traffic control anyway
+    if ! grep -q TCA_CBQ_MAX /usr/include/linux/pkt_sched.h; then
+        sed -i 's/^CONFIG_TC=y/# CONFIG_TC is not set/' .config
+    fi
 
     if [[ $1 == "musl" ]]; then
         echo "Building musl-libc version of busybox"
