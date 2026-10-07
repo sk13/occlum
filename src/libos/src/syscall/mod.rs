@@ -789,6 +789,11 @@ fn do_sysret(user_context: &mut CpuContext) -> ! {
         // (e.g., if it is compiled with GCC 12 or later, which vectorizes at -O2). So the
         // memory is not freed after the restore, but by the next return of this thread
         // before its restore, or when the thread is dropped.
+        //
+        // It also includes moving or copying the owner of the memory (a Box or a
+        // BoxXsaveArea): an unoptimized build copies it with an SSE register. So the memory
+        // is handed to the pending areas before it is restored, and the restore is the last
+        // thing that happens before the jump to the user space.
         let pending_areas: &PendingFpAreas = {
             let areas = current!().pending_fp_areas() as *const PendingFpAreas;
             // The thread lives at least as long as it runs
@@ -796,34 +801,26 @@ fn do_sysret(user_context: &mut CpuContext) -> ! {
         };
         pending_areas.free();
         if user_context.extra_context_ptr != ptr::null_mut() {
-            match user_context.extra_context {
+            let extra_context = user_context.extra_context;
+            let extra_context_ptr = user_context.extra_context_ptr;
+            let extra_context_size = user_context.extra_context_size as usize;
+            user_context.extra_context_ptr = ptr::null_mut();
+            match extra_context {
                 ExtraContext::Fpregs => {
                     // The fpregs must be allocated on heap
-                    let fpregs =
-                        unsafe { Box::from_raw(user_context.extra_context_ptr as *mut FpRegs) };
-                    unsafe { fpregs.restore() };
-                    pending_areas.set_fpregs(Box::into_raw(fpregs));
+                    let fpregs = extra_context_ptr as *mut FpRegs;
+                    pending_areas.set_fpregs(fpregs);
+                    unsafe { (*fpregs).restore() };
                 }
                 ExtraContext::XsaveOnStack => {
-                    let xsave_area = user_context.extra_context_ptr;
-                    unsafe {
-                        restore_xregs(xsave_area as *const u8);
-                    }
+                    unsafe { restore_xregs(extra_context_ptr as *const u8) };
                 }
                 // return from rt_sigreturn
                 ExtraContext::XsaveOnHeap => {
-                    let xsave_area = unsafe {
-                        BoxXsaveArea::from_raw(
-                            user_context.extra_context_ptr,
-                            user_context.extra_context_size as usize,
-                        )
-                    };
-                    xsave_area.restore();
-                    let (ptr, size) = xsave_area.into_raw();
-                    pending_areas.set_xsave(ptr, size);
+                    pending_areas.set_xsave(extra_context_ptr, extra_context_size);
+                    unsafe { restore_xregs(extra_context_ptr as *const u8) };
                 }
             }
-            user_context.extra_context_ptr = ptr::null_mut();
         }
         unsafe { __occlum_sysret(user_context) } // jump to user space
     } else {
