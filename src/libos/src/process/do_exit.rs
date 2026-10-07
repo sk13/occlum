@@ -3,7 +3,9 @@ use crate::signal::constants::*;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use super::do_futex::futex_wake;
-use super::do_vfork::{is_vforked_child_process, vfork_return_to_parent};
+use super::do_vfork::{
+    is_vforked_child_process, reset_vfork_context, resume_frozen_threads, vfork_return_to_parent,
+};
 use super::pgrp::clean_pgrp_when_exit;
 use super::process::{Process, ProcessFilter, ProcessInner};
 use super::{table, ProcessRef, TermStatus, ThreadRef, ThreadStatus};
@@ -56,7 +58,18 @@ fn exit_thread(term_status: TermStatus) {
         return;
     }
 
+    // A vforked child that a signal kills ends here without returning to its parent. This is the end of
+    // the LibOS thread, so the TLS of the host thread must not keep its vfork state. Release it now, and
+    // close the original files of the parent as the process ends, before the exit is visible to anyone.
+    let was_vforked_child = reset_vfork_context();
+
     let num_remaining_threads = thread.exit(term_status);
+
+    // The other threads of the process were frozen by the vfork of the child, and nobody returns to the
+    // parent to resume them. Let them run, so that they see that the process is forced to exit and end.
+    if was_vforked_child && num_remaining_threads > 0 {
+        resume_frozen_threads(&thread);
+    }
 
     // Notify a thread, if any, that waits on ctid. See set_tid_address(2) for more info.
     if let Some(ctid_ptr) = thread.clear_ctid() {

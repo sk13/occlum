@@ -27,6 +27,19 @@ mod name;
 
 pub const IO_BUF_SIZE: usize = 128 * 1024;
 
+/// Close the files that were taken out of a file table (see `FileTable::del_all`). It will
+/// release the POSIX advisory locks owned by current process.
+pub fn close_files(files: Vec<FileRef>) {
+    for file in files {
+        if let Ok(epoll_file) = file.as_epoll_file() {
+            // Unregister epoll file to avoid deadlock in file table
+            epoll_file.unregister_from_file_table();
+        }
+
+        file.release_advisory_locks();
+    }
+}
+
 pub struct Thread {
     // Low-level info
     task: Task,
@@ -168,14 +181,7 @@ impl Thread {
     /// by current process.
     pub fn close_all_files(&self) {
         let files = self.files().lock().del_all();
-        for file in files {
-            if let Ok(epoll_file) = file.as_epoll_file() {
-                // Unregister epoll file to avoid deadlock in file table
-                epoll_file.unregister_from_file_table();
-            }
-
-            file.release_advisory_locks();
-        }
+        close_files(files);
     }
 
     pub fn fs(&self) -> &FsViewRef {

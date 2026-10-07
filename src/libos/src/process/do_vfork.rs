@@ -1,3 +1,4 @@
+use super::thread::close_files;
 use super::untrusted_event::{set_event, wait_event};
 use super::{ProcessFilter, ProcessRef, ProcessStatus, TermStatus, ThreadId, ThreadRef};
 use crate::fs::FileTable;
@@ -23,6 +24,17 @@ use std::mem;
 // execve is called in the child process. The reason is that since Occlum doesn't support fork, many applications will
 // use vfork to replace fork. For multi-threaded applications, if vfork doesn't stop other child threads, the application
 // will be more likely to fail because the child process directly uses the VM and the file table of the parent process.
+// 3. A vforked child can call vfork, too, and so can its child. Every vfork is a level (VforkLevel) that holds what its child
+// needs to return to its parent: the pid of the child and the context and the file table of the parent. The levels are a stack,
+// as the innermost child has to exit or call execve before its parent continues. All the children run on the thread of the
+// outermost parent, so the stack is in the TLS. A level that returns restores the context and the file table of its parent,
+// which is the vforked child of the level before. The process is stopped, and the other threads are frozen, from the vfork of the
+// outermost child until it returns, not until the innermost one does. Like the outermost child, all of them have the pid of the
+// process (see limitation 1). The process that a child creates with execve is a child of the process, not of the vforked child
+// that has no process structure, so the process can wait for it, too. If nobody waits for it, it stays a zombie until the
+// process ends. The levels cost memory of the LibOS, so there are at most MAX_VFORK_DEPTH of them. A child that a signal
+// kills never returns to its parent: its thread ends, and with it the process (see exit_thread, which frees the levels and
+// resumes the other threads, so that they can end, too).
 
 // The exit status of the child process which directly calls exit after vfork.
 struct ChildExitStatus {
@@ -30,39 +42,61 @@ struct ChildExitStatus {
     status: TermStatus,
 }
 
+// A level of vfork: what the vforked child needs to return to its parent.
+struct VforkLevel {
+    // The pid of the child
+    child_pid: pid_t,
+    // The cpu context of the parent, with the heap copy of its xsave area (see save_parent_context)
+    parent_context: CpuContext,
+    // The file table of the parent. It will be recovered when the child exits or has its own task.
+    parent_file_table: FileTable,
+}
+
 lazy_static! {
-    // Store all the parents's file tables who call vfork. It will be recovered when the child exits or has its own task.
-    // K: parent pid, V: parent file table
-    static ref VFORK_PARENT_FILE_TABLES: SgxMutex<HashMap<pid_t, FileTable>> = SgxMutex::new(HashMap::new());
     // Store all the child process's exit status which are created with vfork and directly exit without calling execve. Because
     // these children process are only allocated with a pid, they are not managed by the usual way including exit and wait. Use
     // this special structure to record these children.
-    // K: parent pid, V: exit children created with vfork.
+    // K: parent pid, V: exit children created with vfork. The parent is the process, or the vforked child that called vfork
+    // (see vfork_parent_pid).
     static ref EXIT_CHILDREN_STATUS: SgxMutex<HashMap<pid_t, Vec<ChildExitStatus>>> = SgxMutex::new(HashMap::new());
 }
 
 thread_local! {
-    // Store the current process' vforked child and current thread's cpu context. A parent only has one vforked child at a time.
-    static VFORK_CONTEXT: RefCell<Option<(pid_t, CpuContext)>> = Default::default();
+    // Store the levels of vfork that the current thread runs the children of, the innermost last. A parent only has one vforked
+    // child at a time, but the child can call vfork, too. There is no level if the thread is not a vforked child.
+    static VFORK_LEVELS: RefCell<Vec<VforkLevel>> = Default::default();
 }
 
+// The deepest nesting of vfork: every level keeps a context, a file table and, if the parent used the syscall instruction,
+// a copy of its xsave area (a few KB) in the heap of the LibOS. A runaway recursion must fail with an error, as the LibOS
+// aborts if it runs out of heap.
+const MAX_VFORK_DEPTH: usize = 1024;
+
 pub fn do_vfork(mut context: *mut CpuContext) -> Result<isize> {
+    // Fail before anything has changed
+    if VFORK_LEVELS.with(|levels| levels.borrow().len()) >= MAX_VFORK_DEPTH {
+        return_errno!(EAGAIN, "too many nested vforks");
+    }
     let current = current!();
     trace!("vfork parent process pid = {:?}", current.process().pid());
 
     // Force stop all child threads
     // To prevent multiple threads do vfork simultaneously and force stop each other, the thread must change the process status at first.
-    loop {
-        let mut process_inner = current.process().inner();
-        if process_inner.status() == ProcessStatus::Stopped {
-            trace!("process is doing vfork, current thread handle force stop");
-            drop(process_inner);
-            handle_force_stop();
-            continue;
-        } else {
-            trace!("current thread start vfork");
-            process_inner.stop();
-            break;
+    // A vforked child that calls vfork runs in a process that is stopped already, by the vfork of the outermost child. It
+    // is this thread that resumes it, so the thread must not wait for it.
+    if !is_vforked_child_process() {
+        loop {
+            let mut process_inner = current.process().inner();
+            if process_inner.status() == ProcessStatus::Stopped {
+                trace!("process is doing vfork, current thread handle force stop");
+                drop(process_inner);
+                handle_force_stop();
+                continue;
+            } else {
+                trace!("current thread start vfork");
+                process_inner.stop();
+                break;
+            }
         }
     }
 
@@ -76,18 +110,17 @@ pub fn do_vfork(mut context: *mut CpuContext) -> Result<isize> {
     };
 
     // Save parent's file table.
-    vfork_save_file_table(&current)?;
+    let parent_file_table = vfork_save_file_table(&current);
 
     // Save parent's context in TLS. This is done last, so that no error return can leave
-    // the heap copy of its xsave area behind.
+    // the heap copy of its xsave area behind. Both are saved in the level of the child.
     let parent_context = save_parent_context(unsafe { &*context });
-    VFORK_CONTEXT.with(|cell| {
-        // There is no saved context here, as reset_vfork_context removes the one that a
-        // LibOS thread leaves behind. If there is one that was never restored, free its xsave
-        // area, as nobody else will.
-        if let Some((_, stale_context)) = cell.replace(Some((child_pid, parent_context))) {
-            free_xsave_area_of_saved_context(&stale_context);
-        }
+    VFORK_LEVELS.with(|levels| {
+        levels.borrow_mut().push(VforkLevel {
+            child_pid,
+            parent_context,
+            parent_file_table,
+        });
     });
 
     // This is the first time return and will return as child.
@@ -156,39 +189,54 @@ fn free_xsave_area_of_saved_context(context: &CpuContext) {
 
 // Forget the vfork state of a LibOS thread that ends. A vforked child that does not leave with
 // exit_group or execve, e.g., because a signal kills it, never returns to its parent. Its saved
-// context would stay in the TLS of the host thread, and the next LibOS thread on that host thread
+// contexts would stay in the TLS of the host thread, and the next LibOS thread on that host thread
 // would take itself for a vforked child, e.g., in its execve.
-pub fn reset_vfork_context() {
-    VFORK_CONTEXT.with(|cell| {
-        if let Some((_, parent_context)) = cell.take() {
-            free_xsave_area_of_saved_context(&parent_context);
-        }
-    });
+//
+// Nobody will use the saved file tables of the parents, either, as the process ends with the child.
+// They hold the original files of the process, so close them like close_all_files does with the
+// file table in use. Otherwise, e.g., the write end of a pipe would stay open for ever.
+//
+// Returns whether the thread was a vforked child. Then the other threads of the process are frozen
+// still (see resume_frozen_threads).
+pub fn reset_vfork_context() -> bool {
+    let levels = VFORK_LEVELS.with(|levels| levels.take());
+    let was_vforked_child = !levels.is_empty();
+    for mut level in levels {
+        free_xsave_area_of_saved_context(&level.parent_context);
+        close_files(level.parent_file_table.del_all());
+        EXIT_CHILDREN_STATUS
+            .lock()
+            .unwrap()
+            .remove(&level.child_pid);
+    }
+    was_vforked_child
 }
 
 // Check if the calling process is a vforked child process that reuse parent's task and pid.
 pub fn is_vforked_child_process() -> bool {
-    VFORK_CONTEXT.with(|cell| {
-        let ctx = cell.borrow();
-        return ctx.is_some();
+    VFORK_LEVELS.with(|levels| !levels.borrow().is_empty())
+}
+
+// The pid of the parent of the children that the caller creates with vfork. It is the pid of the
+// innermost vforked child, if the caller is one, and otherwise the pid of the process. The vforked
+// child runs in the process of its parent and has no process structure of its own, but the exit
+// statuses of its children must not be mixed up with those of its parent.
+fn vfork_parent_pid(process_pid: pid_t) -> pid_t {
+    VFORK_LEVELS.with(|levels| {
+        levels
+            .borrow()
+            .last()
+            .map_or(process_pid, |level| level.child_pid)
     })
 }
 
-fn vfork_save_file_table(current: &ThreadRef) -> Result<()> {
-    let parent_pid = current.process().pid();
-    let mut vfork_file_tables = VFORK_PARENT_FILE_TABLES.lock().unwrap();
-    let parent_file_table = {
-        let mut current_file_table = current.files().lock();
-        let new_file_table = current_file_table.clone();
-        // FileTable contains non-cloned struct, so here we do a memory replacement to use new
-        // file table in child and store the original file table in TLS.
-        mem::replace(&mut *current_file_table, new_file_table)
-    };
-
-    // Insert the parent file table. The key shouldn't exist because there must be only one thread doing the vfork and save the file table for current process.
-    let ret = vfork_file_tables.insert(parent_pid, parent_file_table);
-    debug_assert!(ret.is_none());
-    Ok(())
+// Replace the file table of the current thread with a clone for the child, and return the original file table.
+fn vfork_save_file_table(current: &ThreadRef) -> FileTable {
+    let mut current_file_table = current.files().lock();
+    let new_file_table = current_file_table.clone();
+    // FileTable contains non-cloned struct, so here we do a memory replacement to use new
+    // file table in child and store the original file table in TLS.
+    mem::replace(&mut *current_file_table, new_file_table)
 }
 
 fn vfork_stop_all_child_thread(current: &ThreadRef) {
@@ -225,31 +273,51 @@ pub fn vfork_return_to_parent(
     let child_pid = restore_parent_process(context, current_ref)?;
 
     if let Some(term_status) = child_exit_status {
-        record_exit_child(current_ref.process().pid(), child_pid as pid_t, term_status);
+        record_exit_child(
+            vfork_parent_pid(current_ref.process().pid()),
+            child_pid as pid_t,
+            term_status,
+        );
     }
 
-    // Wake parent's child thread which are all sleeping
-    // Hold the process inner lock during the wake process to avoid other threads do vfork again and try to stop the thread
-    let current = current!();
-    let mut process_inner = current.process().inner();
-    let child_threads = process_inner.threads().unwrap();
-    child_threads.iter().for_each(|thread| {
-        thread.resume();
-        let thread_ptr = thread.raw_ptr();
-        if current.raw_ptr() != thread_ptr {
-            set_event(thread_ptr as *const c_void);
-            info!("Thread 0x{:x} is waken", thread_ptr);
-        }
-    });
-    process_inner.resume();
+    // The parent is a vforked child, too, which still runs in the stopped process: the other threads stay frozen
+    // until the outermost child returns.
+    if is_vforked_child_process() {
+        return Ok(child_pid);
+    }
+
+    resume_frozen_threads(&current!());
 
     Ok(child_pid)
+}
+
+// Wake the threads that the vfork of the outermost child has frozen, and let the process run again. The caller is the
+// thread of the child, which is the last one to run in the process: it returns to its parent, or it ends.
+pub fn resume_frozen_threads(current: &ThreadRef) {
+    // Wake parent's child thread which are all sleeping
+    // Hold the process inner lock during the wake process to avoid other threads do vfork again and try to stop the thread
+    let mut process_inner = current.process().inner();
+    // The process is gone if the other threads have ended meanwhile (they can, if the child has created them)
+    if let Some(child_threads) = process_inner.threads() {
+        child_threads.iter().for_each(|thread| {
+            thread.resume();
+            let thread_ptr = thread.raw_ptr();
+            if current.raw_ptr() != thread_ptr {
+                set_event(thread_ptr as *const c_void);
+                info!("Thread 0x{:x} is waken", thread_ptr);
+            }
+        });
+        process_inner.resume();
+    }
 }
 
 fn record_exit_child(parent_pid: pid_t, child_pid: pid_t, child_exit_status: TermStatus) {
     let child_exit_status = ChildExitStatus::new(child_pid, child_exit_status);
 
     let mut children_status = EXIT_CHILDREN_STATUS.lock().unwrap();
+    // The child is gone, and with it the statuses of its children that nobody has waited for: as it has no
+    // process structure, nobody would adopt them.
+    children_status.remove(&child_pid);
     if let Some(children) = children_status.get_mut(&parent_pid) {
         children.push(child_exit_status);
     } else {
@@ -259,47 +327,39 @@ fn record_exit_child(parent_pid: pid_t, child_pid: pid_t, child_exit_status: Ter
 
 fn restore_parent_process(mut context: *mut CpuContext, current_ref: &ThreadRef) -> Result<isize> {
     let current_thread = current!();
-    let current_pid = current_ref.process().pid();
 
-    // Restore parent file table
-    let parent_file_table = {
-        let mut parent_file_tables = VFORK_PARENT_FILE_TABLES.lock().unwrap();
-        if let Some(table) = parent_file_tables.remove(&current_pid) {
-            table
-        } else {
-            return_errno!(EFAULT, "couldn't restore parent file table");
-        }
+    // Leave the innermost level. Nothing can fail after this, so the level is not lost half restored.
+    let level = VFORK_LEVELS.with(|levels| levels.borrow_mut().pop());
+    let level = match level {
+        Some(level) => level,
+        None => return_errno!(EFAULT, "couldn't find the vfork level to return from"),
     };
+    let parent_file_table = level.parent_file_table;
 
     // Close all child opened files
-    close_files_opened_by_child(current_ref, &parent_file_table)?;
+    close_files_opened_by_child(current_ref, &parent_file_table);
 
+    // Restore parent file table
     let mut current_file_table = current_ref.files().lock();
     *current_file_table = parent_file_table;
 
-    // Get child pid and restore CpuContext. The context of the child owns no extra context
+    // Restore CpuContext. The context of the child owns no extra context
     // (see save_parent_context). The restored one owns the heap copy of the xsave area of the
     // parent, if there is one, which do_sysret restores and hands to the PendingFpAreas.
-    let mut child_pid = 0;
-    VFORK_CONTEXT.with(|cell| {
-        let mut ctx = cell.borrow_mut();
-        child_pid = ctx.unwrap().0;
-        unsafe { *context = ctx.unwrap().1 };
-        *ctx = None;
-    });
+    unsafe { *context = level.parent_context };
 
     // Set return value to child_pid
     // This will be the second time return
-    Ok(child_pid as isize)
+    Ok(level.child_pid as isize)
 }
 
 pub fn check_vfork_for_exec(current_ref: &ThreadRef) -> Option<(ThreadId, Option<ProcessRef>)> {
     let current_pid = current_ref.process().pid();
     if is_vforked_child_process() {
         let mut child_pid = 0;
-        VFORK_CONTEXT.with(|cell| {
-            let ctx = cell.borrow().unwrap();
-            child_pid = ctx.0;
+        VFORK_LEVELS.with(|levels| {
+            // The innermost child is the one that calls execve
+            child_pid = levels.borrow().last().unwrap().child_pid;
         });
         return Some((
             // Reuse tid which was generated when do_vfork
@@ -314,7 +374,7 @@ pub fn check_vfork_for_exec(current_ref: &ThreadRef) -> Option<(ThreadId, Option
     }
 }
 
-fn close_files_opened_by_child(current: &ThreadRef, parent_file_table: &FileTable) -> Result<()> {
+fn close_files_opened_by_child(current: &ThreadRef, parent_file_table: &FileTable) {
     let current_file_table = current.files().lock();
     let child_open_fds: Vec<FileDesc> = current_file_table
         .table()
@@ -332,7 +392,6 @@ fn close_files_opened_by_child(current: &ThreadRef, parent_file_table: &FileTabl
     child_open_fds
         .iter()
         .for_each(|&fd| current.close_file(fd).expect("close child file error"));
-    Ok(())
 }
 
 pub fn handle_force_stop() {
@@ -353,15 +412,17 @@ pub fn handle_force_stop() {
 
 // Wait4 unwaited child which are created with vfork and directly exit without calling execve.
 pub fn wait4_exit_child_created_with_vfork(
-    parent_pid: pid_t,
+    process_pid: pid_t,
     child_filter: &ProcessFilter,
 ) -> Option<(pid_t, i32)> {
+    let parent_pid = vfork_parent_pid(process_pid);
     let mut children_status = EXIT_CHILDREN_STATUS.lock().unwrap();
     if let Some(children) = children_status.get_mut(&parent_pid) {
         let unwaited_child_idx = children.iter().position(|child| match child_filter {
             ProcessFilter::WithAnyPid => true,
             ProcessFilter::WithPid(pid) => pid == child.pid(),
-            ProcessFilter::WithPgid(pgid) => todo!(), // This case should be rare.
+            // The children are in the process group of the process
+            ProcessFilter::WithPgid(pgid) => *pgid == current!().process().pgid(),
         });
 
         if let Some(child_idx) = unwaited_child_idx {
