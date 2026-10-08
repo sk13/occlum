@@ -90,11 +90,9 @@ impl Inner {
         self.reader.items_to_consume()
     }
 
+    /// Shut down the reading and/or the writing of the endpoint. As in Linux,
+    /// this is allowed after the peer has closed, too.
     pub fn shutdown(&self, how: Shutdown) -> Result<()> {
-        if !self.is_connected() {
-            return_errno!(ENOTCONN, "The socket is not connected.");
-        }
-
         if how.should_shut_read() {
             self.reader.shutdown()
         }
@@ -146,10 +144,6 @@ impl Inner {
             None,
             None,
         );
-    }
-
-    fn is_connected(&self) -> bool {
-        self.peer.upgrade().is_some()
     }
 }
 
@@ -218,8 +212,12 @@ impl Observer<IoEvents> for RelayNotifier {
         // The event of the channel should not be broadcasted directly to socket.
         // The event transformation should be consistant with poll.
         if event.contains(IoEvents::HUP) {
+            // The peer will send nothing more, so reading returns the end of
+            // the file. Thus, the socket is readable, too, and a poller that
+            // does not ask for RDHUP, e.g., poll() with POLLIN, has to be
+            // woken up. The socket has HUP if it cannot send, either.
             event -= IoEvents::HUP;
-            event |= IoEvents::RDHUP;
+            event |= IoEvents::IN | IoEvents::RDHUP | IoEvents::HUP;
         }
 
         if event.contains(IoEvents::ERR) {

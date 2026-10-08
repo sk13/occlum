@@ -347,9 +347,9 @@ impl<I> Consumer<I> {
         waiter_loop!(
             {
                 let mut rb_consumer = self.inner.lock().unwrap();
-                if self.is_self_shutdown() {
-                    return_errno!(EPIPE, "this endpoint has been shutdown");
-                }
+                // Get the flag before the items: the peer shuts down after its
+                // last push, so no item is left behind if the flag is set
+                let is_peer_shutdown = self.is_peer_shutdown();
 
                 if let Some(item) = rb_consumer.pop() {
                     drop(rb_consumer);
@@ -357,7 +357,11 @@ impl<I> Consumer<I> {
                     return Ok(Some(item));
                 }
 
-                if self.is_peer_shutdown() {
+                // Like the end of a file: no more items will be consumed. The
+                // items that arrived before this endpoint shut down are still
+                // consumed, just like a socket delivers its data after
+                // shutdown(SHUT_RD).
+                if is_peer_shutdown || self.is_self_shutdown() {
                     return Ok(None);
                 }
                 if self.is_nonblocking() {
@@ -411,11 +415,7 @@ impl<I> Consumer<I> {
     }
 
     pub fn items_to_consume(&self) -> usize {
-        if self.is_self_shutdown() {
-            0
-        } else {
-            self.inner.lock().unwrap().len()
-        }
+        self.inner.lock().unwrap().len()
     }
 
     pub fn capacity(&self) -> usize {
@@ -444,9 +444,8 @@ impl<I: Copy> Consumer<I> {
         waiter_loop!(
             {
                 let mut rb_consumer = self.inner.lock().unwrap();
-                if self.is_self_shutdown() {
-                    return_errno!(EPIPE, "this endpoint has been shutdown");
-                }
+                // Get the flag before the items, see pop()
+                let is_peer_shutdown = self.is_peer_shutdown();
 
                 let mut total_count = 0;
                 for items in item_slices.iter_mut() {
@@ -465,7 +464,8 @@ impl<I: Copy> Consumer<I> {
                     return Ok(total_count);
                 };
 
-                if self.is_peer_shutdown() {
+                // The end of the file, see pop()
+                if is_peer_shutdown || self.is_self_shutdown() {
                     return Ok(0);
                 }
                 if self.is_nonblocking() {

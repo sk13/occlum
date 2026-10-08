@@ -412,10 +412,19 @@ impl Stream {
 
     /// perform shutdown on the socket.
     pub fn shutdown(&self, how: Shutdown) -> Result<()> {
-        if let Status::Connected(ref end) = &*self.inner() {
-            end.shutdown(how)
-        } else {
-            return_errno!(ENOTCONN, "The socket is not connected.");
+        // Release the lock before waking up threads, like the other operations
+        let status = (*self.inner()).clone();
+        match status {
+            Status::Connected(end) => {
+                end.shutdown(how)?;
+                // The channels notify the peer of the shutdown, but not this
+                // socket. Without the notification, the threads that wait for
+                // events on it with poll, select or epoll would not notice
+                // the end of the file (or HUP) they are supposed to get.
+                self.notifier.notifier().broadcast(&end.poll());
+                Ok(())
+            }
+            _ => return_errno!(ENOTCONN, "The socket is not connected."),
         }
     }
 
