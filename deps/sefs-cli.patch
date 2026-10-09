@@ -26,9 +26,9 @@ index 979ee76..7bc8573 100644
  	cp ./target/release/libsefsclienclave.a ../lib/libenclave.a
  endif
 diff --git a/sefs-cli/rust-toolchain b/sefs-cli/rust-toolchain
-index cd5e8eb..5c87d60 100644
+index cd5e8eb..9eb2e1f 100644
 --- a/sefs-cli/rust-toolchain
 +++ b/sefs-cli/rust-toolchain
 @@ -1 +1 @@
 -nightly-2022-10-22
-+1.98.1
++1.99.0

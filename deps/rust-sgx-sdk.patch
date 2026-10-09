@@ -375,6 +375,30 @@ index d3293bab..2489b265 100644
      }
  
      #[inline]
+diff --git a/sgx_tstd/src/io/mod.rs b/sgx_tstd/src/io/mod.rs
+index 313e0cd2..1253ec18 100644
+--- a/sgx_tstd/src/io/mod.rs
++++ b/sgx_tstd/src/io/mod.rs
+@@ -566,7 +566,8 @@ where
+ /// [`&str`]: prim@str
+ /// [`std::io`]: self
+ /// [`File`]: crate::fs::File
+-#[cfg_attr(not(test), rustc_diagnostic_item = "IoRead")]
++// No `rustc_diagnostic_item = "IoRead"`: since Rust 1.99, std::io::Read is defined in the
++// alloc crate, which has the diagnostic item, and a duplicate is an error.
+ pub trait Read {
+     /// Pull some bytes from this source into the specified buffer, returning
+     /// how many bytes were read.
+@@ -1367,7 +1368,8 @@ impl<'a> Deref for IoSlice<'a> {
+ /// `write` in a loop until its entire input has been written.
+ ///
+ /// [`write_all`]: Write::write_all
+-#[cfg_attr(not(test), rustc_diagnostic_item = "IoWrite")]
++// No `rustc_diagnostic_item = "IoWrite"`: since Rust 1.99, std::io::Write is defined in the
++// core crate, which has the diagnostic item, and a duplicate is an error.
+ pub trait Write {
+     /// Write a buffer into this writer, returning how many bytes were written.
+     ///
 diff --git a/sgx_tstd/src/io/readbuf.rs b/sgx_tstd/src/io/readbuf.rs
 index 5889ee95..810b4a8b 100644
 --- a/sgx_tstd/src/io/readbuf.rs
