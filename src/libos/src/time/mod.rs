@@ -7,8 +7,8 @@ use rcore_fs::dev::TimeProvider;
 use rcore_fs::vfs::Timespec;
 use sgx_trts::enclave::{rsgx_get_enclave_mode, EnclaveMode};
 use spin::Once;
+use std::fmt;
 use std::time::Duration;
-use std::{fmt, u64};
 use syscall::SyscallNum;
 
 mod profiler;

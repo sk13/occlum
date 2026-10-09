@@ -7,7 +7,7 @@ use std::rsgx_cpuidex;
 pub const CPUID_OPCODE: u16 = 0xA20F;
 const CPUID_MIN_BASIC_LEAF: u32 = 0;
 const CPUID_MIN_EXTEND_LEAF: u32 = 0x8000_0000;
-const CPUID_MAX_SUBLEAF: u32 = u32::max_value();
+const CPUID_MAX_SUBLEAF: u32 = u32::MAX;
 
 #[repr(C)]
 #[derive(Eq, PartialEq, Hash, Clone, Copy)]

@@ -23,7 +23,7 @@ impl ObjectId {
 
         // Make sure that we can detect the overflow of id even in face of
         // (extremely) concurrent addition on NEXT_ID.
-        assert!(id <= u64::max_value() / 2);
+        assert!(id <= u64::MAX / 2);
 
         Self(id)
     }

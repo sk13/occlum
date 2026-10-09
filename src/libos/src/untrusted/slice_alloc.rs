@@ -61,7 +61,7 @@ impl UntrustedSliceAlloc {
             // Move self.buf_pos forward if enough space _atomically_.
             let old_pos = self
                 .buf_pos
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |old_pos| {
+                .try_update(Ordering::Relaxed, Ordering::Relaxed, |old_pos| {
                     let new_pos = old_pos + new_slice_len;
                     if new_pos <= self.buf_size {
                         Some(new_pos)

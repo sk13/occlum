@@ -62,7 +62,7 @@ impl File for Stream {
             cmd : GetReadBufLen => {
                 match &*self.inner() {
                     Status::Connected(endpoint) => {
-                        let bytes_to_read = endpoint.bytes_to_read().min(std::i32::MAX as usize) as i32;
+                        let bytes_to_read = endpoint.bytes_to_read().min(i32::MAX as usize) as i32;
                         cmd.set_output(bytes_to_read as _);
                     }
                     _ => return_errno!(ENOTCONN, "unconnected socket"),

@@ -59,7 +59,7 @@ impl rlimit_t {
     fn new(cur: u64) -> rlimit_t {
         rlimit_t {
             cur: cur,
-            max: u64::max_value(),
+            max: u64::MAX,
         }
     }
 
@@ -75,8 +75,8 @@ impl rlimit_t {
 impl Default for rlimit_t {
     fn default() -> rlimit_t {
         rlimit_t {
-            cur: u64::max_value(),
-            max: u64::max_value(),
+            cur: u64::MAX,
+            max: u64::MAX,
         }
     }
 }

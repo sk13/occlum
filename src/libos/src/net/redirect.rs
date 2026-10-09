@@ -140,7 +140,7 @@ fn ephemeral_port() -> u16 {
     const LAST: u16 = 60999;
     static NEXT: AtomicU16 = AtomicU16::new(FIRST);
     let port = NEXT
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |port| {
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |port| {
             Some(if port >= LAST { FIRST } else { port + 1 })
         })
         .unwrap();
