@@ -16,6 +16,7 @@
 #include <stdarg.h>
 #include <pthread.h>
 #include "test.h"
+#include "kernel_heap.h"
 
 // ============================================================================
 // Helper definition
@@ -263,6 +264,216 @@ out:
 }
 
 // ============================================================================
+// Test cases: epoll_wait does not leak kernel heap
+// ============================================================================
+
+// Every call to epoll_wait used to leave a waker in the wait queue of the epoll
+// file, which was only emptied by an event on the epoll file. So the kernel
+// heap grew with every call on an epoll file without events (about 42 bytes
+// per call), until the enclave ran out of heap.
+static int check_epoll_wait_leak(int epfd, int timeout_ms, int expected_nfds, int calls,
+                                 long limit_kb) {
+    struct epoll_event event;
+    // Let the allocations that stay settle
+    for (int i = 0; i < 1000; i++) {
+        if (epoll_wait(epfd, &event, 1, timeout_ms) != expected_nfds) {
+            THROW_ERROR("unexpected result of epoll_wait");
+        }
+    }
+    long before = kernel_heap_in_use();
+    if (before == -2) {
+        printf("\t\tSKIPPED: the kernel heap monitor is not enabled\n");
+        return 0;
+    }
+    if (before < 0) {
+        THROW_ERROR("failed to get the kernel heap in use");
+    }
+    for (int i = 0; i < calls; i++) {
+        if (epoll_wait(epfd, &event, 1, timeout_ms) != expected_nfds) {
+            THROW_ERROR("unexpected result of epoll_wait");
+        }
+    }
+    long after = kernel_heap_in_use();
+    if (after - before > limit_kb) {
+        THROW_ERROR("the kernel heap grew by %ld kB in %d calls (limit %ld kB)",
+                    after - before, calls, limit_kb);
+    }
+    return 0;
+}
+
+static int create_epoll_eventfd(int *epfd, int *efd) {
+    *efd = eventfd(0, EFD_NONBLOCK);
+    *epfd = epoll_create1(0);
+    struct epoll_event event = { .events = EPOLLIN, .data.fd = *efd };
+    if (*efd < 0 || *epfd < 0 || epoll_ctl(*epfd, EPOLL_CTL_ADD, *efd, &event) < 0) {
+        THROW_ERROR("failed to set up the epoll file");
+    }
+    return 0;
+}
+
+// No event and no waiting: the call returns right away
+int test_epoll_wait_idle_no_leak() {
+    int epfd, efd;
+    if (create_epoll_eventfd(&epfd, &efd) < 0) {
+        return -1;
+    }
+    int ret = check_epoll_wait_leak(epfd, 0, 0, 200000, 1024);
+    close(efd);
+    close(epfd);
+    return ret;
+}
+
+// A level-triggered event of a LibOS file (not a host file) that stays ready: the
+// call returns right away with the event
+int test_epoll_wait_ready_no_leak() {
+    int pipe_fds[2];
+    if (pipe(pipe_fds) < 0) {
+        THROW_ERROR("failed to create the pipe");
+    }
+    int epfd = epoll_create1(0);
+    struct epoll_event event = { .events = EPOLLIN, .data.fd = pipe_fds[0] };
+    if (epfd < 0 || epoll_ctl(epfd, EPOLL_CTL_ADD, pipe_fds[0], &event) < 0 ||
+            write(pipe_fds[1], "x", 1) != 1) {
+        THROW_ERROR("failed to set up the epoll file");
+    }
+    int ret = check_epoll_wait_leak(epfd, 0, 1, 100000, 1024);
+    close_files(3, pipe_fds[0], pipe_fds[1], epfd);
+    return ret;
+}
+
+// No event: the call sleeps until the timeout is up
+int test_epoll_wait_timeout_no_leak() {
+    int epfd, efd;
+    if (create_epoll_eventfd(&epfd, &efd) < 0) {
+        return -1;
+    }
+    int ret = check_epoll_wait_leak(epfd, 1, 0, 2000, 32);
+    close(efd);
+    close(epfd);
+    return ret;
+}
+
+#define PING_PONG_ROUNDS 5000
+
+struct ping_pong_arg {
+    int epfd;
+    int in_fd;
+    int out_fd;
+};
+
+// Waits for an event on in_fd, reads it, and writes out_fd unless it is -1
+static int ping_pong_step(int epfd, int in_fd, int out_fd) {
+    struct epoll_event event;
+    char c;
+    if (epoll_wait(epfd, &event, 1, 5000) != 1) {
+        return -1;
+    }
+    if (read(in_fd, &c, 1) != 1) {
+        return -1;
+    }
+    if (out_fd >= 0 && write(out_fd, "x", 1) != 1) {
+        return -1;
+    }
+    return 0;
+}
+
+static void *ping_pong_child(void *_arg) {
+    struct ping_pong_arg *arg = _arg;
+    for (int i = 0; i < PING_PONG_ROUNDS; i++) {
+        if (ping_pong_step(arg->epfd, arg->in_fd, arg->out_fd) < 0) {
+            return (void *) -1;
+        }
+    }
+    return NULL;
+}
+
+static int create_epoll_pipe(int *epfd, int pipe_fds[2]) {
+    *epfd = epoll_create1(0);
+    struct epoll_event event = { .events = EPOLLIN, .data.fd = 0 };
+    if (pipe(pipe_fds) < 0 || *epfd < 0) {
+        THROW_ERROR("failed to create the epoll file or the pipe");
+    }
+    event.data.fd = pipe_fds[0];
+    if (epoll_ctl(*epfd, EPOLL_CTL_ADD, pipe_fds[0], &event) < 0) {
+        THROW_ERROR("failed to add the pipe to the epoll file");
+    }
+    return 0;
+}
+
+// Two threads wake up each other through epoll files in turn, so that every
+// epoll_wait sleeps until the other thread has written. The events are those of
+// LibOS files, which wake up the sleeping thread through the wait queue of the
+// epoll file. Waiters are removed from the wait queue when the waits end, which
+// must not lose the wake-ups of the other waits.
+int test_epoll_wait_ping_pong() {
+    int epfd_a, epfd_b, pipe_a[2], pipe_b[2];
+    if (create_epoll_pipe(&epfd_a, pipe_a) < 0 || create_epoll_pipe(&epfd_b, pipe_b) < 0) {
+        return -1;
+    }
+    // The child reads pipe a and writes pipe b, the main thread the other way around
+    struct ping_pong_arg child_arg = { .epfd = epfd_a, .in_fd = pipe_a[0], .out_fd = pipe_b[1] };
+    pthread_t child;
+    if (pthread_create(&child, NULL, ping_pong_child, &child_arg) != 0) {
+        THROW_ERROR("failed to create the thread");
+    }
+
+    int failed = 0;
+    for (int i = 0; i < PING_PONG_ROUNDS && !failed; i++) {
+        if (write(pipe_a[1], "x", 1) != 1 || ping_pong_step(epfd_b, pipe_b[0], -1) < 0) {
+            failed = 1;
+        }
+    }
+    // A child that is stuck in epoll_wait gives up after 5 seconds
+    void *child_ret = NULL;
+    pthread_join(child, &child_ret);
+    if (failed || child_ret != NULL) {
+        THROW_ERROR("a thread was not woken up");
+    }
+    close_files(6, pipe_a[0], pipe_a[1], pipe_b[0], pipe_b[1], epfd_a, epfd_b);
+    return 0;
+}
+
+static void *sleeping_waiter(void *arg) {
+    int epfd = *(int *) arg;
+    struct epoll_event event;
+    return epoll_wait(epfd, &event, 1, 5000) == 1 ? NULL : (void *) -1;
+}
+
+// Two threads wait on one epoll file. The waits of one thread end without an
+// event again and again, which dequeues its waiter from the wait queue of the epoll
+// file each time. That must not dequeue the waiter of the other thread, which
+// is still asleep and has to be woken up by the event.
+int test_epoll_wait_two_waiters() {
+    int epfd, pipe_fds[2];
+    if (create_epoll_pipe(&epfd, pipe_fds) < 0) {
+        return -1;
+    }
+    pthread_t sleeper;
+    if (pthread_create(&sleeper, NULL, sleeping_waiter, &epfd) != 0) {
+        THROW_ERROR("failed to create the thread");
+    }
+    // Let the thread fall asleep
+    usleep(200 * 1000);
+
+    int failed = 0;
+    struct epoll_event event;
+    for (int i = 0; i < 20 && !failed; i++) {
+        failed = epoll_wait(epfd, &event, 1, 10) != 0;
+    }
+    if (write(pipe_fds[1], "x", 1) != 1) {
+        failed = 1;
+    }
+    // A thread that is not woken up gives up after 5 seconds
+    void *sleeper_ret = NULL;
+    pthread_join(sleeper, &sleeper_ret);
+    if (failed || sleeper_ret != NULL) {
+        THROW_ERROR("the sleeping thread was not woken up");
+    }
+    close_files(3, pipe_fds[0], pipe_fds[1], epfd);
+    return 0;
+}
+
+// ============================================================================
 // Test suite main
 // ============================================================================
 
@@ -271,6 +482,11 @@ static test_case_t test_cases[] = {
     TEST_CASE(test_epoll_ctl_uds),
     TEST_CASE(test_epoll_ctl_after_dup2),
     TEST_CASE(test_epoll_close_ready_socket),
+    TEST_CASE(test_epoll_wait_idle_no_leak),
+    TEST_CASE(test_epoll_wait_ready_no_leak),
+    TEST_CASE(test_epoll_wait_timeout_no_leak),
+    TEST_CASE(test_epoll_wait_ping_pong),
+    TEST_CASE(test_epoll_wait_two_waiters),
 };
 
 int main() {
