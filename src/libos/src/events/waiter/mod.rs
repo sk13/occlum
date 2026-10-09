@@ -98,6 +98,13 @@ impl<S: Synchronizer> Waker<S> {
         }
     }
 
+    /// Returns whether this waker was created by the given waiter.
+    pub fn is_for(&self, waiter: &Waiter<S>) -> bool {
+        // The allocation of the waiter's synchronizer lives as long as any of
+        // its wakers, so no other waiter can ever have the same address.
+        self.inner.as_ptr() == Arc::as_ptr(&waiter.inner)
+    }
+
     /// Wake up waiters in batch, more efficient than waking up one-by-one.
     pub fn batch_wake<'a, W: 'a + Synchronizer, I: Iterator<Item = &'a Waker<W>>>(iter: I) {
         let host_eventfds = iter

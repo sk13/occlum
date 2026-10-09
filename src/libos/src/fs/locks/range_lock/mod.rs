@@ -122,6 +122,12 @@ impl RangeLock {
         self.waiters.as_ref().unwrap().reset_and_enqueue(waiter)
     }
 
+    pub fn dequeue_waiter(&self, waiter: &Waiter) {
+        if let Some(waiters) = self.waiters.as_ref() {
+            waiters.dequeue(waiter);
+        }
+    }
+
     pub fn dequeue_and_wake_all_waiters(&mut self) -> usize {
         if self.waiters.is_some() {
             return self.waiters.as_ref().unwrap().dequeue_and_wake_all();
@@ -214,12 +220,26 @@ impl RangeLockList {
                 conflict_lock.enqueue_waiter(&waiter);
                 // Ensure that we drop any locks before wait
                 drop(list);
-                waiter.wait(None)?;
+                if let Err(e) = waiter.wait(None) {
+                    // The lock did not wake up the waiter (interrupted), which
+                    // would stay in the queue of the lock until it is released
+                    self.dequeue_waiter(&waiter);
+                    return Err(e);
+                }
                 // Wake up, let's try to set lock again
                 continue;
             }
             // No conflict here, let's insert the lock
             return Ok(Self::insert_lock_into_list(&mut list, lock));
+        }
+    }
+
+    // Dequeue the waiter from the queue of the lock that it was waiting for.
+    // That lock is not known any more, so try them all.
+    fn dequeue_waiter(&self, waiter: &Waiter) {
+        let list = self.inner.read().unwrap();
+        for lock in list.iter() {
+            lock.dequeue_waiter(waiter);
         }
     }
 

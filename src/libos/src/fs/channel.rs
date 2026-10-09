@@ -197,6 +197,11 @@ macro_rules! waiter_loop {
         // The main loop
         let waiter = Waiter::new();
         let waiter_queue = $waiter_queue;
+        // The waiter stays in the queue unless the queue wakes it up. Dequeue
+        // it whenever the loop is left (a successful attempt, an error, or an
+        // interrupted wait), or the queue of an idle channel would grow with
+        // every call.
+        let _dequeue = waiter_queue.dequeue_on_drop(&waiter);
         loop {
             waiter_queue.reset_and_enqueue(&waiter);
 

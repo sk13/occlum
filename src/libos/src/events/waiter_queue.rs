@@ -64,6 +64,42 @@ impl<Sync: Synchronizer> WaiterQueue<Sync> {
         wakers.push_back(waiter.waker());
     }
 
+    /// Dequeue a waiter without waking it up.
+    ///
+    /// A waiter that is not woken up by the queue stays in it until the next
+    /// wake-up, which may never come. So a waiter that stops waiting for any
+    /// reason other than being woken up by the queue should call this method.
+    ///
+    /// Returns the number of times that the waiter has been dequeued, which is
+    /// zero if the waiter has already been woken up.
+    pub fn dequeue(&self, waiter: &Waiter<Sync>) -> usize {
+        // The quick path for a common case: the waiter has been woken up and
+        // thus dequeued. The count is never less than the number of wakers,
+        // so no waker of this waiter is left when it is zero.
+        if self.is_empty() {
+            return 0;
+        }
+
+        let mut wakers = self.wakers.lock();
+        let old_len = wakers.len();
+        wakers.retain(|waker| !waker.is_for(waiter));
+        let dequeued = old_len - wakers.len();
+        self.count.fetch_sub(dequeued, Ordering::Release);
+        dequeued
+    }
+
+    /// Dequeue a waiter without waking it up when the returned guard is
+    /// dropped, see `dequeue`.
+    ///
+    /// The guard dequeues the waiter however the scope of the guard is left,
+    /// including an early return or the `?` operator.
+    pub fn dequeue_on_drop<'a>(&'a self, waiter: &'a Waiter<Sync>) -> DequeueOnDrop<'a, Sync> {
+        DequeueOnDrop {
+            queue: self,
+            waiter,
+        }
+    }
+
     /// Dequeue a waiter and wake up its thread.
     pub fn dequeue_and_wake_one(&self) -> usize {
         self.dequeue_and_wake_nr(1)
@@ -93,5 +129,19 @@ impl<Sync: Synchronizer> WaiterQueue<Sync> {
         // Wake in batch
         Waker::<Sync>::batch_wake(to_wake.iter());
         to_wake.len()
+    }
+}
+
+/// A guard that dequeues a waiter from a queue when dropped.
+///
+/// It is created by `WaiterQueue::dequeue_on_drop`.
+pub struct DequeueOnDrop<'a, Sync: Synchronizer = LevelSync> {
+    queue: &'a WaiterQueue<Sync>,
+    waiter: &'a Waiter<Sync>,
+}
+
+impl<'a, Sync: Synchronizer> Drop for DequeueOnDrop<'a, Sync> {
+    fn drop(&mut self) {
+        self.queue.dequeue(self.waiter);
     }
 }

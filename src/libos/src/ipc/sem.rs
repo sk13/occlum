@@ -391,7 +391,13 @@ impl SemSet {
             drop(waiter_queue);
 
             // Wait for notification or timeout
-            match waiter.wait_mut(timeout.as_mut()) {
+            let res = waiter.wait_mut(timeout.as_mut());
+            if res.is_err() {
+                // The queue did not wake up the waiter, which would stay in the
+                // queue until the next successful operation on this set
+                self.waiter_queue.lock().dequeue(&waiter);
+            }
+            match res {
                 Ok(()) => continue,
                 Err(e) if e.errno() == Errno::ETIMEDOUT => {
                     return_errno!(ETIMEDOUT, "semaphore operation timed out");

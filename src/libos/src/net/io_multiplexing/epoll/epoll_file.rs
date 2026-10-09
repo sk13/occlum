@@ -153,6 +153,10 @@ impl EpollFile {
         let max_count = revents.len();
         let mut reinsert = VecDeque::with_capacity(max_count);
         let waiter = EpollWaiter::new(&self.host_file_epoller);
+        // The waiter stays in the queue unless the queue wakes it up. Dequeue
+        // it when this call ends, or the queue of an idle epoll file would
+        // grow with every call and never shrink.
+        let _dequeue = self.waiters.dequeue_on_drop(waiter.as_ref());
 
         loop {
             // Poll the latest states of the interested host files. If a host
