@@ -400,7 +400,7 @@ impl SemSet {
             match res {
                 Ok(()) => continue,
                 Err(e) if e.errno() == Errno::ETIMEDOUT => {
-                    return_errno!(ETIMEDOUT, "semaphore operation timed out");
+                    return_errno!(EAGAIN, "semaphore operation timed out");
                 }
                 // Handle signal interrupt
                 Err(e) if e.errno() == Errno::EINTR => {
