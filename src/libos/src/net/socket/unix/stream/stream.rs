@@ -601,9 +601,14 @@ impl Listener {
         channel.push(stream_socket)
     }
 
-    pub fn pop_incoming(&self) -> Option<Endpoint> {
+    pub fn pop_incoming(&self) -> Result<Endpoint> {
         let channel = self.channel.read().unwrap();
-        channel.pop().ok().flatten()
+        // Keep the errors of the channel: EAGAIN if the socket is non-blocking
+        // and EINTR if a signal interrupts it. No item means that the channel
+        // is shut down.
+        channel
+            .pop()?
+            .ok_or_else(|| errno!(EAGAIN, "No connection is incoming"))
     }
 
     pub fn remaining(&self) -> usize {

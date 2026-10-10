@@ -101,7 +101,6 @@ impl AddressSpace {
         self.get_listener_ref(addr)
             .ok_or_else(|| errno!(EINVAL, "the socket is not listening"))?
             .pop_incoming()
-            .ok_or_else(|| errno!(EAGAIN, "No connection is incoming"))
     }
 
     pub fn get_listener_ref(&self, addr: &UnixAddr) -> Option<Arc<Listener>> {
