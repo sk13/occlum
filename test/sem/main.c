@@ -444,6 +444,46 @@ static int test_semop_return_value(void) {
     return SUCCESS;
 }
 
+/**
+ * Test 7: Errors of semop() and semtimedop() that are reported before any operation is performed
+ * 1. No operations (nsops is 0) → EINVAL
+ * 2. Too many operations → E2BIG
+ * 3. Semaphore number out of range → EFBIG
+ * 4. Semaphore set does not exist → EINVAL
+ */
+static int test_semop_errors(void) {
+    static struct sembuf many[1000];
+    struct sembuf up = {0, 1, 0};
+    struct sembuf bad_num = {1, 1, 0};
+    struct timespec timeout = {1, 0};
+    int semid = sem_create(1);
+    if (semid < 0) {
+        THROW_ERROR("semget() create failed (errno: %d)", errno);
+    }
+
+    EXPECT_CALL(syscall(SYS_semop, semid, &up, 0), EINVAL);
+    EXPECT_CALL(syscall(SYS_semtimedop, semid, &up, 0, NULL), EINVAL);
+    EXPECT_CALL(syscall(SYS_semtimedop, semid, &up, 0, &timeout), EINVAL);
+
+    EXPECT_CALL(syscall(SYS_semop, semid, many, 1000), E2BIG);
+    EXPECT_CALL(syscall(SYS_semtimedop, semid, many, 1000, &timeout), E2BIG);
+
+    EXPECT_CALL(syscall(SYS_semop, semid, &bad_num, 1), EFBIG);
+    EXPECT_CALL(syscall(SYS_semtimedop, semid, &bad_num, 1, &timeout), EFBIG);
+
+    EXPECT_CALL(syscall(SYS_semop, -1, &up, 1), EINVAL);
+    EXPECT_CALL(syscall(SYS_semop, 100000, &up, 1), EINVAL);
+
+    // None of the calls has changed the semaphore
+    if (check_val(semid, 0, 0) != SUCCESS) {
+        return FAIL;
+    }
+
+    EXPECT_CALL(syscall(SYS_semctl, semid, 0, IPC_RMID), 0);
+    INFO("Test semop_errors passed\n");
+    return SUCCESS;
+}
+
 // ============================================================================
 // Child Process Test Logic (Corresponding to parent process test types)
 // ============================================================================
@@ -574,6 +614,7 @@ static test_case_t test_cases[] = {
     TEST_CASE(test_immediately_rmsem),
     TEST_CASE(test_operate_destroyed_sem),
     TEST_CASE(test_semop_return_value),
+    TEST_CASE(test_semop_errors),
     TEST_CASE(test_no_rmsem),
 };
 
