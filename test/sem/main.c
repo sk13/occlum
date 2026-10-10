@@ -1176,6 +1176,40 @@ static int test_semctl_wait_counts(void) {
     return SUCCESS;
 }
 
+/**
+ * Test 17: SEM_STAT_ANY and SEM_STAT get the status of the set (the number of the command
+ * used to clear the SEM_UNDO operations of the process)
+ */
+#ifndef SEM_STAT_ANY
+#define SEM_STAT_ANY    20
+#endif
+
+static int test_semctl_stat_any(void) {
+    struct semid_ds ds;
+    int semid = sem_create(3);
+    if (semid < 0) {
+        THROW_ERROR("semget() create failed (errno: %d)", errno);
+    }
+
+    EXPECT_CALL(sem_op(semid, 0, 1, SEM_UNDO), 0);
+    memset(&ds, 0, sizeof(ds));
+    EXPECT_CALL(syscall(SYS_semctl, semid, 0, SEM_STAT_ANY, &ds) - semid, 0);
+    if (ds.sem_nsems != 3) {
+        INFO("SEM_STAT_ANY got %lu semaphores, expected 3\n", (unsigned long)ds.sem_nsems);
+        return FAIL;
+    }
+    memset(&ds, 0, sizeof(ds));
+    EXPECT_CALL(syscall(SYS_semctl, semid, 0, SEM_STAT, &ds) - semid, 0);
+    if (ds.sem_nsems != 3) {
+        INFO("SEM_STAT got %lu semaphores, expected 3\n", (unsigned long)ds.sem_nsems);
+        return FAIL;
+    }
+
+    EXPECT_CALL(syscall(SYS_semctl, semid, 0, IPC_RMID), 0);
+    INFO("Test semctl_stat_any passed\n");
+    return SUCCESS;
+}
+
 // ============================================================================
 // Child Process Test Logic (Corresponding to parent process test types)
 // ============================================================================
@@ -1429,6 +1463,7 @@ static test_case_t test_cases[] = {
     TEST_CASE(test_sem_undo_failed_ops),
     TEST_CASE(test_semop_one_after_the_other),
     TEST_CASE(test_semctl_wait_counts),
+    TEST_CASE(test_semctl_stat_any),
     TEST_CASE(test_no_rmsem),
 };
 
