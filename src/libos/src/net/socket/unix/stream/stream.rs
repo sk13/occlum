@@ -22,6 +22,10 @@ pub struct Stream {
     pub(super) notifier: Arc<RelayNotifier>,
     // The IP addresses that the socket shows if it replaces a TCP socket
     inet: SgxMutex<Option<InetView>>,
+    // Whether accept returned the socket. Its endpoint has the address that
+    // the listening socket bound (see connect), so the socket must not release
+    // it when it is closed.
+    accepted: bool,
 }
 
 /// The IP socket addresses that a Unix socket shows to the program if it
@@ -51,6 +55,7 @@ impl Stream {
             ))),
             notifier: Arc::new(RelayNotifier::new()),
             inet: SgxMutex::new(None),
+            accepted: false,
         }
     }
 
@@ -66,12 +71,14 @@ impl Stream {
             inner: SgxMutex::new(Status::Connected(end_a)),
             notifier: notifier_a,
             inet: SgxMutex::new(None),
+            accepted: false,
         };
 
         let socket_b = Self {
             inner: SgxMutex::new(Status::Connected(end_b)),
             notifier: notifier_b,
             inet: SgxMutex::new(None),
+            accepted: false,
         };
 
         Ok((socket_a, socket_b))
@@ -324,6 +331,7 @@ impl Stream {
                         inner: SgxMutex::new(Status::Connected(endpoint)),
                         notifier: notifier,
                         inet: SgxMutex::new(None),
+                        accepted: true,
                     },
                     peer_addr,
                 ))
@@ -497,6 +505,12 @@ impl Drop for Stream {
                 // handle the blocking of other sockets holding the reference to the listener,
                 // e.g., pushing to a listener full of incoming sockets
                 listener.shutdown();
+            }
+            // The address that the socket bound, before or after it connected
+            Status::Connected(endpoint) if !self.accepted => {
+                if let Some(addr) = endpoint.addr() {
+                    ADDRESS_SPACE.remove_addr(&addr);
+                }
             }
             _ => {}
         }
