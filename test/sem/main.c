@@ -1338,6 +1338,56 @@ static int test_sem_undo_cleared_by_set(void) {
     return SUCCESS;
 }
 
+/**
+ * Test 21: SETVAL and SETALL wake up the threads that wait for the new value
+ * 1. A thread that waits for the semaphore to increase, and SETVAL
+ * 2. A thread that waits for the semaphore to become 0, and SETVAL
+ * 3. A thread that waits for the semaphore to increase, and SETALL
+ */
+static int test_semctl_set_wakes_waiter(void) {
+    unsigned short vals[2] = {0, 1};
+    waiter_t waiter;
+    int semid = sem_create(2);
+    if (semid < 0) {
+        THROW_ERROR("semget() create failed (errno: %d)", errno);
+    }
+
+    // Scenario 1
+    if (waiter_start(&waiter, semid, 0, -1) != SUCCESS ||
+            wait_for_count(semid, 0, GETNCNT, 1) != SUCCESS) {
+        return FAIL;
+    }
+    EXPECT_CALL(syscall(SYS_semctl, semid, 0, SETVAL, 1), 0);
+    if (waiter_finish(&waiter) != SUCCESS || check_val(semid, 0, 0) != SUCCESS) {
+        return FAIL;
+    }
+
+    // Scenario 2
+    EXPECT_CALL(syscall(SYS_semctl, semid, 0, SETVAL, 1), 0);
+    if (waiter_start(&waiter, semid, 0, 0) != SUCCESS ||
+            wait_for_count(semid, 0, GETZCNT, 1) != SUCCESS) {
+        return FAIL;
+    }
+    EXPECT_CALL(syscall(SYS_semctl, semid, 0, SETVAL, 0), 0);
+    if (waiter_finish(&waiter) != SUCCESS) {
+        return FAIL;
+    }
+
+    // Scenario 3
+    if (waiter_start(&waiter, semid, 1, -1) != SUCCESS ||
+            wait_for_count(semid, 1, GETNCNT, 1) != SUCCESS) {
+        return FAIL;
+    }
+    EXPECT_CALL(syscall(SYS_semctl, semid, 0, SETALL, vals), 0);
+    if (waiter_finish(&waiter) != SUCCESS || check_val(semid, 1, 0) != SUCCESS) {
+        return FAIL;
+    }
+
+    EXPECT_CALL(syscall(SYS_semctl, semid, 0, IPC_RMID), 0);
+    INFO("Test semctl_set_wakes_waiter passed\n");
+    return SUCCESS;
+}
+
 // ============================================================================
 // Child Process Test Logic (Corresponding to parent process test types)
 // ============================================================================
@@ -1597,6 +1647,7 @@ static test_case_t test_cases[] = {
     TEST_CASE(test_sem_undo_wakes_waiter),
     TEST_CASE(test_sem_undo_clamp),
     TEST_CASE(test_sem_undo_cleared_by_set),
+    TEST_CASE(test_semctl_set_wakes_waiter),
     TEST_CASE(test_no_rmsem),
 };
 
