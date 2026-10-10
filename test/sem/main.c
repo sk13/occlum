@@ -96,6 +96,11 @@ static int sem_create(int nsems) {
     return syscall(SYS_semget, IPC_PRIVATE, nsems, IPC_CREAT | IPC_EXCL | S_IRWUSER);
 }
 
+static long sem_op(int semid, int sem_num, int op, int flags) {
+    struct sembuf sop = { sem_num, op, flags };
+    return syscall(SYS_semop, semid, &sop, 1);
+}
+
 static long sem_getval(int semid, int sem_num) {
     return syscall(SYS_semctl, semid, sem_num, GETVAL);
 }
@@ -108,6 +113,13 @@ static int check_val(int semid, int sem_num, int expected) {
         return FAIL;
     }
     return SUCCESS;
+}
+
+// The time in milliseconds of a clock that does not jump
+static long now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
 // ============================================================================
@@ -484,6 +496,81 @@ static int test_semop_errors(void) {
     return SUCCESS;
 }
 
+/**
+ * Test 8: Timeout of semtimedop()
+ * 1. The operation cannot be performed in time → EAGAIN after the timeout
+ * 2. Zero timeout → EAGAIN at once
+ * 3. IPC_NOWAIT → EAGAIN at once, whatever the timeout is
+ * 4. Invalid timeout → EINVAL
+ * 5. The operation that can be performed does not wait
+ */
+static int test_semtimedop_timeout(void) {
+    struct sembuf down = {0, -1, 0};
+    struct sembuf down_nowait = {0, -1, IPC_NOWAIT};
+    struct sembuf wait_zero = {0, 0, 0};
+    struct timespec timeout = {0, 200 * 1000 * 1000};
+    struct timespec long_timeout = {2, 0};
+    struct timespec zero = {0, 0};
+    struct timespec bad_nsec = {0, 1000 * 1000 * 1000};
+    struct timespec bad_sec = {-1, 0};
+    long start, elapsed;
+    int semid = sem_create(1);
+    if (semid < 0) {
+        THROW_ERROR("semget() create failed (errno: %d)", errno);
+    }
+
+    // Scenario 1: The semaphore is 0, so the P operation has to wait for the timeout
+    start = now_ms();
+    EXPECT_CALL(syscall(SYS_semtimedop, semid, &down, 1, &timeout), EAGAIN);
+    elapsed = now_ms() - start;
+    if (elapsed < 180 || elapsed > 5000) {
+        INFO("semtimedop() took %ld ms, expected about 200 ms\n", elapsed);
+        return FAIL;
+    }
+
+    // Scenario 2: Zero timeout
+    EXPECT_CALL(syscall(SYS_semtimedop, semid, &down, 1, &zero), EAGAIN);
+
+    // Scenario 3: IPC_NOWAIT does not wait for the timeout
+    start = now_ms();
+    EXPECT_CALL(syscall(SYS_semtimedop, semid, &down_nowait, 1, &long_timeout), EAGAIN);
+    EXPECT_CALL(syscall(SYS_semop, semid, &down_nowait, 1), EAGAIN);
+    elapsed = now_ms() - start;
+    if (elapsed > 1000) {
+        INFO("semtimedop() with IPC_NOWAIT took %ld ms\n", elapsed);
+        return FAIL;
+    }
+
+    // Scenario 4: Invalid timeouts
+    EXPECT_CALL(syscall(SYS_semtimedop, semid, &down, 1, &bad_nsec), EINVAL);
+    EXPECT_CALL(syscall(SYS_semtimedop, semid, &down, 1, &bad_sec), EINVAL);
+
+    // Scenario 5: The Z operation waits for the semaphore to become 0 ...
+    EXPECT_CALL(sem_op(semid, 0, 1, 0), 0);
+    start = now_ms();
+    EXPECT_CALL(syscall(SYS_semtimedop, semid, &wait_zero, 1, &timeout), EAGAIN);
+    elapsed = now_ms() - start;
+    if (elapsed < 180 || elapsed > 5000) {
+        INFO("semtimedop() of the Z operation took %ld ms, expected about 200 ms\n", elapsed);
+        return FAIL;
+    }
+    // ... and the P operation, which can be performed, does not wait for the timeout
+    start = now_ms();
+    EXPECT_CALL(syscall(SYS_semtimedop, semid, &down, 1, &long_timeout), 0);
+    elapsed = now_ms() - start;
+    if (elapsed > 1000) {
+        INFO("semtimedop() that can be performed took %ld ms\n", elapsed);
+        return FAIL;
+    }
+    if (check_val(semid, 0, 0) != SUCCESS) {
+        return FAIL;
+    }
+
+    EXPECT_CALL(syscall(SYS_semctl, semid, 0, IPC_RMID), 0);
+    INFO("Test semtimedop_timeout passed\n");
+    return SUCCESS;
+}
+
 // ============================================================================
 // Child Process Test Logic (Corresponding to parent process test types)
 // ============================================================================
@@ -615,6 +702,7 @@ static test_case_t test_cases[] = {
     TEST_CASE(test_operate_destroyed_sem),
     TEST_CASE(test_semop_return_value),
     TEST_CASE(test_semop_errors),
+    TEST_CASE(test_semtimedop_timeout),
     TEST_CASE(test_no_rmsem),
 };
 

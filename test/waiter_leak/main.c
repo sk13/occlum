@@ -244,8 +244,7 @@ static int semtimedop_call(void *arg) {
     int semid = *(int *)arg;
     struct sembuf op = { .sem_num = 0, .sem_op = -1, .sem_flg = 0 };
     struct timespec timeout = { 0, 1000000 };
-    // Occlum returns ETIMEDOUT instead of EAGAIN
-    return expect_failure(syscall(SYS_semtimedop, semid, &op, 1, &timeout), EAGAIN, ETIMEDOUT,
+    return expect_failure(syscall(SYS_semtimedop, semid, &op, 1, &timeout), EAGAIN, EAGAIN,
                           "semtimedop");
 }
 
