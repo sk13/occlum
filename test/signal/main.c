@@ -2,7 +2,9 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
+#include <sys/syscall.h>
 #include <sys/wait.h>
+#include <sched.h>
 #include <unistd.h>
 #include <ucontext.h>
 #include <stdio.h>
@@ -15,6 +17,7 @@
 #include <signal.h>
 #include <pthread.h>
 #include <errno.h>
+#include <limits.h>
 #include <time.h>
 #include "test.h"
 
@@ -608,6 +611,406 @@ int test_sigtimedwait() {
 }
 
 // ============================================================================
+// Test sigtimedwait that is interrupted by a stream of signals
+// ============================================================================
+
+// The LibOS asks the host to interrupt the threads that have a pending signal
+// that they do not block, so that a thread that is blocked in a call notices
+// the signal. The interrupt arrives some time after the LibOS has found the
+// pending signal, and by then the signal may have been delivered to the thread
+// already, e.g., when the signal has just ended a sigtimedwait together with the
+// signal that the thread waits for, and the thread has called sigtimedwait again.
+// sigtimedwait must go on waiting in that case. It used to fail with EINTR
+// although no signal handler had run.
+//
+// The interrupt of a thread is sent after the LibOS has taken the scheduler lock
+// of the thread, and sched_setaffinity holds that lock while it calls the host.
+// So two threads that call sched_setaffinity on the main thread in a loop widen
+// the time between the decision to interrupt the thread and the interrupt, and
+// the situation above occurs many times per second instead of once in a while.
+//
+// The cases below send the main thread SIGUSR2, which it handles or ignores, and
+// SIGUSR1, which it blocks and waits for with sigtimedwait.
+
+#define STREAM_DURATION_MSEC    3000
+#define STREAM_INTERVAL_NSEC    200000
+#define NUM_AFFINITY_THREADS    2
+#define KERNEL_SIGSET_SIZE      8
+
+static volatile int g_stop;
+static volatile unsigned long g_num_handled;
+static pid_t g_main_tid;
+
+static void count_signal(int sig) {
+    g_num_handled++;
+}
+
+static long elapsed_msec(const struct timespec *start) {
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return (now.tv_sec - start->tv_sec) * 1000 + (now.tv_nsec - start->tv_nsec) / 1000000;
+}
+
+// Set the action of SIGUSR2. The handler runs with SIGUSR1 blocked, as the main thread
+// blocks SIGUSR1 to wait for it: SIGUSR1 would terminate the process if it was delivered
+// while the handler runs.
+static int set_sigusr2_action(void (*handler)(int)) {
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = handler;
+    sigemptyset(&sa.sa_mask);
+    sigaddset(&sa.sa_mask, SIGUSR1);
+    if (sigaction(SIGUSR2, &sa, NULL) < 0) {
+        THROW_ERROR("failed to set the signal action");
+    }
+    return 0;
+}
+
+static int block_sigusr1(sigset_t *old_mask) {
+    sigset_t set;
+    sigemptyset(&set);
+    sigaddset(&set, SIGUSR1);
+    return sigprocmask(SIG_BLOCK, &set, old_mask);
+}
+
+// Make the system call. The sigtimedwait of musl calls it again if it fails with EINTR,
+// which hides the failures that the cases below look for.
+static long sigtimedwait_sigusr1(const struct timespec *timeout) {
+    sigset_t set;
+    sigemptyset(&set);
+    sigaddset(&set, SIGUSR1);
+    siginfo_t info;
+    return syscall(SYS_rt_sigtimedwait, &set, &info, timeout, KERNEL_SIGSET_SIZE);
+}
+
+// Take the pending SIGUSR1 before it is unblocked, as it would terminate the process
+static int unblock_sigusr1(const sigset_t *old_mask) {
+    struct timespec no_timeout = { 0, 0 };
+    while (sigtimedwait_sigusr1(&no_timeout) > 0) {
+    }
+    return sigprocmask(SIG_SETMASK, old_mask, NULL);
+}
+
+// Send the main thread SIGUSR2, which it handles, and SIGUSR1, which it waits for
+static void *send_signals(void *arg) {
+    struct timespec interval = { 0, STREAM_INTERVAL_NSEC };
+    while (!g_stop) {
+        nanosleep(&interval, NULL);
+        syscall(SYS_tgkill, getpid(), g_main_tid, SIGUSR2);
+        syscall(SYS_tgkill, getpid(), g_main_tid, SIGUSR1);
+    }
+    return NULL;
+}
+
+static void *set_affinity(void *arg) {
+    cpu_set_t cpu_set;
+    if (sched_getaffinity(g_main_tid, sizeof(cpu_set), &cpu_set) < 0) {
+        return NULL;
+    }
+    while (!g_stop) {
+        sched_setaffinity(g_main_tid, sizeof(cpu_set), &cpu_set);
+    }
+    return NULL;
+}
+
+int test_sigtimedwait_with_stream_of_signals() {
+    sigset_t old_mask;
+    if (set_sigusr2_action(count_signal) < 0) {
+        return -1;
+    }
+    if (block_sigusr1(&old_mask) < 0) {
+        THROW_ERROR("failed to block SIGUSR1");
+    }
+
+    g_stop = 0;
+    g_main_tid = syscall(SYS_gettid);
+    pthread_t threads[1 + NUM_AFFINITY_THREADS];
+    int num_threads = 0;
+    while (num_threads < 1 + NUM_AFFINITY_THREADS) {
+        void *(*thread_func)(void *) = num_threads == 0 ? send_signals : set_affinity;
+        if (pthread_create(&threads[num_threads], NULL, thread_func, NULL) != 0) {
+            break;
+        }
+        num_threads++;
+    }
+
+    int ret = 0;
+    if (num_threads == 1 + NUM_AFFINITY_THREADS) {
+        struct timespec start;
+        clock_gettime(CLOCK_MONOTONIC, &start);
+        unsigned long num_calls = 0;
+        do {
+            unsigned long num_handled_before = g_num_handled;
+            struct timespec timeout = { 10, 0 };
+            long sigtimedwait_ret = sigtimedwait_sigusr1(&timeout);
+            int sigtimedwait_errno = errno;
+            num_calls++;
+            // The call may fail with EINTR if a signal handler has run
+            if (sigtimedwait_ret == -1 && sigtimedwait_errno == EINTR &&
+                    g_num_handled != num_handled_before) {
+                continue;
+            }
+            if (sigtimedwait_ret != SIGUSR1) {
+                printf("\t\tERROR: sigtimedwait returned %ld with errno %d (%s) in call %lu\n",
+                       sigtimedwait_ret, sigtimedwait_errno, strerror(sigtimedwait_errno),
+                       num_calls);
+                ret = -1;
+            }
+        } while (ret == 0 && elapsed_msec(&start) < STREAM_DURATION_MSEC);
+    } else {
+        printf("\t\tERROR: failed to create the threads\n");
+        ret = -1;
+    }
+
+    g_stop = 1;
+    for (int i = 0; i < num_threads; i++) {
+        pthread_join(threads[i], NULL);
+    }
+
+    if (unblock_sigusr1(&old_mask) < 0) {
+        THROW_ERROR("failed to restore the signal mask");
+    }
+    return ret;
+}
+
+// ============================================================================
+// Test sigtimedwait with signals that arrive while it waits
+// ============================================================================
+
+// The host also interrupts a thread for the signals that the thread ignores. They must
+// not end sigtimedwait or shorten its timeout, and a handled signal must end it with EINTR.
+// A thread sends the main thread a signal every interval_msec, and SIGUSR1 once when the
+// duration is over, unless it has been told to stop. So a sigtimedwait that does not end as
+// it should returns when the duration is over, instead of waiting for its timeout.
+
+struct signal_stream {
+    int signum;
+    int interval_msec;
+    int duration_msec;
+};
+
+static void *send_signal_stream(void *arg) {
+    const struct signal_stream *stream = arg;
+    struct timespec interval = { 0, stream->interval_msec * 1000000L };
+    struct timespec start;
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    while (!g_stop) {
+        if (elapsed_msec(&start) >= stream->duration_msec) {
+            syscall(SYS_tgkill, getpid(), g_main_tid, SIGUSR1);
+            break;
+        }
+        nanosleep(&interval, NULL);
+        syscall(SYS_tgkill, getpid(), g_main_tid, stream->signum);
+    }
+    return NULL;
+}
+
+struct wait_result {
+    long ret;
+    int err;
+    long elapsed_msec;
+    unsigned long num_handled;
+};
+
+// Call sigtimedwait for SIGUSR1 while a thread sends the stream of signals to the main
+// thread, which handles SIGUSR2 with the given handler (or ignores it)
+static int sigtimedwait_during_stream(const struct signal_stream *stream,
+                                      void (*sigusr2_handler)(int),
+                                      const struct timespec *timeout,
+                                      struct wait_result *result) {
+    sigset_t old_mask;
+    if (set_sigusr2_action(sigusr2_handler) < 0) {
+        return -1;
+    }
+    if (block_sigusr1(&old_mask) < 0) {
+        THROW_ERROR("failed to block SIGUSR1");
+    }
+
+    g_stop = 0;
+    g_main_tid = syscall(SYS_gettid);
+    pthread_t sender;
+    if (pthread_create(&sender, NULL, send_signal_stream, (void *)stream) != 0) {
+        THROW_ERROR("failed to create the thread");
+    }
+
+    struct timespec start;
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    unsigned long num_handled_before = g_num_handled;
+    result->ret = sigtimedwait_sigusr1(timeout);
+    result->err = errno;
+    result->elapsed_msec = elapsed_msec(&start);
+    result->num_handled = g_num_handled - num_handled_before;
+
+    g_stop = 1;
+    pthread_join(sender, NULL);
+    if (unblock_sigusr1(&old_mask) < 0) {
+        THROW_ERROR("failed to restore the signal mask");
+    }
+    return 0;
+}
+
+#define IGNORED_TIMEOUT_MSEC    300
+// Allow for the rounding of the milliseconds, and for a slow call
+#define TIMEOUT_EARLY_MSEC      10
+#define TIMEOUT_LATE_MSEC       500
+
+// The timeout is not shortened by the ignored signals, and it is not made longer
+int test_sigtimedwait_with_ignored_signals() {
+    struct signal_stream stream = { SIGUSR2, 5, 1500 };
+    struct timespec timeout = { 0, IGNORED_TIMEOUT_MSEC * 1000000L };
+    struct wait_result result;
+    if (sigtimedwait_during_stream(&stream, SIG_IGN, &timeout, &result) < 0) {
+        return -1;
+    }
+    if (result.ret != -1 || result.err != EAGAIN) {
+        THROW_ERROR("sigtimedwait returned %ld with errno %d (%s) instead of failing with EAGAIN",
+                    result.ret, result.err, strerror(result.err));
+    }
+    if (result.elapsed_msec < IGNORED_TIMEOUT_MSEC - TIMEOUT_EARLY_MSEC) {
+        THROW_ERROR("sigtimedwait failed after %ld ms, which is before its timeout of %d ms",
+                    result.elapsed_msec, IGNORED_TIMEOUT_MSEC);
+    }
+    if (result.elapsed_msec > IGNORED_TIMEOUT_MSEC + TIMEOUT_LATE_MSEC) {
+        THROW_ERROR("sigtimedwait failed after %ld ms, which is long after its timeout of %d ms",
+                    result.elapsed_msec, IGNORED_TIMEOUT_MSEC);
+    }
+    return 0;
+}
+
+// The timeout is so long that sigtimedwait would wait for ever if a handled signal did
+// not end it
+int test_sigtimedwait_with_handled_signal() {
+    struct signal_stream stream = { SIGUSR2, 200, 1000 };
+    struct timespec timeout = { LONG_MAX, 0 };
+    struct wait_result result;
+    if (sigtimedwait_during_stream(&stream, count_signal, &timeout, &result) < 0) {
+        return -1;
+    }
+    if (result.ret != -1 || result.err != EINTR) {
+        THROW_ERROR("sigtimedwait returned %ld with errno %d (%s) instead of failing with EINTR",
+                    result.ret, result.err, strerror(result.err));
+    }
+    if (result.num_handled == 0) {
+        THROW_ERROR("sigtimedwait failed with EINTR, but no signal handler has run");
+    }
+    return 0;
+}
+
+// ============================================================================
+// Test sigtimedwait in a process that exits or that is stopped by vfork
+// ============================================================================
+
+// The host also interrupts a thread if its process is forced to exit, or if the thread is
+// forced to stop because another thread of the process calls vfork. A thread that waits in
+// sigtimedwait without a timeout must leave the call then, or the process would never exit
+// or never return from vfork. The processes below hang if it does not, so the main process
+// kills them after some time.
+
+#define CHILD_TIMEOUT_MSEC      10000
+#define CHILD_EXIT_STATUS       7
+
+static void *wait_for_sigusr1(void *arg) {
+    sigtimedwait_sigusr1(NULL);
+    return NULL;
+}
+
+// The child process starts a thread that waits for SIGUSR1, which nobody sends, and gives
+// it the time to call sigtimedwait
+static int start_waiting_thread() {
+    sigset_t old_mask;
+    pthread_t thread;
+    if (block_sigusr1(&old_mask) < 0 ||
+            pthread_create(&thread, NULL, wait_for_sigusr1, NULL) != 0) {
+        return -1;
+    }
+    usleep(200 * 1000);
+    return 0;
+}
+
+// The child process exits with CHILD_EXIT_STATUS while the thread waits
+static int exiting_child() {
+    if (start_waiting_thread() < 0) {
+        return EXIT_FAILURE;
+    }
+    exit(CHILD_EXIT_STATUS);
+}
+
+// The same, but the child process calls vfork before it exits
+static int vforking_child() {
+    if (start_waiting_thread() < 0) {
+        return EXIT_FAILURE;
+    }
+    pid_t pid = vfork();
+    if (pid == 0) {
+        _exit(CHILD_EXIT_STATUS);
+    }
+    int status = 0;
+    if (pid < 0 || waitpid(pid, &status, 0) != pid || !WIFEXITED(status) ||
+            WEXITSTATUS(status) != CHILD_EXIT_STATUS) {
+        return EXIT_FAILURE;
+    }
+    exit(CHILD_EXIT_STATUS);
+}
+
+// Run the child process with the given command, and get its wait status. The child is
+// killed if it does not exit in time.
+static int run_child_and_wait(const char *cmd, int *status) {
+    pid_t child;
+    char *child_argv[] = {"signal", (char *)cmd, NULL};
+    if (posix_spawn(&child, "/bin/signal", NULL, NULL, child_argv, NULL) != 0) {
+        THROW_ERROR("failed to spawn a child process");
+    }
+    int is_exited = 0;
+    for (int i = 0; i < CHILD_TIMEOUT_MSEC / 10 && !is_exited; i++) {
+        pid_t ret = waitpid(child, status, WNOHANG);
+        if (ret < 0) {
+            THROW_ERROR("failed to wait for the child process");
+        }
+        is_exited = ret == child;
+        if (!is_exited) {
+            usleep(10 * 1000);
+        }
+    }
+    if (!is_exited) {
+        kill(child, SIGKILL);
+        waitpid(child, NULL, 0);
+        THROW_ERROR("the child process did not exit in %d ms", CHILD_TIMEOUT_MSEC);
+    }
+    return 0;
+}
+
+int test_sigtimedwait_process_exits() {
+    int status;
+    if (run_child_and_wait("exiting_child", &status) < 0) {
+        return -1;
+    }
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != CHILD_EXIT_STATUS) {
+        THROW_ERROR("the child process exited with unexpected status 0x%x", status);
+    }
+    return 0;
+}
+
+int test_sigtimedwait_vfork() {
+#ifdef SGX_MODE_SIM
+    // In the simulation mode, a vfork now and then crashes the LibOS when another thread of
+    // the process is blocked in a call of the host, with sigtimedwait as well as with nanosleep
+    printf("\t\tskipped, vfork may crash the LibOS in the simulation mode\n");
+    return 0;
+#endif
+    int status;
+    if (run_child_and_wait("vforking_child", &status) < 0) {
+        return -1;
+    }
+    // The child fails if vfork does not work. Its exit status is otherwise not checked, as
+    // it is 0 instead of CHILD_EXIT_STATUS now and then when a thread that vfork has
+    // stopped is blocked in a call, whether it is sigtimedwait or not.
+    if (!WIFEXITED(status) || WEXITSTATUS(status) == EXIT_FAILURE) {
+        THROW_ERROR("the child process failed with status 0x%x", status);
+    }
+    return 0;
+}
+
+// ============================================================================
 // Test suite main
 // ============================================================================
 
@@ -621,6 +1024,11 @@ static test_case_t test_cases[] = {
     TEST_CASE(test_sigaltstack),
     TEST_CASE(test_sigchld),
     TEST_CASE(test_sigtimedwait),
+    TEST_CASE(test_sigtimedwait_with_stream_of_signals),
+    TEST_CASE(test_sigtimedwait_with_ignored_signals),
+    TEST_CASE(test_sigtimedwait_with_handled_signal),
+    TEST_CASE(test_sigtimedwait_process_exits),
+    TEST_CASE(test_sigtimedwait_vfork),
 };
 
 int main(int argc, const char *argv[]) {
@@ -630,6 +1038,10 @@ int main(int argc, const char *argv[]) {
             return aborted_child();
         } else if (strcmp(cmd, "killed_child") == 0) {
             return killed_child();
+        } else if (strcmp(cmd, "exiting_child") == 0) {
+            return exiting_child();
+        } else if (strcmp(cmd, "vforking_child") == 0) {
+            return vforking_child();
         } else {
             fprintf(stderr, "ERROR: unknown command: %s\n", cmd);
             return EXIT_FAILURE;
