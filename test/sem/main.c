@@ -1593,6 +1593,53 @@ static int test_semctl_bad_pointer(void) {
     return SUCCESS;
 }
 
+/**
+ * Test 29: SEM_INFO and IPC_INFO fill a struct seminfo, and nothing behind it
+ * The LibOS used to fill a larger structure for SEM_INFO, so it overwrote the memory of the
+ * caller behind the struct seminfo (20 bytes).
+ */
+#define CANARY_COUNT    8
+#define CANARY_VAL      0xA5A5A5A5u
+
+static int test_semctl_info(void) {
+    struct {
+        struct seminfo info;
+        unsigned int canaries[CANARY_COUNT];
+    } buf;
+    const int cmds[] = {IPC_INFO, SEM_INFO};
+    int semid = sem_create(3);
+    if (semid < 0) {
+        THROW_ERROR("semget() create failed (errno: %d)", errno);
+    }
+
+    for (int i = 0; i < 2; i++) {
+        memset(&buf, 0, sizeof(buf));
+        for (int j = 0; j < CANARY_COUNT; j++) {
+            buf.canaries[j] = CANARY_VAL;
+        }
+        if (syscall(SYS_semctl, 0, 0, cmds[i], &buf) < 0) {
+            THROW_ERROR("semctl(%s) failed (errno: %d)", i == 0 ? "IPC_INFO" : "SEM_INFO", errno);
+        }
+        for (int j = 0; j < CANARY_COUNT; j++) {
+            if (buf.canaries[j] != CANARY_VAL) {
+                INFO("semctl(%s) overwrote the memory behind the struct seminfo\n",
+                     i == 0 ? "IPC_INFO" : "SEM_INFO");
+                return FAIL;
+            }
+        }
+        // SEM_INFO tells how many sets (semusz) and semaphores (semaem) there are
+        if (cmds[i] == SEM_INFO && (buf.info.semusz < 1 || buf.info.semaem < 3)) {
+            INFO("SEM_INFO got %d sets and %d semaphores, expected at least 1 and 3\n",
+                 buf.info.semusz, buf.info.semaem);
+            return FAIL;
+        }
+    }
+
+    EXPECT_CALL(syscall(SYS_semctl, semid, 0, IPC_RMID), 0);
+    INFO("Test semctl_info passed\n");
+    return SUCCESS;
+}
+
 // ============================================================================
 // Child Process Test Logic (Corresponding to parent process test types)
 // ============================================================================
@@ -1860,6 +1907,7 @@ static test_case_t test_cases[] = {
     TEST_CASE(test_semop_bad_pointer),
     TEST_CASE(test_semget_existing_set_nsems),
     TEST_CASE(test_semctl_bad_pointer),
+    TEST_CASE(test_semctl_info),
     TEST_CASE(test_no_rmsem),
 };
 
