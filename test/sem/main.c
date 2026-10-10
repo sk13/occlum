@@ -79,6 +79,37 @@ static int execute_in_child(char **const child_argv) {
     return SUCCESS;
 }
 
+// Perform a system call and fail the test unless it ends as expected: with the return
+// value 0 if the expected errno is 0, or else with -1 and that errno
+#define EXPECT_CALL(call, expected_errno) do { \
+    errno = 0; \
+    long ret__ = (call); \
+    if (!((expected_errno) == 0 ? ret__ == 0 : (ret__ == -1 && errno == (expected_errno)))) { \
+        INFO("%s returned %ld with errno %d (%s), expected %s\n", #call, ret__, errno, \
+             strerror(errno), (expected_errno) == 0 ? "0" : strerror(expected_errno)); \
+        return FAIL; \
+    } \
+} while (0)
+
+// Wrappers that make the system calls directly, as the tests do not depend on the libc
+static int sem_create(int nsems) {
+    return syscall(SYS_semget, IPC_PRIVATE, nsems, IPC_CREAT | IPC_EXCL | S_IRWUSER);
+}
+
+static long sem_getval(int semid, int sem_num) {
+    return syscall(SYS_semctl, semid, sem_num, GETVAL);
+}
+
+// Check the value of a semaphore
+static int check_val(int semid, int sem_num, int expected) {
+    long val = sem_getval(semid, sem_num);
+    if (val != expected) {
+        INFO("the value of semaphore %d is %ld, expected %d\n", sem_num, val, expected);
+        return FAIL;
+    }
+    return SUCCESS;
+}
+
 // ============================================================================
 // Core Semaphore Test Cases
 // ============================================================================
@@ -209,7 +240,7 @@ static int test_process_sync(void) {
 
     // Step 3: Parent performs P operation (value from 1→0)
     ret = syscall(SYS_semop, semid, &p_op, 1); // 1=number of operations
-    if (ret < 0) {
+    if (ret != 0) {
         THROW_ERROR("semop(P) failed (errno: %d)", errno);
     }
     // Verify value is 0 after P operation
@@ -384,6 +415,35 @@ static int test_no_rmsem(void) {
     return SUCCESS;
 }
 
+/**
+ * Test 6: Return values of semop() and semtimedop()
+ * Both return 0 if the operations have been performed
+ */
+static int test_semop_return_value(void) {
+    struct sembuf up = {0, 1, 0};
+    struct sembuf down = {0, -1, 0};
+    struct sembuf both[2] = {{0, 2, 0}, {1, 1, 0}};
+    struct timespec timeout = {1, 0};
+    int semid = sem_create(2);
+    if (semid < 0) {
+        THROW_ERROR("semget() create failed (errno: %d)", errno);
+    }
+
+    EXPECT_CALL(syscall(SYS_semop, semid, &up, 1), 0);
+    EXPECT_CALL(syscall(SYS_semop, semid, both, 2), 0);
+    EXPECT_CALL(syscall(SYS_semtimedop, semid, &down, 1, NULL), 0);
+    EXPECT_CALL(syscall(SYS_semtimedop, semid, &up, 1, &timeout), 0);
+    EXPECT_CALL(syscall(SYS_semtimedop, semid, both, 2, &timeout), 0);
+    // Semaphore 0: 1 + 2 - 1 + 1 + 2 = 5, semaphore 1: 1 + 1 = 2
+    if (check_val(semid, 0, 5) != SUCCESS || check_val(semid, 1, 2) != SUCCESS) {
+        return FAIL;
+    }
+
+    EXPECT_CALL(syscall(SYS_semctl, semid, 0, IPC_RMID), 0);
+    INFO("Test semop_return_value passed\n");
+    return SUCCESS;
+}
+
 // ============================================================================
 // Child Process Test Logic (Corresponding to parent process test types)
 // ============================================================================
@@ -451,7 +511,7 @@ static int child_test_process_sync(int argc, const char *argv[]) {
 
     // Perform V operation (value from 0→1)
     ret = syscall(SYS_semop, semid, &v_op, 1);
-    if (ret < 0) {
+    if (ret != 0) {
         THROW_ERROR("Child semop(V) failed (errno: %d)", errno);
     }
 
@@ -513,6 +573,7 @@ static test_case_t test_cases[] = {
     TEST_CASE(test_process_sync),
     TEST_CASE(test_immediately_rmsem),
     TEST_CASE(test_operate_destroyed_sem),
+    TEST_CASE(test_semop_return_value),
     TEST_CASE(test_no_rmsem),
 };
 
