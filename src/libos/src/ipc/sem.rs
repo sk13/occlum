@@ -643,8 +643,8 @@ impl SemManager {
                     if semflg.contains(SemFlags::IPC_CREAT) && semflg.contains(SemFlags::IPC_EXCL) {
                         return_errno!(EEXIST, "semaphore set already exists");
                     }
-                    if nsems > 0 && nsems != set.nsems {
-                        return_errno!(EINVAL, "nsems does not match existing set");
+                    if nsems > set.nsems {
+                        return_errno!(EINVAL, "nsems is larger than that of existing set");
                     }
                     set.semid
                 }
