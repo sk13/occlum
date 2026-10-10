@@ -21,6 +21,7 @@
 #include <netinet/tcp.h>
 
 #include "test.h"
+#include "kernel_heap.h"
 
 #define ECHO_MSG "echo msg for unix_socket test"
 
@@ -1165,6 +1166,213 @@ int test_accept_interrupted() {
     return ret;
 }
 
+// How a connected socket gets the name that it binds
+enum bind_kind {
+    BIND_THEN_CONNECT,
+    CONNECT_THEN_BIND,
+    SOCKETPAIR_THEN_BIND,
+    NUM_BIND_KINDS,
+};
+
+// Returns a socket that is connected and has bound the abstract address `name`,
+// in the given order, and sets `peer_fd` to the other end of the connection,
+// which is accepted from the listening socket for the first two kinds
+static int create_bound_connected(enum bind_kind kind, int listen_fd,
+                                  const char *listen_name,
+                                  const char *name, int *peer_fd) {
+    int fd;
+    if (kind == SOCKETPAIR_THEN_BIND) {
+        int fds[2];
+        if (socketpair(AF_UNIX, SOCK_STREAM, 0, fds) < 0) {
+            THROW_ERROR("failed to create a socket pair");
+        }
+        fd = fds[0];
+        *peer_fd = fds[1];
+    } else {
+        fd = socket(AF_UNIX, SOCK_STREAM, 0);
+        if (fd < 0) {
+            THROW_ERROR("failed to create a unix socket");
+        }
+        if (kind == BIND_THEN_CONNECT && abstract_bind(fd, name) < 0) {
+            close(fd);
+            THROW_ERROR("failed to bind %s before connect", name);
+        }
+        if (abstract_connect(fd, listen_name) < 0) {
+            close(fd);
+            THROW_ERROR("failed to connect to %s", listen_name);
+        }
+        *peer_fd = accept(listen_fd, NULL, NULL);
+        if (*peer_fd < 0) {
+            close(fd);
+            THROW_ERROR("failed to accept the connection");
+        }
+    }
+    if (kind != BIND_THEN_CONNECT && abstract_bind(fd, name) < 0) {
+        close_files(2, fd, *peer_fd);
+        THROW_ERROR("failed to bind %s after connect", name);
+    }
+    return fd;
+}
+
+// Binding the address fails with EADDRINUSE
+static int check_name_in_use(const char *name) {
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) {
+        THROW_ERROR("failed to create a unix socket");
+    }
+    int ret = abstract_bind(fd, name);
+    if (ret == 0 || errno != EADDRINUSE) {
+        printf("\t\tERROR: bind to %s returned %d with errno %d (%s), expected EADDRINUSE\n",
+               name, ret, errno, strerror(errno));
+        ret = -1;
+    } else {
+        ret = 0;
+    }
+    close(fd);
+    return ret;
+}
+
+// The abstract address can be bound
+static int check_name_free(const char *name, enum bind_kind kind) {
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) {
+        THROW_ERROR("failed to create a unix socket");
+    }
+    int ret = 0;
+    if (abstract_bind(fd, name) < 0) {
+        printf("\t\tERROR: bind to %s failed with errno %d (%s) after the socket that had bound it "
+               "(kind %d) was closed\n", name, errno, strerror(errno), kind);
+        ret = -1;
+    }
+    close(fd);
+    return ret;
+}
+
+static int check_names_released(int listen_fd, const char *listen_name) {
+    const char *name = "unix_socket_released_name";
+    for (enum bind_kind kind = 0; kind < NUM_BIND_KINDS; kind++) {
+        int peer_fd;
+        int fd = create_bound_connected(kind, listen_fd, listen_name, name, &peer_fd);
+        if (fd < 0) {
+            return -1;
+        }
+        // The socket owns the name as long as it is open
+        if (check_name_in_use(name) < 0) {
+            close_files(2, fd, peer_fd);
+            return -1;
+        }
+        close_files(2, fd, peer_fd);
+        if (check_name_free(name, kind) < 0) {
+            return -1;
+        }
+    }
+
+    // The socket that accept() returns has the name of the listening socket,
+    // but the latter owns it
+    int client_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (client_fd < 0 || abstract_connect(client_fd, listen_name) < 0) {
+        printf("\t\tERROR: failed to connect to %s: %s\n", listen_name, strerror(errno));
+        close(client_fd);
+        return -1;
+    }
+    int accepted_fd = accept(listen_fd, NULL, NULL);
+    if (accepted_fd < 0) {
+        printf("\t\tERROR: failed to accept the connection: %s\n", strerror(errno));
+        close(client_fd);
+        return -1;
+    }
+    // It has an address already, so it cannot bind another one
+    int ret = abstract_bind(accepted_fd, "unix_socket_released_accepted");
+    if (ret == 0 || errno != EINVAL) {
+        printf("\t\tERROR: bind of an accepted socket returned %d with errno %d (%s), expected "
+               "EINVAL\n", ret, errno, strerror(errno));
+        close_files(2, client_fd, accepted_fd);
+        return -1;
+    }
+    close_files(2, client_fd, accepted_fd);
+    if (check_name_in_use(listen_name) < 0) {
+        return -1;
+    }
+    return check_connection(listen_fd, listen_name);
+}
+
+// Like Linux, a socket that bound an abstract address releases it when it is
+// closed, no matter if it was connected, and whether it bound before or after
+// it connected. The socket that a listening socket accepts does not own the
+// address of the listening socket.
+int test_name_released_after_connect() {
+    const char *listen_name = "unix_socket_released_listener";
+    int listen_fd = abstract_listener(listen_name, 0);
+    if (listen_fd < 0) {
+        return -1;
+    }
+    int ret = check_names_released(listen_fd, listen_name);
+    close(listen_fd);
+    return ret;
+}
+
+#define BIND_CONNECT_CYCLES 1000
+#define BIND_CONNECT_WARMUP_CYCLES 10
+// A cycle leaked 70 bytes or more, so the unfixed growth is 70 kB. The heap is
+// read in kB, so the noise of an allocation that is in flight when it is read
+// is 1 kB at most.
+#define BIND_CONNECT_LIMIT_KB 4
+
+// A socket that bound an address and connected leaked its entry in the
+// address space of the unix sockets. Each cycle needs a new name to detect it:
+// the leaked entry blocks the name.
+static int bind_connect_cycles(int listen_fd, const char *listen_name, int first,
+                               int count) {
+    for (int i = first; i < first + count; i++) {
+        char name[64];
+        snprintf(name, sizeof(name), "unix_socket_cycle_%d", i);
+        int peer_fd;
+        int fd = create_bound_connected(i % NUM_BIND_KINDS, listen_fd, listen_name, name,
+                                        &peer_fd);
+        if (fd < 0) {
+            return -1;
+        }
+        close_files(2, fd, peer_fd);
+    }
+    return 0;
+}
+
+static int check_bind_connect_leaks_nothing(int listen_fd, const char *listen_name) {
+    if (bind_connect_cycles(listen_fd, listen_name, 0, BIND_CONNECT_WARMUP_CYCLES) < 0) {
+        return -1;
+    }
+    long before = kernel_heap_in_use();
+    if (before == -2) {
+        printf("\t\tSKIPPED: the kernel heap monitor is not enabled\n");
+        return 0;
+    }
+    if (before < 0) {
+        THROW_ERROR("failed to get the kernel heap in use");
+    }
+    if (bind_connect_cycles(listen_fd, listen_name, BIND_CONNECT_WARMUP_CYCLES,
+                            BIND_CONNECT_CYCLES) < 0) {
+        return -1;
+    }
+    long after = kernel_heap_in_use();
+    if (after - before > BIND_CONNECT_LIMIT_KB) {
+        printf("\t\tERROR: the kernel heap grew by %ld kB in %d cycles (limit %d kB)\n",
+               after - before, BIND_CONNECT_CYCLES, BIND_CONNECT_LIMIT_KB);
+        return -1;
+    }
+    return 0;
+}
+
+int test_bind_connect_leaks_nothing() {
+    const char *listen_name = "unix_socket_cycle_listener";
+    int listen_fd = abstract_listener(listen_name, 0);
+    if (listen_fd < 0) {
+        return -1;
+    }
+    int ret = check_bind_connect_leaks_nothing(listen_fd, listen_name);
+    close(listen_fd);
+    return ret;
+}
+
 static test_case_t test_cases[] = {
     TEST_CASE(test_unix_socket_inter_process),
     TEST_CASE(test_socketpair_inter_process),
@@ -1181,6 +1389,8 @@ static test_case_t test_cases[] = {
     TEST_CASE(test_accept_while_writing),
     TEST_CASE(test_epoll_in_after_connect),
     TEST_CASE(test_accept_interrupted),
+    TEST_CASE(test_name_released_after_connect),
+    TEST_CASE(test_bind_connect_leaks_nothing),
 };
 
 int main(int argc, const char *argv[]) {
