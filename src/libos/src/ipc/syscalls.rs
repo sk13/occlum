@@ -62,8 +62,8 @@ pub fn do_semop(semid: i32, sops_ptr: *const sembuf_t, nsops: usize) -> Result<i
     if nsops == 0 {
         return Ok(0);
     }
-    let ret = SYSTEM_V_SEM_MANAGER.do_semop(semid as SemId, sops_ptr, nsops, None)?;
-    Ok(9)
+    SYSTEM_V_SEM_MANAGER.do_semop(semid as SemId, sops_ptr, nsops, None)?;
+    Ok(0)
 }
 
 pub fn do_semtimedop(
