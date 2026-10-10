@@ -48,7 +48,7 @@ const SEM_SETVAL: CmdId = 16; // Set semaphore value
 const SEM_SETALL: CmdId = 17; // Set all semaphore values in set
 const SEM_STAT: CmdId = 18; // Get status by semid
 const SEM_INFO: CmdId = 19; // Get extended semaphore information
-const SEM_UNDO: CmdId = 20; // Undo operations for current process
+const SEM_STAT_ANY: CmdId = 20; // Get status by semid, without permission check
 
 bitflags! {
     pub struct SemFlags: u32 {
@@ -501,15 +501,12 @@ impl SemSet {
         Ok(sems[sem_num].get_zcnt())
     }
 
-    /// Removes the adjustments of a process, and adds them to the semaphores if the process
-    /// undoes its operations
-    fn remove_semadj(&self, pid: pid_t, undo: bool) {
+    /// Applies the undo adjustments of a process, which exits
+    fn apply_semadj(&self, pid: pid_t) {
         let mut sems = self.sems.lock();
         for sem in sems.iter_mut() {
             if let Some(adj) = sem.semadj.remove(&pid) {
-                if undo {
-                    sem.count += adj;
-                }
+                sem.count += adj;
             }
         }
     }
@@ -714,16 +711,6 @@ impl SemManager {
             semid, semnum, cmd, arg
         );
 
-        // Handle SEM_UNDO command (clear undo operations)
-        if cmd == SEM_UNDO {
-            let pid = current!().process().pid();
-            let sem_sets = self.sem_sets.read().unwrap();
-            for sem_set in sem_sets.values() {
-                sem_set.remove_semadj(pid, false);
-            }
-            return Ok(0);
-        }
-
         // Handle IPC_RMID (remove semaphore set)
         if cmd == IPC_RMID {
             let sem_set = self.get_semset(&semid)?;
@@ -907,7 +894,7 @@ impl SemManager {
                 }
                 Ok(0)
             }
-            SEM_STAT => {
+            SEM_STAT | SEM_STAT_ANY => {
                 // Get status by semid
                 let buf_ptr = arg as *mut semids_t;
                 let buf = unsafe {
@@ -939,7 +926,7 @@ impl SemManager {
         // Apply any pending undo operations, and detach process from all semaphore sets
         let mut sem_sets = self.sem_sets.write().unwrap();
         for (_, sem_set) in sem_sets.iter_mut() {
-            sem_set.remove_semadj(pid, true);
+            sem_set.apply_semadj(pid);
             sem_set.detach_pid(&pid);
         }
     }
