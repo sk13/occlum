@@ -1569,6 +1569,30 @@ static int test_semget_existing_set_nsems(void) {
     return SUCCESS;
 }
 
+/**
+ * Test 28: The pointers that semctl() gets must be in the user space (EFAULT)
+ * The LibOS used to write to or read from them without checking them, which crashed it.
+ */
+static int test_semctl_bad_pointer(void) {
+    int semid = sem_create(2);
+    if (semid < 0) {
+        THROW_ERROR("semget() create failed (errno: %d)", errno);
+    }
+
+    EXPECT_CALL(syscall(SYS_semctl, semid, 0, IPC_STAT, NULL), EFAULT);
+    EXPECT_CALL(syscall(SYS_semctl, semid, 0, IPC_STAT, (void *)8), EFAULT);
+    EXPECT_CALL(syscall(SYS_semctl, semid, 0, SEM_STAT, (void *)8), EFAULT);
+    EXPECT_CALL(syscall(SYS_semctl, semid, 0, IPC_SET, (void *)8), EFAULT);
+    EXPECT_CALL(syscall(SYS_semctl, semid, 0, IPC_INFO, (void *)8), EFAULT);
+    EXPECT_CALL(syscall(SYS_semctl, semid, 0, SEM_INFO, (void *)8), EFAULT);
+    EXPECT_CALL(syscall(SYS_semctl, semid, 0, GETALL, (void *)8), EFAULT);
+    EXPECT_CALL(syscall(SYS_semctl, semid, 0, SETALL, (void *)8), EFAULT);
+
+    EXPECT_CALL(syscall(SYS_semctl, semid, 0, IPC_RMID), 0);
+    INFO("Test semctl_bad_pointer passed\n");
+    return SUCCESS;
+}
+
 // ============================================================================
 // Child Process Test Logic (Corresponding to parent process test types)
 // ============================================================================
@@ -1835,6 +1859,7 @@ static test_case_t test_cases[] = {
     TEST_CASE(test_semctl_errors),
     TEST_CASE(test_semop_bad_pointer),
     TEST_CASE(test_semget_existing_set_nsems),
+    TEST_CASE(test_semctl_bad_pointer),
     TEST_CASE(test_no_rmsem),
 };
 
