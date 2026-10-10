@@ -11,7 +11,9 @@
 #include <spawn.h>
 #include <unistd.h>
 #include <errno.h>
+#include <pthread.h>
 #include "test.h"
+#include "kernel_heap.h"
 
 // ============================================================================
 // Global Definitions (Semaphore Test Specific)
@@ -26,11 +28,16 @@
 #define TEST_IMMEDIATELY_RMSEM  2   // Verify immediate semaphore removal
 #define TEST_OPERATE_DESTOYED   3   // Operate on destroyed semaphore
 #define TEST_NO_RMSEM           4   // Do not remove semaphore (memory leak detection)
+#define TEST_UNDO_MERGED        5   // Child: many operations with SEM_UNDO, then exit
+#define TEST_UNDO_HOLD          6   // Child: one operation with SEM_UNDO, wait to be told to exit
 
 // Number of parameters for each test case (child process argv length)
 #define TEST_GET_SEMID_BY_KEY_ARGC  5
 #define TEST_PROCESS_SYNC_ARGC     4
 #define TEST_OPERATE_DESTOYED_ARGC  5
+#define TEST_UNDO_MERGED_ARGC       4
+#define TEST_UNDO_HOLD_ARGC         6
+#define MAX_CHILD_ARGS              4
 
 // General macro definitions
 #define ARG_BUF_SZ  64              // Parameter buffer size
@@ -120,6 +127,58 @@ static long now_ms(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+// Spawn a child process that runs a child test, which takes the integers as arguments
+static int spawn_child(pid_t *pid, int test_type, int arg_count, const int args[]) {
+    char arg_bufs[2 + MAX_CHILD_ARGS][ARG_BUF_SZ];
+    char *child_argv[2 + MAX_CHILD_ARGS + 1];
+    int argc = 0;
+
+    snprintf(arg_bufs[argc], ARG_BUF_SZ, "%s", prog_name);
+    child_argv[argc] = arg_bufs[argc];
+    argc++;
+    snprintf(arg_bufs[argc], ARG_BUF_SZ, "%d", test_type);
+    child_argv[argc] = arg_bufs[argc];
+    argc++;
+    for (int i = 0; i < arg_count; i++) {
+        snprintf(arg_bufs[argc], ARG_BUF_SZ, "%d", args[i]);
+        child_argv[argc] = arg_bufs[argc];
+        argc++;
+    }
+    child_argv[argc] = NULL;
+
+    int err = posix_spawn(pid, prog_name, NULL, NULL, child_argv, NULL);
+    if (err != 0) {
+        THROW_ERROR("posix_spawn() failed (error: %d)", err);
+    }
+    return SUCCESS;
+}
+
+// Wait for a child process to exit, and check that its test passed
+static int wait_for_child(pid_t pid) {
+    int status;
+    if (waitpid(pid, &status, 0) < 0) {
+        THROW_ERROR("waitpid() failed (errno: %d)", errno);
+    }
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        INFO("Child process test failed (status: %d)\n", status);
+        return FAIL;
+    }
+    return SUCCESS;
+}
+
+// Wait until a semaphore has the expected value, which a child process changes
+static int wait_for_val(int semid, int sem_num, int expected) {
+    for (int i = 0; i < 5000; i++) {
+        if (sem_getval(semid, sem_num) == expected) {
+            return SUCCESS;
+        }
+        usleep(1000);
+    }
+    INFO("the value of semaphore %d is still %ld, expected %d\n", sem_num,
+         sem_getval(semid, sem_num), expected);
+    return FAIL;
 }
 
 // ============================================================================
@@ -571,6 +630,233 @@ static int test_semtimedop_timeout(void) {
     return SUCCESS;
 }
 
+/**
+ * Test 9: The SEM_UNDO operations do not leak memory
+ * The P and V operations with SEM_UNDO undo each other, so there is nothing left to undo
+ * when the process exits. The kernel heap must not grow with their number: it used to
+ * grow by 32 bytes per pair, about 1 MB in the test.
+ */
+#define UNDO_PAIRS      20000
+#define HEAP_LIMIT_KB   64
+
+static int test_sem_undo_no_growth(void) {
+    struct sembuf up = {0, 1, SEM_UNDO};
+    struct sembuf down = {0, -1, SEM_UNDO};
+    int semid = sem_create(1);
+    if (semid < 0) {
+        THROW_ERROR("semget() create failed (errno: %d)", errno);
+    }
+
+    for (int i = 0; i < 100; i++) {
+        EXPECT_CALL(syscall(SYS_semop, semid, &up, 1), 0);
+        EXPECT_CALL(syscall(SYS_semop, semid, &down, 1), 0);
+    }
+    long before = kernel_heap_in_use();
+    if (before == -2) {
+        INFO("SKIPPED: the kernel heap monitor is not enabled\n");
+        goto out;
+    }
+    if (before < 0) {
+        THROW_ERROR("failed to get the kernel heap in use");
+    }
+    for (int i = 0; i < UNDO_PAIRS; i++) {
+        EXPECT_CALL(syscall(SYS_semop, semid, &up, 1), 0);
+        EXPECT_CALL(syscall(SYS_semop, semid, &down, 1), 0);
+    }
+    long after = kernel_heap_in_use();
+    if (after - before > HEAP_LIMIT_KB) {
+        INFO("the kernel heap grew by %ld kB in %d pairs of operations (limit %d kB)\n",
+             after - before, UNDO_PAIRS, HEAP_LIMIT_KB);
+        return FAIL;
+    }
+
+out:
+    EXPECT_CALL(syscall(SYS_semctl, semid, 0, IPC_RMID), 0);
+    INFO("Test sem_undo_no_growth passed\n");
+    return SUCCESS;
+}
+
+/**
+ * Test 10: A process that exits undoes its SEM_UNDO operations
+ * Many operations on a semaphore, in many calls, in one call and in two threads, are undone
+ * as the sum of them
+ */
+static int test_sem_undo_at_exit(void) {
+    pid_t pid;
+    int set_a = sem_create(2);
+    int set_b = sem_create(2);
+    if (set_a < 0 || set_b < 0) {
+        THROW_ERROR("semget() create failed (errno: %d)", errno);
+    }
+    EXPECT_CALL(syscall(SYS_semctl, set_a, 0, SETVAL, 10), 0);
+    EXPECT_CALL(syscall(SYS_semctl, set_a, 1, SETVAL, 20), 0);
+    EXPECT_CALL(syscall(SYS_semctl, set_b, 0, SETVAL, 7), 0);
+    EXPECT_CALL(syscall(SYS_semctl, set_b, 1, SETVAL, 3), 0);
+
+    int args[] = {set_a, set_b};
+    if (spawn_child(&pid, TEST_UNDO_MERGED, 2, args) != SUCCESS ||
+            wait_for_child(pid) != SUCCESS) {
+        return FAIL;
+    }
+    if (check_val(set_a, 0, 10) != SUCCESS || check_val(set_a, 1, 20) != SUCCESS ||
+            check_val(set_b, 0, 7) != SUCCESS || check_val(set_b, 1, 3) != SUCCESS) {
+        return FAIL;
+    }
+
+    EXPECT_CALL(syscall(SYS_semctl, set_a, 0, IPC_RMID), 0);
+    EXPECT_CALL(syscall(SYS_semctl, set_b, 0, IPC_RMID), 0);
+    INFO("Test sem_undo_at_exit passed\n");
+    return SUCCESS;
+}
+
+/**
+ * Test 11: Every process undoes its own SEM_UNDO operations
+ * Two processes operate on one semaphore, and exit one after the other
+ */
+static int test_sem_undo_per_process(void) {
+    pid_t pid_x, pid_y;
+    int semid = sem_create(1);
+    int go_x = sem_create(1);
+    int go_y = sem_create(1);
+    if (semid < 0 || go_x < 0 || go_y < 0) {
+        THROW_ERROR("semget() create failed (errno: %d)", errno);
+    }
+    EXPECT_CALL(syscall(SYS_semctl, semid, 0, SETVAL, 10), 0);
+
+    int args_x[] = {semid, 0, 3, go_x};
+    int args_y[] = {semid, 0, 5, go_y};
+    if (spawn_child(&pid_x, TEST_UNDO_HOLD, 4, args_x) != SUCCESS ||
+            spawn_child(&pid_y, TEST_UNDO_HOLD, 4, args_y) != SUCCESS ||
+            wait_for_val(semid, 0, 18) != SUCCESS) {
+        return FAIL;
+    }
+
+    // The first process exits and subtracts its 3, the second one subtracts its 5 later
+    EXPECT_CALL(sem_op(go_x, 0, 1, 0), 0);
+    if (wait_for_child(pid_x) != SUCCESS || check_val(semid, 0, 15) != SUCCESS) {
+        return FAIL;
+    }
+    EXPECT_CALL(sem_op(go_y, 0, 1, 0), 0);
+    if (wait_for_child(pid_y) != SUCCESS || check_val(semid, 0, 10) != SUCCESS) {
+        return FAIL;
+    }
+
+    EXPECT_CALL(syscall(SYS_semctl, semid, 0, IPC_RMID), 0);
+    EXPECT_CALL(syscall(SYS_semctl, go_x, 0, IPC_RMID), 0);
+    EXPECT_CALL(syscall(SYS_semctl, go_y, 0, IPC_RMID), 0);
+    INFO("Test sem_undo_per_process passed\n");
+    return SUCCESS;
+}
+
+/**
+ * Test 12: The SEM_UNDO operations are limited
+ * What a process has to undo for a semaphore is in the range of -32768 to 32767 (ERANGE),
+ * and the operations of one call count together
+ */
+#define SEMVMX_VAL      32767
+
+static int test_sem_undo_range(void) {
+    struct sembuf two_downs[2] = {{2, -1, SEM_UNDO}, {2, -1, SEM_UNDO}};
+    int semid = sem_create(3);
+    if (semid < 0) {
+        THROW_ERROR("semget() create failed (errno: %d)", errno);
+    }
+
+    // Semaphore 0: the process has to add 32767 to the semaphore, which is the limit
+    EXPECT_CALL(syscall(SYS_semctl, semid, 0, SETVAL, SEMVMX_VAL), 0);
+    EXPECT_CALL(sem_op(semid, 0, -SEMVMX_VAL, SEM_UNDO), 0);
+    EXPECT_CALL(sem_op(semid, 0, SEMVMX_VAL, 0), 0);
+    EXPECT_CALL(sem_op(semid, 0, -1, SEM_UNDO), ERANGE);
+    if (check_val(semid, 0, SEMVMX_VAL) != SUCCESS) {
+        return FAIL;
+    }
+
+    // Semaphore 1: the process has to subtract 32768 from the semaphore, which is the limit
+    EXPECT_CALL(sem_op(semid, 1, SEMVMX_VAL, SEM_UNDO), 0);
+    EXPECT_CALL(sem_op(semid, 1, -SEMVMX_VAL, 0), 0);
+    EXPECT_CALL(sem_op(semid, 1, 1, SEM_UNDO), 0);
+    EXPECT_CALL(sem_op(semid, 1, 1, SEM_UNDO), ERANGE);
+    if (check_val(semid, 1, 1) != SUCCESS) {
+        return FAIL;
+    }
+
+    // Semaphore 2: two operations of one call together would leave the range, so the call
+    // fails and changes nothing, and one of the operations alone works
+    EXPECT_CALL(syscall(SYS_semctl, semid, 2, SETVAL, SEMVMX_VAL), 0);
+    EXPECT_CALL(sem_op(semid, 2, -(SEMVMX_VAL - 1), SEM_UNDO), 0);
+    EXPECT_CALL(sem_op(semid, 2, SEMVMX_VAL - 1, 0), 0);
+    EXPECT_CALL(syscall(SYS_semop, semid, two_downs, 2), ERANGE);
+    if (check_val(semid, 2, SEMVMX_VAL) != SUCCESS) {
+        return FAIL;
+    }
+    EXPECT_CALL(sem_op(semid, 2, -1, SEM_UNDO), 0);
+    EXPECT_CALL(sem_op(semid, 2, -1, SEM_UNDO), ERANGE);
+    if (check_val(semid, 2, SEMVMX_VAL - 1) != SUCCESS) {
+        return FAIL;
+    }
+
+    EXPECT_CALL(syscall(SYS_semctl, semid, 0, IPC_RMID), 0);
+    INFO("Test sem_undo_range passed\n");
+    return SUCCESS;
+}
+
+/**
+ * Test 13: The SEM_UNDO operations on a removed semaphore set are dropped
+ * The semid of a removed set is allocated again after a while. The process that exits
+ * must not undo its operations on the removed set for the new set.
+ */
+static int test_sem_undo_removed_set(void) {
+    pid_t pid;
+    int old_semid = sem_create(1);
+    int go_semid = sem_create(1);
+    if (old_semid < 0 || go_semid < 0) {
+        THROW_ERROR("semget() create failed (errno: %d)", errno);
+    }
+
+    // The child adds 1 to the semaphore and has to subtract it when it exits
+    int args[] = {old_semid, 0, 1, go_semid};
+    if (spawn_child(&pid, TEST_UNDO_HOLD, 4, args) != SUCCESS ||
+            wait_for_val(old_semid, 0, 1) != SUCCESS) {
+        return FAIL;
+    }
+    EXPECT_CALL(syscall(SYS_semctl, old_semid, 0, IPC_RMID), 0);
+
+    // Create and remove sets until the semid is allocated again
+    int new_semid = -1;
+    for (int i = 0; i < 300; i++) {
+        int semid = sem_create(1);
+        if (semid < 0) {
+            THROW_ERROR("semget() create failed (errno: %d)", errno);
+        }
+        if (semid == old_semid) {
+            new_semid = semid;
+            break;
+        }
+        EXPECT_CALL(syscall(SYS_semctl, semid, 0, IPC_RMID), 0);
+    }
+    if (new_semid < 0) {
+        INFO("the semid is not allocated again, there is nothing to test\n");
+    } else {
+        EXPECT_CALL(syscall(SYS_semctl, new_semid, 0, SETVAL, 5), 0);
+    }
+
+    // Tell the child to exit
+    EXPECT_CALL(sem_op(go_semid, 0, 1, 0), 0);
+    if (wait_for_child(pid) != SUCCESS) {
+        return FAIL;
+    }
+    if (new_semid >= 0) {
+        if (check_val(new_semid, 0, 5) != SUCCESS) {
+            return FAIL;
+        }
+        EXPECT_CALL(syscall(SYS_semctl, new_semid, 0, IPC_RMID), 0);
+    }
+
+    EXPECT_CALL(syscall(SYS_semctl, go_semid, 0, IPC_RMID), 0);
+    INFO("Test sem_undo_removed_set passed\n");
+    return SUCCESS;
+}
+
 // ============================================================================
 // Child Process Test Logic (Corresponding to parent process test types)
 // ============================================================================
@@ -690,6 +976,100 @@ static int child_test_operate_destroyed_sem(int argc, const char *argv[]) {
     return SUCCESS;
 }
 
+/**
+ * Child process thread: Operate on a semaphore with SEM_UNDO
+ */
+static void *child_undo_thread(void *arg) {
+    int semid = *(int *)arg;
+    return (void *)sem_op(semid, 0, 6, SEM_UNDO);
+}
+
+/**
+ * Child process: Operate on the semaphores with SEM_UNDO, in many calls, in one call and
+ * in a thread
+ */
+static int child_test_undo_merged(int argc, const char *argv[]) {
+    int set_a, set_b;
+    struct sembuf ops[2];
+    pthread_t thread;
+    void *thread_ret;
+
+    if (argc != TEST_UNDO_MERGED_ARGC) {
+        INFO("Invalid argc: expected %d, actual %d\n", TEST_UNDO_MERGED_ARGC, argc);
+        return FAIL;
+    }
+    set_a = atoi(argv[2]);
+    set_b = atoi(argv[3]);
+
+    // Semaphore 0 of set A: +3, -2, +5, -1, and +4, -1 in one call
+    if (sem_op(set_a, 0, 3, SEM_UNDO) != 0 || sem_op(set_a, 0, -2, SEM_UNDO) != 0 ||
+            sem_op(set_a, 0, 5, SEM_UNDO) != 0 || sem_op(set_a, 0, -1, SEM_UNDO) != 0) {
+        THROW_ERROR("Child semop() on semaphore 0 failed (errno: %d)", errno);
+    }
+    ops[0] = (struct sembuf) {0, 4, SEM_UNDO};
+    ops[1] = (struct sembuf) {0, -1, SEM_UNDO};
+    if (syscall(SYS_semop, set_a, ops, 2) != 0) {
+        THROW_ERROR("Child semop() with two operations failed (errno: %d)", errno);
+    }
+
+    // Semaphore 1 of set A: -3, +1, -2
+    if (sem_op(set_a, 1, -3, SEM_UNDO) != 0 || sem_op(set_a, 1, 1, SEM_UNDO) != 0 ||
+            sem_op(set_a, 1, -2, SEM_UNDO) != 0) {
+        THROW_ERROR("Child semop() on semaphore 1 failed (errno: %d)", errno);
+    }
+
+    // Semaphore 0 of set B: +2, +2, -1, and +6 in another thread
+    if (sem_op(set_b, 0, 2, SEM_UNDO) != 0 || sem_op(set_b, 0, 2, SEM_UNDO) != 0 ||
+            sem_op(set_b, 0, -1, SEM_UNDO) != 0) {
+        THROW_ERROR("Child semop() on set B failed (errno: %d)", errno);
+    }
+    if (pthread_create(&thread, NULL, child_undo_thread, &set_b) != 0 ||
+            pthread_join(thread, &thread_ret) != 0 || thread_ret != NULL) {
+        THROW_ERROR("The thread of the child failed");
+    }
+
+    // Semaphore 1 of set B: +4, -4, which leave nothing to undo
+    if (sem_op(set_b, 1, 4, SEM_UNDO) != 0 || sem_op(set_b, 1, -4, SEM_UNDO) != 0) {
+        THROW_ERROR("Child semop() on semaphore 1 of set B failed (errno: %d)", errno);
+    }
+
+    // The semaphores have changed until the child exits
+    if (sem_getval(set_a, 0) != 18 || sem_getval(set_a, 1) != 16 ||
+            sem_getval(set_b, 0) != 16 || sem_getval(set_b, 1) != 3) {
+        INFO("Child: unexpected values %ld, %ld, %ld and %ld\n", sem_getval(set_a, 0),
+             sem_getval(set_a, 1), sem_getval(set_b, 0), sem_getval(set_b, 1));
+        return FAIL;
+    }
+    return SUCCESS;
+}
+
+/**
+ * Child process: Operate on a semaphore with SEM_UNDO, then wait until the parent process
+ * increments the "go" semaphore, and exit
+ */
+static int child_test_undo_hold(int argc, const char *argv[]) {
+    int semid, sem_num, op, go_semid;
+    struct sembuf go = {0, -1, 0};
+    struct timespec timeout = {10, 0};
+
+    if (argc != TEST_UNDO_HOLD_ARGC) {
+        INFO("Invalid argc: expected %d, actual %d\n", TEST_UNDO_HOLD_ARGC, argc);
+        return FAIL;
+    }
+    semid = atoi(argv[2]);
+    sem_num = atoi(argv[3]);
+    op = atoi(argv[4]);
+    go_semid = atoi(argv[5]);
+
+    if (sem_op(semid, sem_num, op, SEM_UNDO) != 0) {
+        THROW_ERROR("Child semop() failed (errno: %d)", errno);
+    }
+    if (syscall(SYS_semtimedop, go_semid, &go, 1, &timeout) != 0) {
+        THROW_ERROR("Child semop(go) failed (errno: %d)", errno);
+    }
+    return SUCCESS;
+}
+
 // ============================================================================
 // Test Suite Entry
 // ============================================================================
@@ -703,6 +1083,11 @@ static test_case_t test_cases[] = {
     TEST_CASE(test_semop_return_value),
     TEST_CASE(test_semop_errors),
     TEST_CASE(test_semtimedop_timeout),
+    TEST_CASE(test_sem_undo_no_growth),
+    TEST_CASE(test_sem_undo_at_exit),
+    TEST_CASE(test_sem_undo_per_process),
+    TEST_CASE(test_sem_undo_range),
+    TEST_CASE(test_sem_undo_removed_set),
     TEST_CASE(test_no_rmsem),
 };
 
@@ -726,6 +1111,12 @@ int main(int argc, const char *argv[]) {
                 break;
             case TEST_OPERATE_DESTOYED:
                 ret = child_test_operate_destroyed_sem(argc, argv);
+                break;
+            case TEST_UNDO_MERGED:
+                ret = child_test_undo_merged(argc, argv);
+                break;
+            case TEST_UNDO_HOLD:
+                ret = child_test_undo_hold(argc, argv);
                 break;
             default:
                 INFO("Invalid test option: %d\n", option);
