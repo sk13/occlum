@@ -470,8 +470,9 @@ impl SemSet {
             return_errno!(ERANGE, "semaphore count exceeds maximum value");
         }
 
-        // Update value and modification time
+        // Update value and modification time, which clear the adjustments of the processes
         sems[sem_num].count = count;
+        sems[sem_num].semadj.clear();
         self.sem_ctime
             .store(SemManager::current_time(), Ordering::Relaxed);
         Ok(())
