@@ -626,6 +626,9 @@ impl SemManager {
         let mode = semflg.bits() as u16 & 0o777;
         let semid = if key == IPC_PRIVATE {
             // Create private semaphore set (always new)
+            if nsems == 0 || nsems > SEMMSL {
+                return_errno!(EINVAL, "invalid nsems");
+            }
             let semid = self.get_new_semid()?;
             let sem_set = Arc::new(SemSet::new(semid, key, nsems, mode)?);
             sem_sets.insert(sem_set.semid, sem_set);
