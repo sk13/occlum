@@ -475,6 +475,9 @@ impl SemSet {
         sems[sem_num].semadj.clear();
         self.sem_ctime
             .store(SemManager::current_time(), Ordering::Relaxed);
+
+        // Wake up waiting processes, which can proceed with the new value
+        self.waiter_queue.lock().dequeue_and_wake_all();
         Ok(())
     }
 
