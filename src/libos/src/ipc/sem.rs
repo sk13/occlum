@@ -729,6 +729,7 @@ impl SemManager {
             IPC_INFO => {
                 // Fill system semaphore limits
                 let info_ptr = arg as *mut seminfo_t;
+                from_user::check_mut_ptr(info_ptr)?;
                 let info = unsafe {
                     info_ptr
                         .as_mut()
@@ -754,6 +755,7 @@ impl SemManager {
             SEM_INFO => {
                 // Fill extended semaphore information
                 let info_ptr = arg as *mut seminfo_ext_t;
+                from_user::check_mut_ptr(info_ptr)?;
                 let info = unsafe {
                     info_ptr
                         .as_mut()
@@ -803,6 +805,7 @@ impl SemManager {
             IPC_SET => {
                 // Update permission structure
                 let perm = arg as *const ipc_perm_t;
+                from_user::check_ptr(perm)?;
                 let perm = unsafe {
                     perm.as_ref()
                         .ok_or_else(|| errno!(EFAULT, "invalid perm"))?
@@ -813,6 +816,7 @@ impl SemManager {
             IPC_STAT => {
                 // Retrieve status information
                 let buf_ptr = arg as *mut semids_t;
+                from_user::check_mut_ptr(buf_ptr)?;
                 let buf = unsafe {
                     buf_ptr
                         .as_mut()
@@ -889,6 +893,7 @@ impl SemManager {
             SEM_STAT | SEM_STAT_ANY => {
                 // Get status by semid
                 let buf_ptr = arg as *mut semids_t;
+                from_user::check_mut_ptr(buf_ptr)?;
                 let buf = unsafe {
                     buf_ptr
                         .as_mut()
