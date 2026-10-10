@@ -1542,6 +1542,33 @@ static int test_semop_bad_pointer(void) {
     return SUCCESS;
 }
 
+/**
+ * Test 27: semget() gets an existing set with the same number of semaphores or fewer
+ * It fails with EINVAL if more semaphores are asked for, and 0 asks for as many as it has
+ */
+static int test_semget_existing_set_nsems(void) {
+    key_t key;
+    int semid;
+
+    srand(time(NULL));
+    key = random();
+    semid = syscall(SYS_semget, key, 3, IPC_CREAT | IPC_EXCL | S_IRWUSER);
+    if (semid < 0) {
+        THROW_ERROR("semget() create failed (errno: %d)", errno);
+    }
+
+    EXPECT_CALL(syscall(SYS_semget, key, 3, S_IRWUSER) - semid, 0);
+    EXPECT_CALL(syscall(SYS_semget, key, 1, S_IRWUSER) - semid, 0);
+    EXPECT_CALL(syscall(SYS_semget, key, 0, S_IRWUSER) - semid, 0);
+    EXPECT_CALL(syscall(SYS_semget, key, 1, IPC_CREAT | S_IRWUSER) - semid, 0);
+    EXPECT_CALL(syscall(SYS_semget, key, 4, S_IRWUSER), EINVAL);
+    EXPECT_CALL(syscall(SYS_semget, key, 4, IPC_CREAT | S_IRWUSER), EINVAL);
+
+    EXPECT_CALL(syscall(SYS_semctl, semid, 0, IPC_RMID), 0);
+    INFO("Test semget_existing_set_nsems passed\n");
+    return SUCCESS;
+}
+
 // ============================================================================
 // Child Process Test Logic (Corresponding to parent process test types)
 // ============================================================================
@@ -1807,6 +1834,7 @@ static test_case_t test_cases[] = {
     TEST_CASE(test_semget_invalid_nsems),
     TEST_CASE(test_semctl_errors),
     TEST_CASE(test_semop_bad_pointer),
+    TEST_CASE(test_semget_existing_set_nsems),
     TEST_CASE(test_no_rmsem),
 };
 
