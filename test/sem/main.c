@@ -1292,6 +1292,52 @@ static int test_sem_undo_clamp(void) {
     return SUCCESS;
 }
 
+/**
+ * Test 20: SETVAL and SETALL clear what the processes have to undo for the semaphores
+ * The processes that exit must not undo their operations on the old value for the new one
+ */
+static int test_sem_undo_cleared_by_set(void) {
+    unsigned short vals[2] = {3, 7};
+    pid_t pid;
+    int semid = sem_create(2);
+    int go_semid = sem_create(1);
+    if (semid < 0 || go_semid < 0) {
+        THROW_ERROR("semget() create failed (errno: %d)", errno);
+    }
+    EXPECT_CALL(syscall(SYS_semctl, semid, 0, SETVAL, 1), 0);
+    EXPECT_CALL(syscall(SYS_semctl, semid, 1, SETVAL, 1), 0);
+
+    // SETVAL: The child subtracts 1 from the semaphore 0, and has to add it when it exits
+    int args[] = {semid, 0, -1, go_semid};
+    if (spawn_child(&pid, TEST_UNDO_HOLD, 4, args) != SUCCESS ||
+            wait_for_val(semid, 0, 0) != SUCCESS) {
+        return FAIL;
+    }
+    EXPECT_CALL(syscall(SYS_semctl, semid, 0, SETVAL, 5), 0);
+    EXPECT_CALL(sem_op(go_semid, 0, 1, 0), 0);
+    if (wait_for_child(pid) != SUCCESS || check_val(semid, 0, 5) != SUCCESS) {
+        return FAIL;
+    }
+
+    // SETALL: The child does the same with the semaphore 1
+    args[1] = 1;
+    if (spawn_child(&pid, TEST_UNDO_HOLD, 4, args) != SUCCESS ||
+            wait_for_val(semid, 1, 0) != SUCCESS) {
+        return FAIL;
+    }
+    EXPECT_CALL(syscall(SYS_semctl, semid, 0, SETALL, vals), 0);
+    EXPECT_CALL(sem_op(go_semid, 0, 1, 0), 0);
+    if (wait_for_child(pid) != SUCCESS || check_val(semid, 0, 3) != SUCCESS ||
+            check_val(semid, 1, 7) != SUCCESS) {
+        return FAIL;
+    }
+
+    EXPECT_CALL(syscall(SYS_semctl, semid, 0, IPC_RMID), 0);
+    EXPECT_CALL(syscall(SYS_semctl, go_semid, 0, IPC_RMID), 0);
+    INFO("Test sem_undo_cleared_by_set passed\n");
+    return SUCCESS;
+}
+
 // ============================================================================
 // Child Process Test Logic (Corresponding to parent process test types)
 // ============================================================================
@@ -1550,6 +1596,7 @@ static test_case_t test_cases[] = {
     TEST_CASE(test_semctl_stat_any),
     TEST_CASE(test_sem_undo_wakes_waiter),
     TEST_CASE(test_sem_undo_clamp),
+    TEST_CASE(test_sem_undo_cleared_by_set),
     TEST_CASE(test_no_rmsem),
 };
 
