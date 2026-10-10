@@ -78,6 +78,18 @@ pub fn do_rt_sigreturn(curr_user_ctxt: &mut CpuContext) -> Result<()> {
     Ok(())
 }
 
+/// Replace the signal mask of the current thread until the current syscall is over.
+///
+/// The syscall returns with the new mask in effect, so a pending signal that the new
+/// mask does not block, but the original mask does, is delivered when the syscall
+/// returns, e.g., the signal that ends sigsuspend. The original mask is in effect
+/// again once the handler of the signal has returned, or if there is no handler, when
+/// the syscall is over. See `deliver_signal`.
+pub fn replace_sig_mask_until_sysret(thread: &ThreadRef, new_mask: SigSet) {
+    let old_mask = std::mem::replace(&mut *thread.sig_mask().write().unwrap(), new_mask);
+    SAVED_SIG_MASK.with(|saved| *saved.borrow_mut() = Some(old_mask));
+}
+
 /// Deliver a queued signal for the current thread, respecting the thread's
 /// signal mask.
 ///
@@ -99,12 +111,18 @@ pub fn do_rt_sigreturn(curr_user_ctxt: &mut CpuContext) -> Result<()> {
 /// syscall and at a very late stage.
 ///
 /// **Post-condition.** The temporary signal mask of the current thread is cleared.
+/// The signal mask that the syscall has replaced with `replace_sig_mask_until_sysret`
+/// is restored, unless a signal handler has been set up: sigreturn restores it then.
 pub fn deliver_signal(cpu_context: &mut CpuContext) {
     let thread = current!();
     let process = thread.process();
 
     if !process.is_forced_to_exit() && !thread.is_forced_to_stop() && !thread.is_stopped() {
         do_deliver_signal(&thread, &process, cpu_context);
+    }
+
+    if let Some(saved_sig_mask) = SAVED_SIG_MASK.with(|saved| saved.borrow_mut().take()) {
+        *thread.sig_mask().write().unwrap() = saved_sig_mask;
     }
 
     // Ensure the tmp signal mask is cleared before sysret
@@ -304,7 +322,10 @@ fn handle_signals_by_user(
 ) -> Result<()> {
     let old_sigmask = {
         let mut sigmask = thread.sig_mask().write().unwrap();
-        let old_sigmask = *sigmask;
+        // If the syscall has replaced the signal mask, the handler returns to the original one
+        let old_sigmask = SAVED_SIG_MASK
+            .with(|saved| saved.borrow_mut().take())
+            .unwrap_or(*sigmask);
         *sigmask = new_sigmask;
         if !flags.contains(SigActionFlags::SA_NODEFER) {
             // Block the current signal while executing the signal handler
@@ -560,6 +581,7 @@ impl Stack {
 
 thread_local! {
     static PRE_UCONTEXTS: RefCell<CpuContextStack> = Default::default();
+    static SAVED_SIG_MASK: RefCell<Option<SigSet>> = RefCell::new(None);
 }
 
 #[derive(Debug, Default)]

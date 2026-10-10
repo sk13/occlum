@@ -1,4 +1,5 @@
 use super::constants::*;
+use super::do_sigreturn::replace_sig_mask_until_sysret;
 use super::do_sigtimedwait::PendingSigWaiter;
 use super::{sigset_t, MaskOp, SigNum, SigSet, Signal};
 use crate::prelude::*;
@@ -19,10 +20,9 @@ pub fn do_sigsuspend(mask: &SigSet) -> Result<()> {
         set
     };
 
-    let mut curr_mask = thread.sig_mask().write().unwrap();
-    let prev_mask = *curr_mask;
-    *curr_mask = update_mask;
-    drop(curr_mask);
+    // The original mask is restored after the handler of the signal that ends the
+    // suspension has run, with the new mask in effect
+    replace_sig_mask_until_sysret(&thread, update_mask);
 
     // Suspend for interest signal
     let interest = !update_mask;
@@ -35,10 +35,6 @@ pub fn do_sigsuspend(mask: &SigSet) -> Result<()> {
         // The thread is interrupted because it has to exit or to stop
         Err(e) => e,
     };
-
-    // Restore the original signal mask
-    let mut curr_mask = thread.sig_mask().write().unwrap();
-    *curr_mask = prev_mask;
 
     Err(err)
 }
