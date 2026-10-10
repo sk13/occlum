@@ -127,20 +127,31 @@ impl PendingSigWaiter {
             // the arrival of an interesting signal.
             let res = waiter.wait(None);
 
-            // Do not try again if some error is encountered. There are only
-            // two possible errors: ETIMEDOUT or EINTR.
+            // The only possible error is EINTR, as there is no timeout.
             if let Err(e) = res {
-                // When interrupted is reached, it is possible that the interrupting signal happens
-                // to be an interesting and pending signal. So we attempt to search for signals again.
-                if e.errno() == Errno::EINTR {
-                    if has_interest_signal(&self.interest, &self.thread, &self.process) {
-                        return Ok(());
-                    }
+                // The queue has not woken up the waiter, so it is still in the queue.
+                // Dequeue it as it is enqueued again if we wait again.
+                waiter_queue.dequeue(&waiter);
+
+                // The host interrupts a thread if it has a pending signal that it does not
+                // block, or if its process is forced to exit or the thread is forced to
+                // stop. The interrupt arrives some time after the host has looked for the
+                // pending signal, so the signal may have been delivered by then, e.g., if
+                // it has ended the previous sigsuspend of the thread and the thread has
+                // called sigsuspend again. Then the interrupt is not for this call, and we
+                // wait again, unless the thread has to exit or to stop.
+                if e.errno() == Errno::EINTR && !self.is_forced_to_return() {
+                    continue;
                 }
-                // Impossible case
                 return Err(e);
             }
         }
+    }
+
+    // Returns whether the thread must leave its call when it is interrupted, even if
+    // it has no signal to deliver: its process is forced to exit or it is forced to stop.
+    fn is_forced_to_return(&self) -> bool {
+        self.process.is_forced_to_exit() || self.thread.is_forced_to_stop()
     }
 }
 

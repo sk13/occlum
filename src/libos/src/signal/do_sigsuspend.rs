@@ -32,10 +32,8 @@ pub fn do_sigsuspend(mask: &SigSet) -> Result<()> {
         Ok(_) => {
             errno!(EINTR, "Wait for EINTR signal successfully")
         }
-        Err(_) => {
-            // Impossible path
-            errno!(EFAULT, "No interesting, pending signal")
-        }
+        // The thread is interrupted because it has to exit or to stop
+        Err(e) => e,
     };
 
     // Restore the original signal mask
