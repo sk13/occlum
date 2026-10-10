@@ -5,6 +5,7 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <time.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -1210,6 +1211,87 @@ static int test_semctl_stat_any(void) {
     return SUCCESS;
 }
 
+/**
+ * Test 18: A process that exits wakes up the processes that wait for the semaphores that it undoes
+ */
+static int test_sem_undo_wakes_waiter(void) {
+    struct sembuf down = {0, -1, 0};
+    struct timespec timeout = {5, 0};
+    sigset_t sigchld, old_set;
+    pid_t pid;
+    int semid = sem_create(1);
+    if (semid < 0) {
+        THROW_ERROR("semget() create failed (errno: %d)", errno);
+    }
+    EXPECT_CALL(syscall(SYS_semctl, semid, 0, SETVAL, 1), 0);
+
+    // The exit of the child must not interrupt the call that waits for it
+    sigemptyset(&sigchld);
+    sigaddset(&sigchld, SIGCHLD);
+    sigprocmask(SIG_BLOCK, &sigchld, &old_set);
+
+    // The child takes the semaphore, and gives it back when it exits after a while
+    int args[] = {semid, 0, -1, -1};
+    if (spawn_child(&pid, TEST_UNDO_HOLD, 4, args) != SUCCESS ||
+            wait_for_val(semid, 0, 0) != SUCCESS) {
+        return FAIL;
+    }
+    EXPECT_CALL(syscall(SYS_semtimedop, semid, &down, 1, &timeout), 0);
+    if (wait_for_child(pid) != SUCCESS) {
+        return FAIL;
+    }
+    sigprocmask(SIG_SETMASK, &old_set, NULL);
+
+    EXPECT_CALL(syscall(SYS_semctl, semid, 0, IPC_RMID), 0);
+    INFO("Test sem_undo_wakes_waiter passed\n");
+    return SUCCESS;
+}
+
+/**
+ * Test 19: A process that exits does not make a semaphore negative or larger than the maximum
+ * It undoes its operations as far as the semaphore allows
+ */
+static int test_sem_undo_clamp(void) {
+    pid_t pid;
+    int semid = sem_create(1);
+    int go_semid = sem_create(1);
+    if (semid < 0 || go_semid < 0) {
+        THROW_ERROR("semget() create failed (errno: %d)", errno);
+    }
+
+    // The child adds 1 to the semaphore, which is 0, and has to subtract it when it exits.
+    // But this process takes it, so the semaphore stays 0
+    int args[] = {semid, 0, 1, go_semid};
+    if (spawn_child(&pid, TEST_UNDO_HOLD, 4, args) != SUCCESS ||
+            wait_for_val(semid, 0, 1) != SUCCESS) {
+        return FAIL;
+    }
+    EXPECT_CALL(sem_op(semid, 0, -1, 0), 0);
+    EXPECT_CALL(sem_op(go_semid, 0, 1, 0), 0);
+    if (wait_for_child(pid) != SUCCESS || check_val(semid, 0, 0) != SUCCESS) {
+        return FAIL;
+    }
+
+    // The child subtracts 32767 from the semaphore, which is 32767, and has to add it when
+    // it exits. But this process adds it, so the semaphore stays 32767
+    EXPECT_CALL(syscall(SYS_semctl, semid, 0, SETVAL, SEMVMX_VAL), 0);
+    args[2] = -SEMVMX_VAL;
+    if (spawn_child(&pid, TEST_UNDO_HOLD, 4, args) != SUCCESS ||
+            wait_for_val(semid, 0, 0) != SUCCESS) {
+        return FAIL;
+    }
+    EXPECT_CALL(sem_op(semid, 0, SEMVMX_VAL, 0), 0);
+    EXPECT_CALL(sem_op(go_semid, 0, 1, 0), 0);
+    if (wait_for_child(pid) != SUCCESS || check_val(semid, 0, SEMVMX_VAL) != SUCCESS) {
+        return FAIL;
+    }
+
+    EXPECT_CALL(syscall(SYS_semctl, semid, 0, IPC_RMID), 0);
+    EXPECT_CALL(syscall(SYS_semctl, go_semid, 0, IPC_RMID), 0);
+    INFO("Test sem_undo_clamp passed\n");
+    return SUCCESS;
+}
+
 // ============================================================================
 // Child Process Test Logic (Corresponding to parent process test types)
 // ============================================================================
@@ -1398,7 +1480,7 @@ static int child_test_undo_merged(int argc, const char *argv[]) {
 
 /**
  * Child process: Operate on a semaphore with SEM_UNDO, then wait until the parent process
- * increments the "go" semaphore, and exit
+ * increments the "go" semaphore (or sleep if there is none), and exit
  */
 static int child_test_undo_hold(int argc, const char *argv[]) {
     int semid, sem_num, op, go_semid;
@@ -1417,7 +1499,9 @@ static int child_test_undo_hold(int argc, const char *argv[]) {
     if (sem_op(semid, sem_num, op, SEM_UNDO) != 0) {
         THROW_ERROR("Child semop() failed (errno: %d)", errno);
     }
-    if (syscall(SYS_semtimedop, go_semid, &go, 1, &timeout) != 0) {
+    if (go_semid < 0) {
+        usleep(500 * 1000);
+    } else if (syscall(SYS_semtimedop, go_semid, &go, 1, &timeout) != 0) {
         THROW_ERROR("Child semop(go) failed (errno: %d)", errno);
     }
     return SUCCESS;
@@ -1464,6 +1548,8 @@ static test_case_t test_cases[] = {
     TEST_CASE(test_semop_one_after_the_other),
     TEST_CASE(test_semctl_wait_counts),
     TEST_CASE(test_semctl_stat_any),
+    TEST_CASE(test_sem_undo_wakes_waiter),
+    TEST_CASE(test_sem_undo_clamp),
     TEST_CASE(test_no_rmsem),
 };
 
