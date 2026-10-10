@@ -1466,6 +1466,25 @@ static int test_semctl_rmid_waiter_semid(void) {
     return SUCCESS;
 }
 
+/**
+ * Test 24: A semaphore set that cannot be created does not take a semid
+ * There are only 128 semids, and none of them must be lost
+ */
+static int test_semget_invalid_nsems(void) {
+    for (int i = 0; i < 200; i++) {
+        EXPECT_CALL(syscall(SYS_semget, IPC_PRIVATE, 100000, IPC_CREAT | S_IRWUSER), EINVAL);
+        EXPECT_CALL(syscall(SYS_semget, IPC_PRIVATE, 0, IPC_CREAT | S_IRWUSER), EINVAL);
+    }
+
+    int semid = sem_create(1);
+    if (semid < 0) {
+        THROW_ERROR("semget() create failed (errno: %d)", errno);
+    }
+    EXPECT_CALL(syscall(SYS_semctl, semid, 0, IPC_RMID), 0);
+    INFO("Test semget_invalid_nsems passed\n");
+    return SUCCESS;
+}
+
 // ============================================================================
 // Child Process Test Logic (Corresponding to parent process test types)
 // ============================================================================
@@ -1728,6 +1747,7 @@ static test_case_t test_cases[] = {
     TEST_CASE(test_semctl_set_wakes_waiter),
     TEST_CASE(test_semctl_rmid_waiter),
     TEST_CASE(test_semctl_rmid_waiter_semid),
+    TEST_CASE(test_semget_invalid_nsems),
     TEST_CASE(test_no_rmsem),
 };
 
