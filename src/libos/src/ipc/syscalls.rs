@@ -60,7 +60,7 @@ pub fn do_semctl(semid: i32, semnum: i32, cmd: i32, arg: usize) -> Result<isize>
 
 pub fn do_semop(semid: i32, sops_ptr: *const sembuf_t, nsops: usize) -> Result<isize> {
     if nsops == 0 {
-        return Ok(0);
+        return_errno!(EINVAL, "no operations");
     }
     SYSTEM_V_SEM_MANAGER.do_semop(semid as SemId, sops_ptr, nsops, None)?;
     Ok(0)
@@ -73,7 +73,7 @@ pub fn do_semtimedop(
     timeout_ptr: *const timespec_t,
 ) -> Result<isize> {
     if nsops == 0 {
-        return Ok(0);
+        return_errno!(EINVAL, "no operations");
     }
 
     let timeout: Option<Duration> = {
