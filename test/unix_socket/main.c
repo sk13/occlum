@@ -12,7 +12,10 @@
 #include <string.h>
 #include <sys/epoll.h>
 #include <pthread.h>
+#include <signal.h>
+#include <fcntl.h>
 #include <errno.h>
+#include <time.h>
 #include <stddef.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -960,6 +963,208 @@ int test_epoll_in_after_connect() {
     return ret;
 }
 
+// The interrupter thread sends SIGUSR2 to the main thread every 2 ms. The signal
+// handler is installed without SA_RESTART, so blocking calls fail with EINTR.
+static volatile int g_interrupter_run;
+static pthread_t g_interrupter;
+static pid_t g_main_tid;
+
+static void on_sigusr2(int sig) {
+}
+
+static void *interrupter_main(void *arg) {
+    struct timespec ts = { 0, 2000000 };
+    while (g_interrupter_run) {
+        nanosleep(&ts, NULL);
+        if (g_interrupter_run) {
+            syscall(SYS_tgkill, getpid(), g_main_tid, SIGUSR2);
+        }
+    }
+    return NULL;
+}
+
+static int start_interrupter(void) {
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = on_sigusr2;
+    if (sigaction(SIGUSR2, &sa, NULL) < 0) {
+        THROW_ERROR("failed to install the signal handler");
+    }
+    g_main_tid = syscall(SYS_gettid);
+    g_interrupter_run = 1;
+    if (pthread_create(&g_interrupter, NULL, interrupter_main, NULL) != 0) {
+        THROW_ERROR("failed to create the interrupter thread");
+    }
+    return 0;
+}
+
+static void stop_interrupter(void) {
+    g_interrupter_run = 0;
+    pthread_join(g_interrupter, NULL);
+}
+
+// Fills an abstract address, i.e., one whose name follows a null byte, and
+// returns its length
+static socklen_t abstract_addr(struct sockaddr_un *addr, const char *name) {
+    memset(addr, 0, sizeof(*addr));
+    addr->sun_family = AF_UNIX;
+    strcpy(addr->sun_path + 1, name);
+    return offsetof(struct sockaddr_un, sun_path) + 1 + strlen(name);
+}
+
+static int abstract_bind(int fd, const char *name) {
+    struct sockaddr_un addr;
+    socklen_t addr_len = abstract_addr(&addr, name);
+    return bind(fd, (struct sockaddr *)&addr, addr_len);
+}
+
+static int abstract_connect(int fd, const char *name) {
+    struct sockaddr_un addr;
+    socklen_t addr_len = abstract_addr(&addr, name);
+    return connect(fd, (struct sockaddr *)&addr, addr_len);
+}
+
+// Returns a socket that listens on the abstract address, or -1
+static int abstract_listener(const char *name, int flags) {
+    int fd = socket(AF_UNIX, SOCK_STREAM | flags, 0);
+    if (fd < 0) {
+        printf("\t\tERROR: failed to create a unix socket: %s\n", strerror(errno));
+        return -1;
+    }
+    if (abstract_bind(fd, name) < 0 || listen(fd, 16) < 0) {
+        printf("\t\tERROR: failed to listen on %s: %s\n", name, strerror(errno));
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+static int check_accept_fails(int listen_fd, int expected_errno) {
+    int fd = accept(listen_fd, NULL, NULL);
+    if (fd >= 0) {
+        close(fd);
+        THROW_ERROR("accept succeeded without a connection");
+    }
+    if (errno != expected_errno) {
+        printf("\t\tERROR: accept failed with errno %d (%s), expected %d (%s)\n",
+               errno, strerror(errno), expected_errno, strerror(expected_errno));
+        return -1;
+    }
+    return 0;
+}
+
+// Connects to the listening socket, and accepts the connection
+static int check_connection(int listen_fd, const char *name) {
+    int client_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (client_fd < 0 || abstract_connect(client_fd, name) < 0) {
+        printf("\t\tERROR: failed to connect to %s: %s\n", name, strerror(errno));
+        close(client_fd);
+        return -1;
+    }
+    int accepted_fd = accept(listen_fd, NULL, NULL);
+    if (accepted_fd < 0) {
+        printf("\t\tERROR: failed to accept a connection to %s: %s\n", name, strerror(errno));
+        close(client_fd);
+        return -1;
+    }
+    close_files(2, client_fd, accepted_fd);
+    return 0;
+}
+
+struct delayed_client {
+    const char *name;
+    int fd;
+};
+
+// Connects after 100 ms, which are four periods of the interrupts of the PAL
+static void *delayed_client_main(void *arg) {
+    struct delayed_client *client = arg;
+    usleep(100000);
+    client->fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (client->fd < 0 || abstract_connect(client->fd, client->name) < 0) {
+        close(client->fd);
+        client->fd = -1;
+    }
+    return NULL;
+}
+
+// A blocking accept() that no signal interrupts waits for the connection
+static int check_accept_waits(int listen_fd, const char *name) {
+    struct delayed_client client = { .name = name, .fd = -1 };
+    pthread_t thread;
+    if (pthread_create(&thread, NULL, delayed_client_main, &client) != 0) {
+        THROW_ERROR("failed to create the client thread");
+    }
+    int accepted_fd = accept(listen_fd, NULL, NULL);
+    int accept_errno = errno;
+    pthread_join(thread, NULL);
+    if (client.fd < 0) {
+        printf("\t\tERROR: the client thread failed to connect to %s\n", name);
+        close(accepted_fd);
+        return -1;
+    }
+    close(client.fd);
+    if (accepted_fd < 0) {
+        printf("\t\tERROR: failed to accept a connection that arrives while waiting: %s\n",
+               strerror(accept_errno));
+        return -1;
+    }
+    close(accepted_fd);
+    return 0;
+}
+
+#define INTERRUPTED_ACCEPTS 5
+
+static int check_accept_errnos(int listen_fd, int nonblocking_fd) {
+    if (check_accept_fails(nonblocking_fd, EAGAIN) < 0) {
+        return -1;
+    }
+    // Switch to non-blocking mode and back
+    int flags = fcntl(listen_fd, F_GETFL);
+    if (fcntl(listen_fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+        THROW_ERROR("failed to set O_NONBLOCK");
+    }
+    if (check_accept_fails(listen_fd, EAGAIN) < 0) {
+        return -1;
+    }
+    if (fcntl(listen_fd, F_SETFL, flags) < 0) {
+        THROW_ERROR("failed to clear O_NONBLOCK");
+    }
+
+    if (start_interrupter() < 0) {
+        return -1;
+    }
+    int ret = 0;
+    for (int i = 0; i < INTERRUPTED_ACCEPTS && ret == 0; i++) {
+        ret = check_accept_fails(listen_fd, EINTR);
+    }
+    stop_interrupter();
+    return ret;
+}
+
+// Like Linux, accept() on a listening socket that has no connection fails with
+// EAGAIN if the socket is non-blocking, and with EINTR if it is blocking and a
+// signal handler interrupts it
+int test_accept_interrupted() {
+    const char *name = "unix_socket_accept_interrupted";
+    int listen_fd = abstract_listener(name, 0);
+    int nonblocking_fd = abstract_listener("unix_socket_accept_nonblocking", SOCK_NONBLOCK);
+    if (listen_fd < 0 || nonblocking_fd < 0) {
+        return -1;
+    }
+
+    int ret = check_accept_errnos(listen_fd, nonblocking_fd);
+    if (ret == 0) {
+        // The interrupted calls did not harm the listening socket
+        ret = check_accept_waits(listen_fd, name);
+    }
+    if (ret == 0) {
+        ret = check_connection(listen_fd, name);
+    }
+    close_files(2, listen_fd, nonblocking_fd);
+    return ret;
+}
+
 static test_case_t test_cases[] = {
     TEST_CASE(test_unix_socket_inter_process),
     TEST_CASE(test_socketpair_inter_process),
@@ -975,6 +1180,7 @@ static test_case_t test_cases[] = {
     TEST_CASE(test_unnamed_peer_address),
     TEST_CASE(test_accept_while_writing),
     TEST_CASE(test_epoll_in_after_connect),
+    TEST_CASE(test_accept_interrupted),
 };
 
 int main(int argc, const char *argv[]) {

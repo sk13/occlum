@@ -186,15 +186,14 @@ int test_pipe_write_interrupted() {
     return ret;
 }
 
-// accept() on a listening unix socket without connections. Occlum returns EAGAIN
-// instead of EINTR.
+// accept() on a listening unix socket without connections
 static int accept_call(void *arg) {
     int *fd = arg;
     int conn = accept(*fd, NULL, NULL);
     if (conn >= 0) {
         close(conn);
     }
-    return expect_failure(conn, EINTR, EAGAIN, "accept");
+    return expect_failure(conn, EINTR, EINTR, "accept");
 }
 
 int test_unix_accept_interrupted() {
