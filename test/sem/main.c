@@ -222,7 +222,7 @@ static int test_semget_semid_from_key(void) {
 
     // Scenario 3: Set initial semaphore value (undefined after semget, needs explicit setting)
     ret = syscall(SYS_semctl, semid, 0, SETVAL, SEM_INIT_VAL);
-    if (ret < 0) {
+    if (ret != 0) {
         THROW_ERROR("semctl(SETVAL) failed (errno: %d)", errno);
     }
 
@@ -277,7 +277,7 @@ static int test_semget_semid_from_key(void) {
 
     // Delete semaphore
     ret = syscall(SYS_semctl, semid, 0, IPC_RMID);
-    if (ret < 0) {
+    if (ret != 0) {
         THROW_ERROR("semctl(IPC_RMID) failed (errno: %d)", errno);
     }
 
@@ -307,7 +307,7 @@ static int test_process_sync(void) {
 
     // Step 2: Set initial value to 1
     ret = syscall(SYS_semctl, semid, 0, SETVAL, SEM_INIT_VAL);
-    if (ret < 0) {
+    if (ret != 0) {
         THROW_ERROR("semctl(SETVAL) failed (errno: %d)", errno);
     }
 
@@ -357,7 +357,7 @@ static int test_process_sync(void) {
 
     // Delete semaphore
     ret = syscall(SYS_semctl, semid, 0, IPC_RMID);
-    if (ret < 0) {
+    if (ret != 0) {
         THROW_ERROR("semctl(IPC_RMID) failed (errno: %d)", errno);
     }
 
@@ -381,7 +381,7 @@ static int test_immediately_rmsem(void) {
 
     // Step 2: Delete semaphore immediately
     ret = syscall(SYS_semctl, semid, 0, IPC_RMID);
-    if (ret < 0) {
+    if (ret != 0) {
         THROW_ERROR("semctl(IPC_RMID) failed (errno: %d)", errno);
     }
 
@@ -426,13 +426,13 @@ static int test_operate_destroyed_sem(void) {
         THROW_ERROR("semget() create failed (errno: %d)", errno);
     }
     ret = syscall(SYS_semctl, semid, 0, SETVAL, SEM_INIT_VAL);
-    if (ret < 0) {
+    if (ret != 0) {
         THROW_ERROR("semctl(SETVAL) failed (errno: %d)", errno);
     }
 
     // Step 2: Delete semaphore immediately
     ret = syscall(SYS_semctl, semid, 0, IPC_RMID);
-    if (ret < 0) {
+    if (ret != 0) {
         THROW_ERROR("semctl(IPC_RMID) failed (errno: %d)", errno);
     }
 
@@ -480,7 +480,7 @@ static int test_no_rmsem(void) {
         THROW_ERROR("semget() create failed (errno: %d)", errno);
     }
     int ret = syscall(SYS_semctl, semid, 0, SETVAL, SEM_INIT_VAL);
-    if (ret < 0) {
+    if (ret != 0) {
         THROW_ERROR("semctl(SETVAL) failed (errno: %d)", errno);
     }
 
