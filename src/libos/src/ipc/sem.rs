@@ -501,13 +501,21 @@ impl SemSet {
         Ok(sems[sem_num].get_zcnt())
     }
 
-    /// Applies the undo adjustments of a process, which exits
+    /// Applies the undo adjustments of a process, which exits, and wakes up the waiting
+    /// processes, for which the counts may have changed
     fn apply_semadj(&self, pid: pid_t) {
         let mut sems = self.sems.lock();
+        let mut adjusted = false;
         for sem in sems.iter_mut() {
             if let Some(adj) = sem.semadj.remove(&pid) {
-                sem.count += adj;
+                // Like Linux, don't let the count leave the range of the count
+                sem.count = (sem.count + adj).clamp(0, SEMVMX as i32);
+                sem.last_pid = pid;
+                adjusted = true;
             }
+        }
+        if adjusted {
+            self.waiter_queue.lock().dequeue_and_wake_all();
         }
     }
 }
