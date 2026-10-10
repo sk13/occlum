@@ -430,7 +430,7 @@ impl SemSet {
             return_errno!(EIDRM, "semaphore set removed");
         }
         if sem_num >= self.nsems {
-            return_errno!(ERANGE, "semaphore number out of range");
+            return_errno!(EINVAL, "semaphore number out of range");
         }
         let sems = self.sems.lock();
         Ok(sems[sem_num].count)
@@ -445,7 +445,7 @@ impl SemSet {
 
         // Validate parameters
         if sem_num >= self.nsems {
-            return_errno!(ERANGE, "semaphore number out of range");
+            return_errno!(EINVAL, "semaphore number out of range");
         }
         if count < 0 {
             return_errno!(ERANGE, "semaphore count cannot be negative");
@@ -471,7 +471,7 @@ impl SemSet {
             return_errno!(EIDRM, "semaphore set removed");
         }
         if sem_num >= self.nsems {
-            return_errno!(ERANGE, "semaphore number out of range");
+            return_errno!(EINVAL, "semaphore number out of range");
         }
         let sems = self.sems.lock();
         Ok(sems[sem_num].get_ncnt())
@@ -483,7 +483,7 @@ impl SemSet {
             return_errno!(EIDRM, "semaphore set removed");
         }
         if sem_num >= self.nsems {
-            return_errno!(ERANGE, "semaphore number out of range");
+            return_errno!(EINVAL, "semaphore number out of range");
         }
         let sems = self.sems.lock();
         Ok(sems[sem_num].get_zcnt())
@@ -830,7 +830,7 @@ impl SemManager {
             SEM_GETPID => {
                 // Get PID of last operation
                 if semnum >= sem_set.nsems {
-                    return_errno!(ERANGE, "semaphore number out of range");
+                    return_errno!(EINVAL, "semaphore number out of range");
                 }
                 let sems = sem_set.sems.lock();
                 Ok(sems[semnum].last_pid as usize)
