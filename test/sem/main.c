@@ -1516,6 +1516,32 @@ static int test_semctl_errors(void) {
     return SUCCESS;
 }
 
+/**
+ * Test 26: The pointers that semop() and semtimedop() get must be in the user space (EFAULT)
+ * The LibOS used to read the timeout without checking the pointer, which crashed it.
+ */
+static int test_semop_bad_pointer(void) {
+    struct sembuf up = {0, 1, 0};
+    int semid = sem_create(1);
+    if (semid < 0) {
+        THROW_ERROR("semget() create failed (errno: %d)", errno);
+    }
+
+    EXPECT_CALL(syscall(SYS_semop, semid, NULL, 1), EFAULT);
+    EXPECT_CALL(syscall(SYS_semtimedop, semid, NULL, 1, NULL), EFAULT);
+    EXPECT_CALL(syscall(SYS_semtimedop, semid, &up, 1, (void *)8), EFAULT);
+    EXPECT_CALL(syscall(SYS_semtimedop, semid, &up, 1, (void *)~0UL), EFAULT);
+    // The timeout is looked at before the number of operations
+    EXPECT_CALL(syscall(SYS_semtimedop, semid, &up, 0, (void *)8), EFAULT);
+    if (check_val(semid, 0, 0) != SUCCESS) {
+        return FAIL;
+    }
+
+    EXPECT_CALL(syscall(SYS_semctl, semid, 0, IPC_RMID), 0);
+    INFO("Test semop_bad_pointer passed\n");
+    return SUCCESS;
+}
+
 // ============================================================================
 // Child Process Test Logic (Corresponding to parent process test types)
 // ============================================================================
@@ -1780,6 +1806,7 @@ static test_case_t test_cases[] = {
     TEST_CASE(test_semctl_rmid_waiter_semid),
     TEST_CASE(test_semget_invalid_nsems),
     TEST_CASE(test_semctl_errors),
+    TEST_CASE(test_semop_bad_pointer),
     TEST_CASE(test_no_rmsem),
 };
 
