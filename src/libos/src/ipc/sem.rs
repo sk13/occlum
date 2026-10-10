@@ -31,6 +31,8 @@ const SEMMNS: usize = SEMMNI as usize * SEMMSL;
 const SEMOPM: usize = 32;
 // Maximum semaphore value
 const SEMVMX: usize = 32767;
+// Maximum adjustment of a semaphore on exit of a process, in both directions
+const SEMAEM: usize = SEMVMX;
 
 const IPC_RMID: CmdId = 0; // Remove semaphore set
 const IPC_SET: CmdId = 1; // Set semaphore set parameters
@@ -144,18 +146,14 @@ pub struct sembuf_t {
     sem_flg: i16, // Operation flags
 }
 
-#[derive(Debug, Clone)]
-struct SemUndoOp {
-    semid: SemId,
-    sem_num: usize,
-    op: i32,
-}
-
 struct Semaphore {
     count: i32,
     waiter_zero: HashSet<pid_t>,    // Processes waiting for count = 0
     waiter_acquire: HashSet<pid_t>, // Processes waiting to acquire (count > 0)
     last_pid: pid_t,                // PID of last process that modified this semaphore
+    // What each process has to add to count when it exits: the sum of its operations with
+    // SEM_UNDO, negated. The processes whose sum is 0 have no entry
+    semadj: HashMap<pid_t, i32>,
 }
 
 impl Semaphore {
@@ -165,6 +163,19 @@ impl Semaphore {
             waiter_zero: HashSet::new(),
             waiter_acquire: HashSet::new(),
             last_pid: current!().process().pid(),
+            semadj: HashMap::new(),
+        }
+    }
+
+    fn get_semadj(&self, pid: pid_t) -> i32 {
+        self.semadj.get(&pid).copied().unwrap_or(0)
+    }
+
+    fn set_semadj(&mut self, pid: pid_t, adj: i32) {
+        if adj == 0 {
+            self.semadj.remove(&pid);
+        } else {
+            self.semadj.insert(pid, adj);
         }
     }
 
@@ -351,7 +362,8 @@ impl SemSet {
 
             // Execute operations if all can proceed
             if all_ops_can_proceed {
-                let mut undo_ops = Vec::new();
+                // Record undo operations if needed
+                Self::add_semadj(&mut sems, sops, pid)?;
 
                 // Apply all operations
                 for sop in sops {
@@ -361,21 +373,6 @@ impl SemSet {
 
                     sem.do_op(op, pid);
                     sem.last_pid = pid;
-
-                    // Record undo operations if needed
-                    let flags = SemFlags::from_bits_truncate(sop.sem_flg as u32);
-                    if flags.contains(SemFlags::SEM_UNDO) && op != 0 {
-                        undo_ops.push(SemUndoOp {
-                            semid: self.semid,
-                            sem_num,
-                            op: -op,
-                        });
-                    }
-                }
-
-                // Register undo operations with manager
-                if !undo_ops.is_empty() {
-                    SYSTEM_V_SEM_MANAGER.add_undo_ops(pid, undo_ops);
                 }
 
                 // Update operation time and wake waiting processes
@@ -409,6 +406,37 @@ impl SemSet {
                 Err(e) => return Err(e),
             }
         }
+    }
+
+    /// Adds what the operations with SEM_UNDO of a call have to undo to the adjustments of the
+    /// process. Fails with ERANGE, as Linux does, and changes nothing if an adjustment would
+    /// leave its range
+    fn add_semadj(sems: &mut [Semaphore], sops: &[sembuf_t], pid: pid_t) -> Result<()> {
+        // The new adjustments of the semaphores that the call changes
+        let mut new_adjs: Vec<(usize, i32)> = Vec::new();
+        for sop in sops {
+            let flags = SemFlags::from_bits_truncate(sop.sem_flg as u32);
+            if !flags.contains(SemFlags::SEM_UNDO) || sop.sem_op == 0 {
+                continue;
+            }
+            let sem_num = sop.sem_num as usize;
+            match new_adjs.iter_mut().find(|(num, _)| *num == sem_num) {
+                Some((_, adj)) => *adj -= sop.sem_op as i32,
+                None => new_adjs.push((sem_num, sems[sem_num].get_semadj(pid) - sop.sem_op as i32)),
+            }
+        }
+
+        // The adjustments are in range, so the sums of one call cannot overflow
+        if new_adjs
+            .iter()
+            .any(|(_, adj)| *adj < -(SEMAEM as i32) - 1 || *adj > SEMAEM as i32)
+        {
+            return_errno!(ERANGE, "semaphore adjustment exceeds maximum value");
+        }
+        for (sem_num, adj) in new_adjs {
+            sems[sem_num].set_semadj(pid, adj);
+        }
+        Ok(())
     }
 
     /// Retrieves the current value of a specific semaphore
@@ -472,20 +500,17 @@ impl SemSet {
         Ok(sems[sem_num].get_zcnt())
     }
 
-    /// Applies an undo operation to a semaphore
-    fn undo_op(&self, sem_num: usize, op: i32) -> Result<()> {
-        if self.is_removed.load(Ordering::Relaxed) {
-            return_errno!(EIDRM, "semaphore set removed");
-        }
+    /// Removes the adjustments of a process, and adds them to the semaphores if the process
+    /// undoes its operations
+    fn remove_semadj(&self, pid: pid_t, undo: bool) {
         let mut sems = self.sems.lock();
-        if sem_num >= self.nsems {
-            return_errno!(ERANGE, "semaphore number out of range");
+        for sem in sems.iter_mut() {
+            if let Some(adj) = sem.semadj.remove(&pid) {
+                if undo {
+                    sem.count += adj;
+                }
+            }
         }
-
-        // Apply the undo operation
-        let sem = &mut sems[sem_num];
-        sem.count += op;
-        Ok(())
     }
 }
 
@@ -545,7 +570,6 @@ lazy_static! {
 pub struct SemManager {
     sem_sets: RwLock<HashMap<SemId, Arc<SemSet>>>, // All active semaphore sets
     semid_manager: RwLock<SemIdManager>,           // Manages semaphore ID allocation
-    undo_logs: RwLock<HashMap<pid_t, Vec<SemUndoOp>>>, // Tracks undo operations per process
 }
 
 impl SemManager {
@@ -553,7 +577,6 @@ impl SemManager {
         SemManager {
             sem_sets: RwLock::new(HashMap::new()),
             semid_manager: RwLock::new(SemIdManager::new()),
-            undo_logs: RwLock::new(HashMap::new()),
         }
     }
 
@@ -582,25 +605,6 @@ impl SemManager {
     fn free_semid(&self, semid: &SemId) -> Result<()> {
         let mut semid_manager = self.semid_manager.write().unwrap();
         semid_manager.free_semid(semid)
-    }
-
-    /// Adds undo operations for a process
-    fn add_undo_ops(&self, pid: pid_t, ops: Vec<SemUndoOp>) {
-        let mut undo_logs = self.undo_logs.write().unwrap();
-        let entry = undo_logs.entry(pid).or_insert_with(Vec::new);
-        entry.extend(ops);
-    }
-
-    /// Applies all pending undo operations for a process
-    fn perform_undo_ops(&self, pid: pid_t) {
-        let mut undo_logs = self.undo_logs.write().unwrap();
-        if let Some(ops) = undo_logs.remove(&pid) {
-            for op in ops {
-                if let Ok(sem_set) = self.get_semset(&op.semid) {
-                    let _ = sem_set.undo_op(op.sem_num, op.op);
-                }
-            }
-        }
     }
 
     /// Returns total number of semaphores across all sets
@@ -711,8 +715,10 @@ impl SemManager {
         // Handle SEM_UNDO command (clear undo operations)
         if cmd == SEM_UNDO {
             let pid = current!().process().pid();
-            let mut undo_logs = self.undo_logs.write().unwrap();
-            undo_logs.remove(&pid);
+            let sem_sets = self.sem_sets.read().unwrap();
+            for sem_set in sem_sets.values() {
+                sem_set.remove_semadj(pid, false);
+            }
             return Ok(0);
         }
 
@@ -927,12 +933,11 @@ impl SemManager {
     /// Cleans up semaphore resources when a process exits
     pub fn detach_sem_when_process_exit(&self, thread: &ThreadRef) {
         let pid = thread.process().pid();
-        // Apply any pending undo operations
-        self.perform_undo_ops(pid);
 
-        // Detach process from all semaphore sets
+        // Apply any pending undo operations, and detach process from all semaphore sets
         let mut sem_sets = self.sem_sets.write().unwrap();
         for (_, sem_set) in sem_sets.iter_mut() {
+            sem_set.remove_semadj(pid, true);
             sem_set.detach_pid(&pid);
         }
     }
