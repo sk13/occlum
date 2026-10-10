@@ -131,6 +131,64 @@ static long now_ms(void) {
     return ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
+// A thread that makes a semaphore operation, which has to wait, and ends with its result. The
+// operation is kept here, so that a test can change it while the thread waits
+typedef struct {
+    int semid;
+    struct sembuf sop;
+    int timeout_ms;
+    long ret;
+    int err;
+    pthread_t thread;
+} waiter_t;
+
+static void *waiter_main(void *arg) {
+    waiter_t *waiter = arg;
+    struct timespec timeout = { waiter->timeout_ms / 1000, (waiter->timeout_ms % 1000) * 1000000L };
+    waiter->ret = syscall(SYS_semtimedop, waiter->semid, &waiter->sop, 1, &timeout);
+    waiter->err = errno;
+    return NULL;
+}
+
+// The timeout keeps a waiter that is not woken up from blocking the test for long
+#define WAITER_TIMEOUT_MS   5000
+
+static int waiter_start(waiter_t *waiter, int semid, int sem_num, int op) {
+    waiter->semid = semid;
+    waiter->sop = (struct sembuf) { sem_num, op, 0 };
+    waiter->timeout_ms = WAITER_TIMEOUT_MS;
+    if (pthread_create(&waiter->thread, NULL, waiter_main, waiter) != 0) {
+        THROW_ERROR("pthread_create() failed");
+    }
+    return SUCCESS;
+}
+
+// Wait for the waiter to end, and check that it was woken up and performed its operation
+static int waiter_finish(waiter_t *waiter) {
+    pthread_join(waiter->thread, NULL);
+    if (waiter->ret != 0) {
+        INFO("the operation of the waiter returned %ld with errno %d (%s), expected 0\n",
+             waiter->ret, waiter->err, strerror(waiter->err));
+        return FAIL;
+    }
+    return SUCCESS;
+}
+
+// Wait until the number of the waiters of a semaphore (GETNCNT or GETZCNT) is as expected
+static int wait_for_count(int semid, int sem_num, int cmd, int expected) {
+    long count = -1;
+    for (int i = 0; i < WAITER_TIMEOUT_MS; i++) {
+        count = syscall(SYS_semctl, semid, sem_num, cmd);
+        if (count == expected) {
+            return SUCCESS;
+        }
+        usleep(1000);
+    }
+    INFO("the number of waiters (%s) of semaphore %d is %ld, expected %d\n",
+         cmd == GETNCNT ? "GETNCNT" : "GETZCNT", sem_num, count, expected);
+    return FAIL;
+}
+
 // Spawn a child process that runs a child test, which takes the integers as arguments
 static int spawn_child(pid_t *pid, int test_type, int arg_count, const int args[]) {
     char arg_bufs[2 + MAX_CHILD_ARGS][ARG_BUF_SZ];
@@ -767,6 +825,7 @@ static int test_sem_undo_per_process(void) {
 
 static int test_sem_undo_range(void) {
     struct sembuf two_downs[2] = {{2, -1, SEM_UNDO}, {2, -1, SEM_UNDO}};
+    struct sembuf out_and_back[2] = {{0, -1, SEM_UNDO}, {0, 1, SEM_UNDO}};
     int semid = sem_create(3);
     if (semid < 0) {
         THROW_ERROR("semget() create failed (errno: %d)", errno);
@@ -777,6 +836,9 @@ static int test_sem_undo_range(void) {
     EXPECT_CALL(sem_op(semid, 0, -SEMVMX_VAL, SEM_UNDO), 0);
     EXPECT_CALL(sem_op(semid, 0, SEMVMX_VAL, 0), 0);
     EXPECT_CALL(sem_op(semid, 0, -1, SEM_UNDO), ERANGE);
+    // The range is checked after each operation: the first operation of this call leaves it,
+    // although the second one would bring the adjustment back
+    EXPECT_CALL(syscall(SYS_semop, semid, out_and_back, 2), ERANGE);
     if (check_val(semid, 0, SEMVMX_VAL) != SUCCESS) {
         return FAIL;
     }
@@ -804,6 +866,20 @@ static int test_sem_undo_range(void) {
     if (check_val(semid, 2, SEMVMX_VAL - 1) != SUCCESS) {
         return FAIL;
     }
+
+    EXPECT_CALL(syscall(SYS_semctl, semid, 0, IPC_RMID), 0);
+
+    // A call that fails undoes the adjustments of its operations: the first operation of this
+    // call fails with ERANGE because of the second, and the same operation then works alone
+    semid = sem_create(2);
+    if (semid < 0) {
+        THROW_ERROR("semget() create failed (errno: %d)", errno);
+    }
+    EXPECT_CALL(syscall(SYS_semctl, semid, 0, SETVAL, SEMVMX_VAL), 0);
+    EXPECT_CALL(syscall(SYS_semctl, semid, 1, SETVAL, SEMVMX_VAL), 0);
+    struct sembuf undo_then_max[2] = {{0, -SEMVMX_VAL, SEM_UNDO}, {1, 1, 0}};
+    EXPECT_CALL(syscall(SYS_semop, semid, undo_then_max, 2), ERANGE);
+    EXPECT_CALL(sem_op(semid, 0, -SEMVMX_VAL, SEM_UNDO), 0);
 
     EXPECT_CALL(syscall(SYS_semctl, semid, 0, IPC_RMID), 0);
     INFO("Test sem_undo_range passed\n");
@@ -890,6 +966,152 @@ static int test_sem_undo_failed_ops(void) {
 
     EXPECT_CALL(syscall(SYS_semctl, semid, 0, IPC_RMID), 0);
     INFO("Test sem_undo_failed_ops passed\n");
+    return SUCCESS;
+}
+
+// A thread that changes the semaphore number of an operation again and again
+typedef struct {
+    volatile struct sembuf sop;
+    volatile int stop;
+} flipper_t;
+
+#define FLIPPER_CALLS   5000
+
+static void *flipper_main(void *arg) {
+    flipper_t *flipper = arg;
+    while (!flipper->stop) {
+        flipper->sop.sem_num = 200;
+        flipper->sop.sem_num = 0;
+    }
+    return NULL;
+}
+
+/**
+ * Test 15: The operations of one semop() are performed one after the other, all or none of them
+ * 1. An operation sees the result of the operations before it
+ * 2. The semaphore does not become negative, even if the operations would make it so together
+ * 3. The semaphore does not exceed the maximum value (ERANGE), and the call changes nothing
+ * 4. The semaphore number is checked first (EFBIG), before an operation fails (EAGAIN)
+ * 5. IPC_NOWAIT only counts for the operation that has to wait first
+ * 6. The operations are those that the call got when it started, also if another thread changes
+ *    them while the call waits, or while it does not wait
+ */
+static int test_semop_one_after_the_other(void) {
+    struct sembuf v_then_p[2] = {{0, 1, 0}, {0, -1, IPC_NOWAIT}};
+    struct sembuf p_then_p[2] = {{0, -1, 0}, {0, -1, IPC_NOWAIT}};
+    struct sembuf v_then_max[2] = {{0, 1, 0}, {1, 1, 0}};
+    struct sembuf two_vs[2] = {{2, SEMVMX_VAL, 0}, {2, 1, 0}};
+    struct sembuf to_max[2] = {{2, SEMVMX_VAL - 1, 0}, {2, 1, 0}};
+    struct sembuf nowait_then_bad[2] = {{0, -2, IPC_NOWAIT}, {3, 1, 0}};
+    struct sembuf wait_then_nowait[2] = {{0, -2, 0}, {1, -1, IPC_NOWAIT}};
+    struct timespec timeout = {0, 200 * 1000 * 1000};
+    waiter_t waiter;
+    flipper_t flipper = { .sop = {0, 0, IPC_NOWAIT} };
+    pthread_t flipper_thread;
+    long start, elapsed;
+    int semid = sem_create(3);
+    if (semid < 0) {
+        THROW_ERROR("semget() create failed (errno: %d)", errno);
+    }
+
+    // Scenario 1: The semaphore is 0, but the P operation comes after the V operation
+    EXPECT_CALL(syscall(SYS_semop, semid, v_then_p, 2), 0);
+    if (check_val(semid, 0, 0) != SUCCESS) {
+        return FAIL;
+    }
+
+    // Scenario 2: The semaphore is 1, so each P operation could be performed, but not both
+    EXPECT_CALL(syscall(SYS_semctl, semid, 0, SETVAL, 1), 0);
+    EXPECT_CALL(syscall(SYS_semop, semid, p_then_p, 2), EAGAIN);
+    if (check_val(semid, 0, 1) != SUCCESS) {
+        return FAIL;
+    }
+
+    // Scenario 3: The semaphore 1 has the maximum value, and the call undoes its first operation
+    EXPECT_CALL(syscall(SYS_semctl, semid, 1, SETVAL, SEMVMX_VAL), 0);
+    EXPECT_CALL(sem_op(semid, 1, 1, 0), ERANGE);
+    EXPECT_CALL(syscall(SYS_semop, semid, v_then_max, 2), ERANGE);
+    // The operations together exceed the maximum value, but each one does not
+    EXPECT_CALL(syscall(SYS_semop, semid, two_vs, 2), ERANGE);
+    if (check_val(semid, 0, 1) != SUCCESS || check_val(semid, 1, SEMVMX_VAL) != SUCCESS ||
+            check_val(semid, 2, 0) != SUCCESS) {
+        return FAIL;
+    }
+    // The maximum value can be reached
+    EXPECT_CALL(syscall(SYS_semop, semid, to_max, 2), 0);
+    if (check_val(semid, 2, SEMVMX_VAL) != SUCCESS) {
+        return FAIL;
+    }
+
+    // Scenario 4: The semaphore 0 is 1, so the first operation fails, but the semaphore number
+    // of the second one is out of range
+    EXPECT_CALL(syscall(SYS_semop, semid, nowait_then_bad, 2), EFBIG);
+
+    // Scenario 5: The semaphore 0 is 1 and the semaphore 1 is 0, so both operations would have
+    // to wait. The first one has no IPC_NOWAIT, so the call waits until the timeout
+    EXPECT_CALL(syscall(SYS_semctl, semid, 1, SETVAL, 0), 0);
+    start = now_ms();
+    EXPECT_CALL(syscall(SYS_semtimedop, semid, wait_then_nowait, 2, &timeout), EAGAIN);
+    elapsed = now_ms() - start;
+    if (elapsed < 180 || elapsed > 5000) {
+        INFO("semtimedop() took %ld ms, expected about 200 ms\n", elapsed);
+        return FAIL;
+    }
+
+    // Scenario 6: A thread waits for a P operation on semaphore 0, and another thread changes the
+    // operation in the memory that they share. The call must go on with the operation that it
+    // got, when the other thread wakes it up with a V operation on semaphore 0 ...
+    EXPECT_CALL(syscall(SYS_semctl, semid, 0, SETVAL, 0), 0);
+    if (waiter_start(&waiter, semid, 0, -1) != SUCCESS ||
+            wait_for_count(semid, 0, GETNCNT, 1) != SUCCESS) {
+        return FAIL;
+    }
+    // ... also if the new operation is a V operation on another semaphore ...
+    waiter.sop.sem_num = 1;
+    waiter.sop.sem_op = 5;
+    EXPECT_CALL(sem_op(semid, 0, 1, 0), 0);
+    if (waiter_finish(&waiter) != SUCCESS) {
+        return FAIL;
+    }
+    if (check_val(semid, 0, 0) != SUCCESS || check_val(semid, 1, 0) != SUCCESS) {
+        return FAIL;
+    }
+    // ... or an operation on a semaphore that is not in the set
+    if (waiter_start(&waiter, semid, 0, -1) != SUCCESS ||
+            wait_for_count(semid, 0, GETNCNT, 1) != SUCCESS) {
+        return FAIL;
+    }
+    waiter.sop.sem_num = 200;
+    EXPECT_CALL(sem_op(semid, 0, 1, 0), 0);
+    if (waiter_finish(&waiter) != SUCCESS) {
+        return FAIL;
+    }
+    if (check_val(semid, 0, 0) != SUCCESS) {
+        return FAIL;
+    }
+
+    // Scenario 7: The same for calls that do not wait. A thread changes the semaphore number of a Z
+    // operation on semaphore 0, which is 0, between 0 and a number that is not in the set. Each
+    // call either performs the operation or fails with EFBIG, according to the number that it got
+    if (pthread_create(&flipper_thread, NULL, flipper_main, &flipper) != 0) {
+        THROW_ERROR("pthread_create() failed");
+    }
+    for (int i = 0; i < FLIPPER_CALLS; i++) {
+        errno = 0;
+        long ret = syscall(SYS_semop, semid, (struct sembuf *)&flipper.sop, 1);
+        if (ret != 0 && !(ret == -1 && errno == EFBIG)) {
+            flipper.stop = 1;
+            pthread_join(flipper_thread, NULL);
+            INFO("semop() returned %ld with errno %d (%s), expected 0 or EFBIG\n", ret, errno,
+                 strerror(errno));
+            return FAIL;
+        }
+    }
+    flipper.stop = 1;
+    pthread_join(flipper_thread, NULL);
+
+    EXPECT_CALL(syscall(SYS_semctl, semid, 0, IPC_RMID), 0);
+    INFO("Test semop_one_after_the_other passed\n");
     return SUCCESS;
 }
 
@@ -1144,6 +1366,7 @@ static test_case_t test_cases[] = {
     TEST_CASE(test_sem_undo_range),
     TEST_CASE(test_sem_undo_removed_set),
     TEST_CASE(test_sem_undo_failed_ops),
+    TEST_CASE(test_semop_one_after_the_other),
     TEST_CASE(test_no_rmsem),
 };
 
