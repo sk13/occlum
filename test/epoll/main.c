@@ -264,6 +264,187 @@ out:
 }
 
 // ============================================================================
+// Test cases: closing a monitored file removes it from the epoll file
+// ============================================================================
+
+// Closes one end of a socket pair that the epoll file monitors. That removes the
+// socket from the epoll file, so that the other end gets end of file at once.
+// Otherwise the epoll file keeps the socket open.
+static int check_close_monitored_socket(int epfd) {
+    int sockets[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) < 0) {
+        THROW_ERROR("failed to create a socket pair");
+    }
+    int ret = -1;
+    struct epoll_event event = { .events = EPOLLIN, .data.fd = sockets[0] };
+    if (epoll_ctl(epfd, EPOLL_CTL_ADD, sockets[0], &event) < 0) {
+        printf("\t\tERROR: epoll_ctl add failed: %s\n", strerror(errno));
+        goto out;
+    }
+    close(sockets[0]);
+    sockets[0] = -1;
+
+    char c;
+    struct pollfd pfd = { .fd = sockets[1], .events = POLLIN };
+    if (poll(&pfd, 1, 1000) != 1 || read(sockets[1], &c, 1) != 0) {
+        printf("\t\tERROR: the peer did not get end of file\n");
+        goto out;
+    }
+    ret = 0;
+
+out:
+    if (sockets[0] >= 0) {
+        close(sockets[0]);
+    }
+    close(sockets[1]);
+    return ret;
+}
+
+int test_epoll_close_monitored_socket() {
+    int epfd = epoll_create1(0);
+    if (epfd < 0) {
+        THROW_ERROR("failed to create the epoll file");
+    }
+    int ret = check_close_monitored_socket(epfd);
+    close(epfd);
+    return ret;
+}
+
+// The epoll file is open under another fd, too. Closing one of the fds must
+// not stop the file table from telling the epoll file about the closed files.
+int test_epoll_close_monitored_socket_after_closing_epfd() {
+    int epfd = epoll_create1(0);
+    int epfd2 = dup(epfd);
+    if (epfd < 0 || epfd2 < 0) {
+        THROW_ERROR("failed to create the epoll file");
+    }
+    close(epfd);
+    int ret = check_close_monitored_socket(epfd2);
+    close(epfd2);
+    return ret;
+}
+
+int test_epoll_close_monitored_socket_after_closing_dup() {
+    int epfd = epoll_create1(0);
+    int epfd2 = fcntl(epfd, F_DUPFD, 100);
+    if (epfd < 0 || epfd2 < 100) {
+        THROW_ERROR("failed to create the epoll file");
+    }
+    close(epfd2);
+    int ret = check_close_monitored_socket(epfd);
+    close(epfd);
+    return ret;
+}
+
+// Only the close of the last fd ends it, not that of the second to last
+int test_epoll_close_monitored_socket_after_closing_two_of_three_fds() {
+    int epfd = epoll_create1(0);
+    int epfd2 = dup(epfd);
+    int epfd3 = dup(epfd);
+    if (epfd < 0 || epfd2 < 0 || epfd3 < 0) {
+        THROW_ERROR("failed to create the epoll file");
+    }
+    close(epfd2);
+    close(epfd);
+    int ret = check_close_monitored_socket(epfd3);
+    close(epfd3);
+    return ret;
+}
+
+// The fd of a closed socket can be added to the epoll file again, like the next
+// socket that gets the same fd number
+int test_epoll_close_monitored_socket_reuse_fd() {
+    int epfd = epoll_create1(0);
+    int epfd2 = dup(epfd);
+    if (epfd < 0 || epfd2 < 0) {
+        THROW_ERROR("failed to create the epoll file");
+    }
+    close(epfd);
+    int ret = -1;
+    for (int i = 0; i < 3; i++) {
+        int sockets[2];
+        if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) < 0) {
+            printf("\t\tERROR: failed to create a socket pair: %s\n", strerror(errno));
+            goto out;
+        }
+        struct epoll_event event = { .events = EPOLLIN, .data.fd = sockets[0] };
+        int added = epoll_ctl(epfd2, EPOLL_CTL_ADD, sockets[0], &event);
+        close_files(2, sockets[0], sockets[1]);
+        if (added < 0) {
+            printf("\t\tERROR: epoll_ctl add failed in round %d: %s\n", i, strerror(errno));
+            goto out;
+        }
+    }
+    ret = 0;
+
+out:
+    close(epfd2);
+    return ret;
+}
+
+// An epoll file that does not hear about the closed sockets keeps them open,
+// with their ring buffers (416 kB for a pair of unix stream sockets), until
+// it is closed, so the kernel heap runs out after some hundred pairs.
+#define CLOSED_PAIRS 20
+#define CLOSED_PAIRS_LIMIT_KB 256
+
+int test_epoll_close_monitored_socket_no_leak() {
+    int epfd = epoll_create1(0);
+    int epfd2 = dup(epfd);
+    if (epfd < 0 || epfd2 < 0) {
+        THROW_ERROR("failed to create the epoll file");
+    }
+    close(epfd);
+
+    int ret = -1;
+    int sockets[CLOSED_PAIRS][2];
+    int num_pairs = 0;
+    long before = kernel_heap_in_use();
+    if (before == -2) {
+        printf("\t\tSKIPPED: the kernel heap monitor is not enabled\n");
+        ret = 0;
+        goto out;
+    }
+    if (before < 0) {
+        printf("\t\tERROR: failed to get the kernel heap in use\n");
+        goto out;
+    }
+    // Different fds, so that no new socket replaces an entry of the epoll file
+    for (; num_pairs < CLOSED_PAIRS; num_pairs++) {
+        struct epoll_event event = { .events = EPOLLIN };
+        if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets[num_pairs]) < 0) {
+            printf("\t\tERROR: failed to create a socket pair: %s\n", strerror(errno));
+            goto out;
+        }
+        event.data.fd = sockets[num_pairs][0];
+        if (epoll_ctl(epfd2, EPOLL_CTL_ADD, sockets[num_pairs][0], &event) < 0) {
+            printf("\t\tERROR: epoll_ctl add failed: %s\n", strerror(errno));
+            close_files(2, sockets[num_pairs][0], sockets[num_pairs][1]);
+            goto out;
+        }
+    }
+    ret = 0;
+
+out:
+    for (int i = 0; i < num_pairs; i++) {
+        close_files(2, sockets[i][0], sockets[i][1]);
+    }
+    if (ret == 0 && before >= 0) {
+        long after = kernel_heap_in_use();
+        if (after < 0) {
+            printf("\t\tERROR: failed to get the kernel heap in use\n");
+            ret = -1;
+        } else if (after - before > CLOSED_PAIRS_LIMIT_KB) {
+            printf("\t\tERROR: the kernel heap grew by %ld kB with %d closed socket pairs "
+                   "(limit %d kB)\n", after - before, CLOSED_PAIRS, CLOSED_PAIRS_LIMIT_KB);
+            ret = -1;
+        }
+    }
+    close(epfd2);
+    return ret;
+}
+
+// ============================================================================
 // Test cases: epoll_wait does not leak kernel heap
 // ============================================================================
 
@@ -482,6 +663,12 @@ static test_case_t test_cases[] = {
     TEST_CASE(test_epoll_ctl_uds),
     TEST_CASE(test_epoll_ctl_after_dup2),
     TEST_CASE(test_epoll_close_ready_socket),
+    TEST_CASE(test_epoll_close_monitored_socket),
+    TEST_CASE(test_epoll_close_monitored_socket_after_closing_epfd),
+    TEST_CASE(test_epoll_close_monitored_socket_after_closing_dup),
+    TEST_CASE(test_epoll_close_monitored_socket_after_closing_two_of_three_fds),
+    TEST_CASE(test_epoll_close_monitored_socket_reuse_fd),
+    TEST_CASE(test_epoll_close_monitored_socket_no_leak),
     TEST_CASE(test_epoll_wait_idle_no_leak),
     TEST_CASE(test_epoll_wait_ready_no_leak),
     TEST_CASE(test_epoll_wait_timeout_no_leak),
