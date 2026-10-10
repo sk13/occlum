@@ -236,12 +236,10 @@ struct SemSet {
     sem_otime: AtomicI64,    // Last operation time
     sem_ctime: AtomicI64,    // Creation/modification time
 
-    sems: Mutex<Vec<Semaphore>>,          // The semaphores in this set
-    attached_pids: Mutex<HashSet<pid_t>>, // Processes attached to this set
-    waiter_queue: Mutex<WaiterQueue>,     // Queue for waiting processes
+    sems: Mutex<Vec<Semaphore>>,      // The semaphores in this set
+    waiter_queue: Mutex<WaiterQueue>, // Queue for waiting processes
 
     is_removed: AtomicBool, // Set to true when semaphore set is removed
-    marked_for_removal: AtomicBool, // Set when removal is requested but processes are still attached
 }
 
 impl SemSet {
@@ -279,10 +277,8 @@ impl SemSet {
             sem_otime: AtomicI64::new(0),
             sem_ctime: AtomicI64::new(SemManager::current_time()),
             sems: Mutex::new(sems),
-            attached_pids: Mutex::new(HashSet::new()),
             waiter_queue: Mutex::new(WaiterQueue::new()),
             is_removed: AtomicBool::new(false),
-            marked_for_removal: AtomicBool::new(false),
         })
     }
 
@@ -309,18 +305,6 @@ impl SemSet {
     fn get_perm(&self) -> ipc_perm_t {
         let perm = self.perm.lock();
         *perm
-    }
-
-    /// Records that a process is using this semaphore set
-    fn attach_pid(&self, pid: pid_t) {
-        let mut pids = self.attached_pids.lock();
-        pids.insert(pid);
-    }
-
-    /// Removes a process from the attached list
-    fn detach_pid(&self, pid: &pid_t) {
-        let mut pids = self.attached_pids.lock();
-        pids.remove(pid);
     }
 
     /// Executes the operations one after the other, so that an operation sees the result of the
@@ -697,7 +681,6 @@ impl SemManager {
         // Copy the operations from user space. Another thread of the process can change them
         // while this call waits, as the call looks at them again after each wake-up
         let sops = from_user::make_slice(sops_ptr, nsops)?.to_vec();
-        let pid = current!().process().pid();
 
         // Get semaphore set and verify it exists
         let sem_set = self.get_semset(&semid)?;
@@ -707,13 +690,8 @@ impl SemManager {
             return_errno!(EIDRM, "semaphore set removed");
         }
 
-        // Attach process to the set and perform operations
-        sem_set.attach_pid(pid);
-        let result = sem_set.do_semop(&sops, timeout);
-
-        // Detach process after operations complete
-        sem_set.detach_pid(&pid);
-        result
+        // Perform operations
+        sem_set.do_semop(&sops, timeout)
     }
 
     /// Implements semctl: performs control operations on semaphores
@@ -725,22 +703,18 @@ impl SemManager {
 
         // Handle IPC_RMID (remove semaphore set)
         if cmd == IPC_RMID {
-            let sem_set = self.get_semset(&semid)?;
+            // Remove the set at once, also if processes wait for it, so that its semid and key can
+            // be used again. These processes have their own references to the set
+            let sem_set = {
+                let mut sem_sets = self.sem_sets.write().unwrap();
+                sem_sets
+                    .remove(&semid)
+                    .ok_or_else(|| errno!(EINVAL, "invalid semid"))?
+            };
+            self.free_semid(&semid)?;
+
             // Mark as removed and wake waiting processes
             sem_set.mark_removed_and_wake();
-
-            sem_set.marked_for_removal.store(true, Ordering::Relaxed);
-
-            // Remove immediately if no processes are attached
-            let is_empty = {
-                let pids = sem_set.attached_pids.lock();
-                pids.is_empty()
-            };
-            if is_empty {
-                self.free_semid(&semid)?;
-                let mut sem_sets = self.sem_sets.write().unwrap();
-                sem_sets.remove(&semid);
-            }
             return Ok(0);
         }
 
@@ -935,11 +909,10 @@ impl SemManager {
     pub fn detach_sem_when_process_exit(&self, thread: &ThreadRef) {
         let pid = thread.process().pid();
 
-        // Apply any pending undo operations, and detach process from all semaphore sets
-        let mut sem_sets = self.sem_sets.write().unwrap();
-        for (_, sem_set) in sem_sets.iter_mut() {
+        // Apply any pending undo adjustments of the process
+        let sem_sets = self.sem_sets.read().unwrap();
+        for sem_set in sem_sets.values() {
             sem_set.apply_semadj(pid);
-            sem_set.detach_pid(&pid);
         }
     }
 
