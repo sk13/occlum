@@ -175,6 +175,17 @@ static int waiter_finish(waiter_t *waiter) {
     return SUCCESS;
 }
 
+// Wait for the waiter to end, and check that it was woken up because the semaphore set was removed
+static int waiter_finish_removed(waiter_t *waiter) {
+    pthread_join(waiter->thread, NULL);
+    if (waiter->ret != -1 || waiter->err != EIDRM) {
+        INFO("the operation of the waiter returned %ld with errno %d (%s), expected EIDRM\n",
+             waiter->ret, waiter->err, strerror(waiter->err));
+        return FAIL;
+    }
+    return SUCCESS;
+}
+
 // Wait until the number of the waiters of a semaphore (GETNCNT or GETZCNT) is as expected
 static int wait_for_count(int semid, int sem_num, int cmd, int expected) {
     long count = -1;
@@ -1388,6 +1399,73 @@ static int test_semctl_set_wakes_waiter(void) {
     return SUCCESS;
 }
 
+/**
+ * Test 22: A semaphore set that is removed while a thread waits for it is removed at once
+ * 1. The thread that waits fails with EIDRM
+ * 2. The semid is invalid (EINVAL) and the key is free (ENOENT), a new set can be created with it
+ */
+static int test_semctl_rmid_waiter(void) {
+    waiter_t waiter;
+    key_t key;
+    int semid, new_semid;
+
+    srand(time(NULL));
+    key = random();
+    semid = syscall(SYS_semget, key, 1, IPC_CREAT | IPC_EXCL | S_IRWUSER);
+    if (semid < 0) {
+        THROW_ERROR("semget() create failed (errno: %d)", errno);
+    }
+    if (waiter_start(&waiter, semid, 0, -1) != SUCCESS ||
+            wait_for_count(semid, 0, GETNCNT, 1) != SUCCESS) {
+        return FAIL;
+    }
+    EXPECT_CALL(syscall(SYS_semctl, semid, 0, IPC_RMID), 0);
+    if (waiter_finish_removed(&waiter) != SUCCESS) {
+        return FAIL;
+    }
+
+    EXPECT_CALL(sem_op(semid, 0, 1, 0), EINVAL);
+    EXPECT_CALL(syscall(SYS_semctl, semid, 0, GETVAL), EINVAL);
+    EXPECT_CALL(syscall(SYS_semget, key, 1, S_IRWUSER), ENOENT);
+    new_semid = syscall(SYS_semget, key, 1, IPC_CREAT | IPC_EXCL | S_IRWUSER);
+    if (new_semid < 0) {
+        THROW_ERROR("semget() create the removed set again failed (errno: %d)", errno);
+    }
+    if (sem_op(new_semid, 0, 1, 0) != 0) {
+        THROW_ERROR("semop() on the new set failed (errno: %d)", errno);
+    }
+
+    EXPECT_CALL(syscall(SYS_semctl, new_semid, 0, IPC_RMID), 0);
+    INFO("Test semctl_rmid_waiter passed\n");
+    return SUCCESS;
+}
+
+/**
+ * Test 23: The removal of a semaphore set that a thread waits for does not leak its semid
+ * There are only 128 semids, and none of them must be lost
+ */
+static int test_semctl_rmid_waiter_semid(void) {
+    waiter_t waiter;
+
+    for (int i = 0; i < 200; i++) {
+        int semid = sem_create(1);
+        if (semid < 0) {
+            THROW_ERROR("semget() create failed in round %d (errno: %d)", i, errno);
+        }
+        if (waiter_start(&waiter, semid, 0, -1) != SUCCESS ||
+                wait_for_count(semid, 0, GETNCNT, 1) != SUCCESS) {
+            return FAIL;
+        }
+        EXPECT_CALL(syscall(SYS_semctl, semid, 0, IPC_RMID), 0);
+        if (waiter_finish_removed(&waiter) != SUCCESS) {
+            return FAIL;
+        }
+    }
+
+    INFO("Test semctl_rmid_waiter_semid passed\n");
+    return SUCCESS;
+}
+
 // ============================================================================
 // Child Process Test Logic (Corresponding to parent process test types)
 // ============================================================================
@@ -1648,6 +1726,8 @@ static test_case_t test_cases[] = {
     TEST_CASE(test_sem_undo_clamp),
     TEST_CASE(test_sem_undo_cleared_by_set),
     TEST_CASE(test_semctl_set_wakes_waiter),
+    TEST_CASE(test_semctl_rmid_waiter),
+    TEST_CASE(test_semctl_rmid_waiter_semid),
     TEST_CASE(test_no_rmsem),
 };
 
