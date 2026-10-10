@@ -30,6 +30,7 @@
 #define TEST_NO_RMSEM           4   // Do not remove semaphore (memory leak detection)
 #define TEST_UNDO_MERGED        5   // Child: many operations with SEM_UNDO, then exit
 #define TEST_UNDO_HOLD          6   // Child: one operation with SEM_UNDO, wait to be told to exit
+#define TEST_UNDO_FAILED        7   // Child: operations with SEM_UNDO that fail, then exit
 
 // Number of parameters for each test case (child process argv length)
 #define TEST_GET_SEMID_BY_KEY_ARGC  5
@@ -37,6 +38,7 @@
 #define TEST_OPERATE_DESTOYED_ARGC  5
 #define TEST_UNDO_MERGED_ARGC       4
 #define TEST_UNDO_HOLD_ARGC         6
+#define TEST_UNDO_FAILED_ARGC       3
 #define MAX_CHILD_ARGS              4
 
 // General macro definitions
@@ -642,7 +644,7 @@ static int test_semtimedop_timeout(void) {
 static int test_sem_undo_no_growth(void) {
     struct sembuf up = {0, 1, SEM_UNDO};
     struct sembuf down = {0, -1, SEM_UNDO};
-    int semid = sem_create(1);
+    int semid = sem_create(2);
     if (semid < 0) {
         THROW_ERROR("semget() create failed (errno: %d)", errno);
     }
@@ -659,9 +661,17 @@ static int test_sem_undo_no_growth(void) {
     if (before < 0) {
         THROW_ERROR("failed to get the kernel heap in use");
     }
-    for (int i = 0; i < UNDO_PAIRS; i++) {
+    for (int i = 0; i < UNDO_PAIRS / 2; i++) {
         EXPECT_CALL(syscall(SYS_semop, semid, &up, 1), 0);
         EXPECT_CALL(syscall(SYS_semop, semid, &down, 1), 0);
+    }
+    // The same with two semaphores, so that the operations that undo each other are not next to
+    // each other
+    for (int i = 0; i < UNDO_PAIRS / 4; i++) {
+        EXPECT_CALL(sem_op(semid, 0, 1, SEM_UNDO), 0);
+        EXPECT_CALL(sem_op(semid, 1, 1, SEM_UNDO), 0);
+        EXPECT_CALL(sem_op(semid, 0, -1, SEM_UNDO), 0);
+        EXPECT_CALL(sem_op(semid, 1, -1, SEM_UNDO), 0);
     }
     long after = kernel_heap_in_use();
     if (after - before > HEAP_LIMIT_KB) {
@@ -854,6 +864,32 @@ static int test_sem_undo_removed_set(void) {
 
     EXPECT_CALL(syscall(SYS_semctl, go_semid, 0, IPC_RMID), 0);
     INFO("Test sem_undo_removed_set passed\n");
+    return SUCCESS;
+}
+
+/**
+ * Test 14: The SEM_UNDO operations that fail are not undone
+ * An operation that times out or would have to wait does not change the semaphore, so the
+ * process that exits has nothing to undo
+ */
+static int test_sem_undo_failed_ops(void) {
+    pid_t pid;
+    int semid = sem_create(1);
+    if (semid < 0) {
+        THROW_ERROR("semget() create failed (errno: %d)", errno);
+    }
+
+    int args[] = {semid};
+    if (spawn_child(&pid, TEST_UNDO_FAILED, 1, args) != SUCCESS ||
+            wait_for_child(pid) != SUCCESS) {
+        return FAIL;
+    }
+    if (check_val(semid, 0, 0) != SUCCESS) {
+        return FAIL;
+    }
+
+    EXPECT_CALL(syscall(SYS_semctl, semid, 0, IPC_RMID), 0);
+    INFO("Test sem_undo_failed_ops passed\n");
     return SUCCESS;
 }
 
@@ -1070,6 +1106,25 @@ static int child_test_undo_hold(int argc, const char *argv[]) {
     return SUCCESS;
 }
 
+/**
+ * Child process: Operate on a semaphore of 0 with SEM_UNDO, the operations fail
+ */
+static int child_test_undo_failed(int argc, const char *argv[]) {
+    struct sembuf down = {0, -1, SEM_UNDO};
+    struct sembuf down_nowait = {0, -1, SEM_UNDO | IPC_NOWAIT};
+    struct timespec timeout = {0, 20 * 1000 * 1000};
+
+    if (argc != TEST_UNDO_FAILED_ARGC) {
+        INFO("Invalid argc: expected %d, actual %d\n", TEST_UNDO_FAILED_ARGC, argc);
+        return FAIL;
+    }
+    int semid = atoi(argv[2]);
+
+    EXPECT_CALL(syscall(SYS_semtimedop, semid, &down, 1, &timeout), EAGAIN);
+    EXPECT_CALL(syscall(SYS_semop, semid, &down_nowait, 1), EAGAIN);
+    return SUCCESS;
+}
+
 // ============================================================================
 // Test Suite Entry
 // ============================================================================
@@ -1088,6 +1143,7 @@ static test_case_t test_cases[] = {
     TEST_CASE(test_sem_undo_per_process),
     TEST_CASE(test_sem_undo_range),
     TEST_CASE(test_sem_undo_removed_set),
+    TEST_CASE(test_sem_undo_failed_ops),
     TEST_CASE(test_no_rmsem),
 };
 
@@ -1117,6 +1173,9 @@ int main(int argc, const char *argv[]) {
                 break;
             case TEST_UNDO_HOLD:
                 ret = child_test_undo_hold(argc, argv);
+                break;
+            case TEST_UNDO_FAILED:
+                ret = child_test_undo_failed(argc, argv);
                 break;
             default:
                 INFO("Invalid test option: %d\n", option);
