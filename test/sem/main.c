@@ -1485,6 +1485,37 @@ static int test_semget_invalid_nsems(void) {
     return SUCCESS;
 }
 
+/**
+ * Test 25: Errors of semctl() for the semaphores of the set
+ * 1. The semaphore number is not in the set → EINVAL
+ * 2. The value is not in the range of the semaphore values → ERANGE
+ */
+static int test_semctl_errors(void) {
+    int semid = sem_create(2);
+    if (semid < 0) {
+        THROW_ERROR("semget() create failed (errno: %d)", errno);
+    }
+
+    for (int sem_num = 2; sem_num >= -1; sem_num -= 3) {
+        EXPECT_CALL(syscall(SYS_semctl, semid, sem_num, GETVAL), EINVAL);
+        EXPECT_CALL(syscall(SYS_semctl, semid, sem_num, SETVAL, 1), EINVAL);
+        EXPECT_CALL(syscall(SYS_semctl, semid, sem_num, GETNCNT), EINVAL);
+        EXPECT_CALL(syscall(SYS_semctl, semid, sem_num, GETZCNT), EINVAL);
+        EXPECT_CALL(syscall(SYS_semctl, semid, sem_num, GETPID), EINVAL);
+    }
+
+    EXPECT_CALL(syscall(SYS_semctl, semid, 0, SETVAL, -1), ERANGE);
+    EXPECT_CALL(syscall(SYS_semctl, semid, 0, SETVAL, SEMVMX_VAL + 1), ERANGE);
+    EXPECT_CALL(syscall(SYS_semctl, semid, 0, SETVAL, SEMVMX_VAL), 0);
+    if (check_val(semid, 0, SEMVMX_VAL) != SUCCESS) {
+        return FAIL;
+    }
+
+    EXPECT_CALL(syscall(SYS_semctl, semid, 0, IPC_RMID), 0);
+    INFO("Test semctl_errors passed\n");
+    return SUCCESS;
+}
+
 // ============================================================================
 // Child Process Test Logic (Corresponding to parent process test types)
 // ============================================================================
@@ -1748,6 +1779,7 @@ static test_case_t test_cases[] = {
     TEST_CASE(test_semctl_rmid_waiter),
     TEST_CASE(test_semctl_rmid_waiter_semid),
     TEST_CASE(test_semget_invalid_nsems),
+    TEST_CASE(test_semctl_errors),
     TEST_CASE(test_no_rmsem),
 };
 
