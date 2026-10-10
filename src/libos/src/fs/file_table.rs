@@ -134,6 +134,14 @@ impl FileTable {
         Ok(old_file)
     }
 
+    /// Returns whether any fd refers to the file
+    pub fn contains(&self, file: &FileRef) -> bool {
+        self.table
+            .iter()
+            .flatten()
+            .any(|entry| Arc::ptr_eq(&entry.file, file))
+    }
+
     pub fn fds(&self) -> Vec<FileDesc> {
         let table = &self.table;
         table

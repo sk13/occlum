@@ -170,7 +170,11 @@ impl Thread {
         let file = self.files().lock().del(fd)?;
 
         if let Ok(epoll_file) = file.as_epoll_file() {
-            epoll_file.unregister_from_file_table();
+            // The file table has to tell the epoll file about the closed fds as long as
+            // the epoll file is open under another fd, e.g., after dup()
+            if !self.files().lock().contains(&file) {
+                epoll_file.unregister_from_file_table();
+            }
         }
 
         file.release_advisory_locks();
