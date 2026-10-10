@@ -106,19 +106,6 @@ struct seminfo_t {
     semaem: u32, // Adjust on exit max value
 }
 
-/// Structure for extended semaphore system information (used with SEM_INFO)
-#[allow(non_camel_case_types)]
-#[derive(Debug, Clone, Copy)]
-#[repr(C)]
-struct seminfo_ext_t {
-    sem_info: seminfo_t, // Basic limit information
-    semusz: u32,         // Size of sem_undo structure
-    semaem: u32,         // Max adjust on exit value
-    sem_nsems: u32,      // Current number of semaphores in system
-    sem_nsets: u32,      // Current number of semaphore sets in system
-    sem_largest_id: u32, // Largest semaphore set identifier
-}
-
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
@@ -753,8 +740,8 @@ impl SemManager {
             }
 
             SEM_INFO => {
-                // Fill extended semaphore information
-                let info_ptr = arg as *mut seminfo_ext_t;
+                // Fill the limits like IPC_INFO, and the current usage in two fields
+                let info_ptr = arg as *mut seminfo_t;
                 from_user::check_mut_ptr(info_ptr)?;
                 let info = unsafe {
                     info_ptr
@@ -762,8 +749,7 @@ impl SemManager {
                         .ok_or_else(|| errno!(EFAULT, "invalid pointer"))?
                 };
 
-                // Base limit information
-                let base_info = seminfo_t {
+                *info = seminfo_t {
                     semmap: 0,
                     semmni: SEMMNI,
                     semmns: SEMMNS as u32,
@@ -771,19 +757,9 @@ impl SemManager {
                     semmsl: SEMMSL as u32,
                     semopm: SEMOPM as u32,
                     semume: 0,
-                    semusz: 0,
+                    semusz: self.get_semset_count() as u32, // Number of semaphore sets
                     semvmx: SEMVMX as u32,
-                    semaem: 0,
-                };
-
-                // Current system status
-                *info = seminfo_ext_t {
-                    sem_info: base_info,
-                    semusz: 0,
-                    semaem: 0,
-                    sem_nsems: self.get_total_semaphores() as u32,
-                    sem_nsets: self.get_semset_count() as u32,
-                    sem_largest_id: self.get_largest_semid(),
+                    semaem: self.get_total_semaphores() as u32, // Number of semaphores
                 };
 
                 return Ok(self.get_largest_semid() as usize);
