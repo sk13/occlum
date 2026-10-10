@@ -8,7 +8,6 @@ use alloc::vec::Vec;
 use bitflags::bitflags;
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, Ordering};
 use intrusive_collections::LinkedList;
-use std::cmp::Ordering as CmpOrdering;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::time::Duration;
@@ -138,7 +137,7 @@ struct ipc_perm_t {
 }
 
 #[allow(non_camel_case_types)]
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 #[repr(C)]
 pub struct sembuf_t {
     sem_num: u16, // Semaphore number
@@ -148,11 +147,11 @@ pub struct sembuf_t {
 
 struct Semaphore {
     count: i32,
-    waiter_zero: HashSet<pid_t>,    // Processes waiting for count = 0
-    waiter_acquire: HashSet<pid_t>, // Processes waiting to acquire (count > 0)
-    last_pid: pid_t,                // PID of last process that modified this semaphore
+    ncnt: usize,     // Number of threads waiting to acquire (count > 0)
+    zcnt: usize,     // Number of threads waiting for count = 0
+    last_pid: pid_t, // PID of last process that modified this semaphore
     // What each process has to add to count when it exits: the sum of its operations with
-    // SEM_UNDO, negated. The processes whose sum is 0 have no entry
+    // SEM_UNDO, negated. Processes without adjustment have no entry
     semadj: HashMap<pid_t, i32>,
 }
 
@@ -160,8 +159,8 @@ impl Semaphore {
     fn new(initial_value: i32) -> Self {
         Semaphore {
             count: initial_value,
-            waiter_zero: HashSet::new(),
-            waiter_acquire: HashSet::new(),
+            ncnt: 0,
+            zcnt: 0,
             last_pid: current!().process().pid(),
             semadj: HashMap::new(),
         }
@@ -179,53 +178,54 @@ impl Semaphore {
         }
     }
 
-    /// Checks if an operation can proceed immediately
-    /// Returns true if operation can complete, false if process needs to wait
-    fn check_op(&mut self, op: i32, pid: pid_t) -> bool {
-        match op.cmp(&0) {
-            // Positive operation: always allowed (increments semaphore)
-            CmpOrdering::Greater => true,
-
-            // Zero operation: wait if count > 0
-            CmpOrdering::Equal => {
-                if self.count > 0 {
-                    self.waiter_zero.insert(pid);
-                }
-                self.count == 0
-            }
-
-            // Negative operation: wait if insufficient count
-            CmpOrdering::Less => {
-                if self.count + op >= 0 {
-                    true
-                } else {
-                    self.waiter_acquire.insert(pid);
-                    false
-                }
-            }
-        }
-    }
-
-    /// Executes the semaphore operation and updates waiter sets
-    fn do_op(&mut self, op: i32, pid: pid_t) {
-        self.count += op;
-
-        // Remove process from wait lists since operation completed
+    /// Executes the operation if it can complete immediately. If undo_pid is given, the
+    /// operation is recorded as an operation with SEM_UNDO of this process
+    /// Returns false if the operation would block, or an error if the count or the
+    /// adjustment of the process would exceed the maximum
+    fn try_op(&mut self, op: i32, undo_pid: Option<pid_t>) -> Result<bool> {
+        // Zero operation: wait if count > 0
         if op == 0 {
-            self.waiter_zero.remove(&pid);
-        } else if op < 0 {
-            self.waiter_acquire.remove(&pid);
+            return Ok(self.count == 0);
+        }
+
+        // Negative operation: wait if insufficient count
+        let new_count = self.count + op;
+        if new_count < 0 {
+            return Ok(false);
+        }
+
+        // Positive operation: allowed unless it exceeds the maximum
+        if new_count > SEMVMX as i32 {
+            return_errno!(ERANGE, "semaphore count exceeds maximum value");
+        }
+
+        if let Some(pid) = undo_pid {
+            let adj = self.get_semadj(pid) - op;
+            if adj < -(SEMAEM as i32) - 1 || adj > SEMAEM as i32 {
+                return_errno!(ERANGE, "semaphore adjustment exceeds maximum value");
+            }
+            self.set_semadj(pid, adj);
+        }
+        self.count = new_count;
+        Ok(true)
+    }
+
+    /// Reverts an operation that try_op has executed
+    fn revert_op(&mut self, op: i32, undo_pid: Option<pid_t>) {
+        self.count -= op;
+        if let Some(pid) = undo_pid {
+            self.set_semadj(pid, self.get_semadj(pid) + op);
         }
     }
 
-    /// Returns number of processes waiting for count > current value
+    /// Returns number of threads waiting for count > current value
     fn get_ncnt(&self) -> usize {
-        self.waiter_acquire.len()
+        self.ncnt
     }
 
-    /// Returns number of processes waiting for count = 0
+    /// Returns number of threads waiting for count = 0
     fn get_zcnt(&self) -> usize {
-        self.waiter_zero.len()
+        self.zcnt
     }
 }
 
@@ -323,77 +323,109 @@ impl SemSet {
         pids.remove(pid);
     }
 
+    /// Executes the operations one after the other, so that an operation sees the result of the
+    /// operations before it. Either all of them are executed or none: if an operation can't
+    /// complete, the operations before it are reverted.
+    /// Returns the operation that would block, or None if all operations are executed
+    fn perform_ops<'a>(
+        sems: &mut [Semaphore],
+        sops: &'a [sembuf_t],
+        pid: pid_t,
+    ) -> Result<Option<&'a sembuf_t>> {
+        let undo_pid = |sop: &sembuf_t| {
+            let flags = SemFlags::from_bits_truncate(sop.sem_flg as u32);
+            if flags.contains(SemFlags::SEM_UNDO) {
+                Some(pid)
+            } else {
+                None
+            }
+        };
+
+        for (i, sop) in sops.iter().enumerate() {
+            let performed = sems[sop.sem_num as usize].try_op(sop.sem_op as i32, undo_pid(sop));
+            if let Ok(true) = performed {
+                continue;
+            }
+
+            for done in sops[..i].iter().rev() {
+                sems[done.sem_num as usize].revert_op(done.sem_op as i32, undo_pid(done));
+            }
+            return performed.map(|_| Some(sop));
+        }
+
+        for sop in sops {
+            sems[sop.sem_num as usize].last_pid = pid;
+        }
+        Ok(None)
+    }
+
     /// Executes a series of semaphore operations
     fn do_semop(&self, sops: &[sembuf_t], mut timeout: Option<Duration>) -> Result<()> {
         let pid = current!().process().pid();
         let waiter = Waiter::new();
 
+        // Validate semaphore numbers before any operation is executed
+        if sops.iter().any(|sop| sop.sem_num as usize >= self.nsems) {
+            return_errno!(EFBIG, "semaphore number out of range");
+        }
+
         loop {
-            // Check if semaphore set was removed
+            let mut sems = self.sems.lock();
+            let mut waiter_queue = self.waiter_queue.lock();
+
+            // Check if semaphore set was removed. This needs the lock of the queue, as the
+            // removal wakes up the waiters of the queue after it marks the set as removed
             if self.is_removed.load(Ordering::Relaxed) {
                 return_errno!(EIDRM, "semaphore set removed");
             }
 
-            let mut sems = self.sems.lock();
-            let mut all_ops_can_proceed = true;
-
-            // First pass: check if all operations can complete
-            for sop in sops {
-                let sem_num = sop.sem_num as usize;
-
-                // Validate semaphore number
-                if sem_num >= self.nsems {
-                    return_errno!(EFBIG, "semaphore number out of range");
-                }
-
-                // Check if operation can proceed
-                if !sems[sem_num].check_op(sop.sem_op as i32, pid) {
-                    all_ops_can_proceed = false;
-
-                    // Fail immediately if NOWAIT flag is set
-                    let flags = SemFlags::from_bits_truncate(sop.sem_flg as u32);
-                    if flags.contains(SemFlags::IPC_NOWAIT) {
-                        return_errno!(EAGAIN, "semaphore count not zero");
-                    }
-                }
-            }
-
-            let mut waiter_queue = self.waiter_queue.lock();
-
             // Execute operations if all can proceed
-            if all_ops_can_proceed {
-                // Record undo operations if needed
-                Self::add_semadj(&mut sems, sops, pid)?;
-
-                // Apply all operations
-                for sop in sops {
-                    let sem_num = sop.sem_num as usize;
-                    let sem = &mut sems[sem_num];
-                    let op = sop.sem_op as i32;
-
-                    sem.do_op(op, pid);
-                    sem.last_pid = pid;
+            let waiting_sop = match Self::perform_ops(&mut sems, sops, pid)? {
+                Some(sop) => sop,
+                None => {
+                    // Update operation time and wake waiting processes
+                    self.sem_otime
+                        .store(SemManager::current_time(), Ordering::Relaxed);
+                    waiter_queue.dequeue_and_wake_all();
+                    return Ok(());
                 }
+            };
 
-                // Update operation time and wake waiting processes
-                self.sem_otime
-                    .store(SemManager::current_time(), Ordering::Relaxed);
-                waiter_queue.dequeue_and_wake_all();
-                return Ok(());
+            // Fail immediately if NOWAIT flag is set
+            let flags = SemFlags::from_bits_truncate(waiting_sop.sem_flg as u32);
+            if flags.contains(SemFlags::IPC_NOWAIT) {
+                return_errno!(EAGAIN, "semaphore operation would block");
             }
 
             // Operations can't proceed - add to wait queue and block
+            let sem_num = waiting_sop.sem_num as usize;
+            let waits_for_zero = waiting_sop.sem_op == 0;
+            if waits_for_zero {
+                sems[sem_num].zcnt += 1;
+            } else {
+                sems[sem_num].ncnt += 1;
+            }
             waiter_queue.reset_and_enqueue(&waiter);
             drop(sems);
             drop(waiter_queue);
 
             // Wait for notification or timeout
             let res = waiter.wait_mut(timeout.as_mut());
+
+            // The thread doesn't wait any more
+            let mut sems = self.sems.lock();
+            if waits_for_zero {
+                sems[sem_num].zcnt -= 1;
+            } else {
+                sems[sem_num].ncnt -= 1;
+            }
             if res.is_err() {
                 // The queue did not wake up the waiter, which would stay in the
                 // queue until the next successful operation on this set
                 self.waiter_queue.lock().dequeue(&waiter);
             }
+            drop(sems);
+
             match res {
                 Ok(()) => continue,
                 Err(e) if e.errno() == Errno::ETIMEDOUT => {
@@ -406,37 +438,6 @@ impl SemSet {
                 Err(e) => return Err(e),
             }
         }
-    }
-
-    /// Adds what the operations with SEM_UNDO of a call have to undo to the adjustments of the
-    /// process. Fails with ERANGE, as Linux does, and changes nothing if an adjustment would
-    /// leave its range
-    fn add_semadj(sems: &mut [Semaphore], sops: &[sembuf_t], pid: pid_t) -> Result<()> {
-        // The new adjustments of the semaphores that the call changes
-        let mut new_adjs: Vec<(usize, i32)> = Vec::new();
-        for sop in sops {
-            let flags = SemFlags::from_bits_truncate(sop.sem_flg as u32);
-            if !flags.contains(SemFlags::SEM_UNDO) || sop.sem_op == 0 {
-                continue;
-            }
-            let sem_num = sop.sem_num as usize;
-            match new_adjs.iter_mut().find(|(num, _)| *num == sem_num) {
-                Some((_, adj)) => *adj -= sop.sem_op as i32,
-                None => new_adjs.push((sem_num, sems[sem_num].get_semadj(pid) - sop.sem_op as i32)),
-            }
-        }
-
-        // The adjustments are in range, so the sums of one call cannot overflow
-        if new_adjs
-            .iter()
-            .any(|(_, adj)| *adj < -(SEMAEM as i32) - 1 || *adj > SEMAEM as i32)
-        {
-            return_errno!(ERANGE, "semaphore adjustment exceeds maximum value");
-        }
-        for (sem_num, adj) in new_adjs {
-            sems[sem_num].set_semadj(pid, adj);
-        }
-        Ok(())
     }
 
     /// Retrieves the current value of a specific semaphore
@@ -684,8 +685,9 @@ impl SemManager {
             return_errno!(E2BIG, "too many operations");
         }
 
-        // Copy operations from user space
-        let sops = from_user::make_slice(sops_ptr, nsops)?;
+        // Copy the operations from user space. Another thread of the process can change them
+        // while this call waits, as the call looks at them again after each wake-up
+        let sops = from_user::make_slice(sops_ptr, nsops)?.to_vec();
         let pid = current!().process().pid();
 
         // Get semaphore set and verify it exists
