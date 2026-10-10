@@ -207,8 +207,8 @@ impl FileTable {
         for (fd, entry) in self
             .table
             .iter_mut()
-            .filter(|entry| entry.is_some())
             .enumerate()
+            .filter(|(_, entry)| entry.is_some())
         {
             deleted_files.push(entry.as_ref().unwrap().file.clone());
             *entry = None;
