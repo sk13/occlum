@@ -185,6 +185,148 @@ int test_sigsuspend_eintr_with_stream_of_signals() {
 }
 
 // ============================================================================
+// Test sigsuspend that is ended by a signal that the original mask blocks
+// ============================================================================
+
+// sigsuspend replaces the signal mask while it waits, and a signal that the original
+// mask blocks but the new mask does not ends it. The handler of the signal must have
+// run when sigsuspend returns, and the original mask must be in effect again.
+
+#define MAX_SIGSUSPEND_CALLS    1000
+
+static volatile sig_atomic_t g_num_sigusr1;
+static volatile sig_atomic_t g_is_sigusr2_blocked_in_handler;
+
+static void count_sigusr1(int sig) {
+    sigset_t mask;
+    sigprocmask(SIG_BLOCK, NULL, &mask);
+    g_is_sigusr2_blocked_in_handler = sigismember(&mask, SIGUSR2);
+    g_num_sigusr1++;
+}
+
+// The signal action of SIGUSR1: the handler runs with SIGUSR2 blocked
+static int set_sigusr1_action() {
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = count_sigusr1;
+    sigemptyset(&sa.sa_mask);
+    sigaddset(&sa.sa_mask, SIGUSR2);
+    if (sigaction(SIGUSR1, &sa, NULL) < 0) {
+        THROW_ERROR("failed to set the signal action");
+    }
+    return 0;
+}
+
+static void *send_sigusr1(void *arg) {
+    pthread_t target = *(pthread_t *)arg;
+    usleep(100 * 1000);
+    pthread_kill(target, SIGUSR1);
+    return NULL;
+}
+
+static int is_sigusr1_blocked() {
+    sigset_t mask;
+    sigprocmask(SIG_BLOCK, NULL, &mask);
+    return sigismember(&mask, SIGUSR1);
+}
+
+static int check_sigsuspend_ended_by_sigusr1(int sigsuspend_ret, int sigsuspend_errno) {
+    if (sigsuspend_ret != -1 || sigsuspend_errno != EINTR) {
+        THROW_ERROR("sigsuspend returned %d with errno %d instead of failing with EINTR",
+                    sigsuspend_ret, sigsuspend_errno);
+    }
+    if (g_num_sigusr1 != 1) {
+        THROW_ERROR("the signal handler ran %d times when sigsuspend returned instead of once",
+                    (int)g_num_sigusr1);
+    }
+    if (!g_is_sigusr2_blocked_in_handler) {
+        THROW_ERROR("SIGUSR2, which the signal action blocks, was not blocked in the handler");
+    }
+    if (!is_sigusr1_blocked()) {
+        THROW_ERROR("the original signal mask is not in effect after sigsuspend");
+    }
+    return 0;
+}
+
+int test_sigsuspend_runs_handler_of_blocked_signal() {
+    if (set_sigusr1_action() < 0) {
+        return -1;
+    }
+    sigset_t sigusr1_mask, empty_mask, old_mask;
+    sigemptyset(&sigusr1_mask);
+    sigaddset(&sigusr1_mask, SIGUSR1);
+    sigemptyset(&empty_mask);
+    if (sigprocmask(SIG_BLOCK, &sigusr1_mask, &old_mask) < 0) {
+        THROW_ERROR("failed to block SIGUSR1");
+    }
+
+    // The signal is pending when sigsuspend is called
+    g_num_sigusr1 = 0;
+    if (raise(SIGUSR1) != 0) {
+        THROW_ERROR("failed to raise SIGUSR1");
+    }
+    int ret = sigsuspend(&empty_mask);
+    if (check_sigsuspend_ended_by_sigusr1(ret, errno) < 0) {
+        return -1;
+    }
+
+    // The signal arrives while sigsuspend waits
+    g_num_sigusr1 = 0;
+    pthread_t main_thread = pthread_self();
+    pthread_t sender;
+    if (pthread_create(&sender, NULL, send_sigusr1, &main_thread) != 0) {
+        THROW_ERROR("failed to create the thread");
+    }
+    ret = sigsuspend(&empty_mask);
+    int sigsuspend_errno = errno;
+    pthread_join(sender, NULL);
+    if (check_sigsuspend_ended_by_sigusr1(ret, sigsuspend_errno) < 0) {
+        return -1;
+    }
+
+    if (sigprocmask(SIG_SETMASK, &old_mask, NULL) < 0) {
+        THROW_ERROR("failed to restore the signal mask");
+    }
+    return 0;
+}
+
+// The usual way to wait for a signal without a race: block the signal, and
+// call sigsuspend until the handler of the signal has run
+int test_sigsuspend_in_loop_until_signal_handled() {
+    if (set_sigusr1_action() < 0) {
+        return -1;
+    }
+    sigset_t sigusr1_mask, empty_mask, old_mask;
+    sigemptyset(&sigusr1_mask);
+    sigaddset(&sigusr1_mask, SIGUSR1);
+    sigemptyset(&empty_mask);
+    if (sigprocmask(SIG_BLOCK, &sigusr1_mask, &old_mask) < 0) {
+        THROW_ERROR("failed to block SIGUSR1");
+    }
+
+    g_num_sigusr1 = 0;
+    pthread_t main_thread = pthread_self();
+    pthread_t sender;
+    if (pthread_create(&sender, NULL, send_sigusr1, &main_thread) != 0) {
+        THROW_ERROR("failed to create the thread");
+    }
+    int num_calls = 0;
+    while (g_num_sigusr1 == 0 && num_calls < MAX_SIGSUSPEND_CALLS) {
+        sigsuspend(&empty_mask);
+        num_calls++;
+    }
+    pthread_join(sender, NULL);
+    if (g_num_sigusr1 != 1) {
+        THROW_ERROR("the signal handler did not run in %d calls of sigsuspend", num_calls);
+    }
+
+    if (sigprocmask(SIG_SETMASK, &old_mask, NULL) < 0) {
+        THROW_ERROR("failed to restore the signal mask");
+    }
+    return 0;
+}
+
+// ============================================================================
 // Test sigsuspend in a process that exits or that is stopped by vfork
 // ============================================================================
 
@@ -206,6 +348,26 @@ static void *suspend_forever(void *arg) {
     return NULL;
 }
 
+static volatile int g_suspend_done;
+static volatile int g_suspend_ret;
+static volatile int g_suspend_errno;
+static volatile int g_suspend_is_sigusr1_blocked;
+
+// Call sigsuspend with an empty mask while SIGUSR1 is blocked, and record how it ends
+static void *suspend_with_blocked_sigusr1(void *arg) {
+    sigset_t sigusr1_mask, empty_mask, mask;
+    sigemptyset(&sigusr1_mask);
+    sigaddset(&sigusr1_mask, SIGUSR1);
+    sigemptyset(&empty_mask);
+    pthread_sigmask(SIG_BLOCK, &sigusr1_mask, NULL);
+    g_suspend_ret = sigsuspend(&empty_mask);
+    g_suspend_errno = errno;
+    pthread_sigmask(SIG_BLOCK, NULL, &mask);
+    g_suspend_is_sigusr1_blocked = sigismember(&mask, SIGUSR1);
+    g_suspend_done = 1;
+    return NULL;
+}
+
 // The child process starts a thread that calls sigsuspend, and exits with CHILD_EXIT_STATUS
 // after the thread has had the time to call it
 static int exit_while_suspended() {
@@ -217,10 +379,12 @@ static int exit_while_suspended() {
     exit(CHILD_EXIT_STATUS);
 }
 
-// The same, but the child process calls vfork before it exits
+// The same, but the child process calls vfork before it exits. The thread blocks SIGUSR1 before
+// it calls sigsuspend, and its original mask must be in effect when sigsuspend returns.
 static int vfork_while_suspended() {
     pthread_t thread;
-    if (pthread_create(&thread, NULL, suspend_forever, NULL) != 0) {
+    if (set_sigusr1_action() < 0 ||
+            pthread_create(&thread, NULL, suspend_with_blocked_sigusr1, NULL) != 0) {
         return EXIT_FAILURE;
     }
     usleep(200 * 1000);
@@ -231,6 +395,22 @@ static int vfork_while_suspended() {
     int status = 0;
     if (pid < 0 || waitpid(pid, &status, 0) != pid || !WIFEXITED(status) ||
             WEXITSTATUS(status) != CHILD_EXIT_STATUS) {
+        return EXIT_FAILURE;
+    }
+    // The LibOS ends the sigsuspend of the thread, as it stops the thread for the vfork
+    // (no signal handler runs then). Linux does not, and SIGUSR1 ends it.
+    usleep(200 * 1000);
+    if (!g_suspend_done) {
+        pthread_kill(thread, SIGUSR1);
+    }
+    pthread_join(thread, NULL);
+    if (g_suspend_ret != -1 || g_suspend_errno != EINTR) {
+        printf("\t\tERROR: sigsuspend returned %d with errno %d instead of failing with EINTR\n",
+               g_suspend_ret, g_suspend_errno);
+        return EXIT_FAILURE;
+    }
+    if (!g_suspend_is_sigusr1_blocked) {
+        printf("\t\tERROR: the original signal mask is not in effect after sigsuspend\n");
         return EXIT_FAILURE;
     }
     exit(CHILD_EXIT_STATUS);
@@ -303,6 +483,8 @@ static test_case_t test_cases[] = {
     TEST_CASE(test_sigsuspend_eintr_with_stream_of_signals),
     TEST_CASE(test_sigsuspend_process_exits),
     TEST_CASE(test_sigsuspend_vfork),
+    TEST_CASE(test_sigsuspend_runs_handler_of_blocked_signal),
+    TEST_CASE(test_sigsuspend_in_loop_until_signal_handled),
 };
 
 int main(int argc, const char *argv[]) {
