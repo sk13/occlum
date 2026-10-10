@@ -677,7 +677,10 @@ impl SemManager {
         mut timeout: Option<Duration>,
     ) -> Result<()> {
         // Validate number of operations
-        if nsops == 0 || nsops > SEMOPM {
+        if nsops == 0 {
+            return_errno!(EINVAL, "no operations");
+        }
+        if nsops > SEMOPM {
             return_errno!(E2BIG, "too many operations");
         }
 
