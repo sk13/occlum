@@ -1115,6 +1115,67 @@ static int test_semop_one_after_the_other(void) {
     return SUCCESS;
 }
 
+/**
+ * Test 16: Number of waiting threads (GETNCNT and GETZCNT)
+ * 1. A call that does not wait, or that ends without being woken up, leaves no waiter
+ * 2. Every thread that waits for the semaphore to increase counts for GETNCNT, until it is woken up
+ * 3. Every thread that waits for the semaphore to become 0 counts for GETZCNT
+ */
+static int test_semctl_wait_counts(void) {
+    struct sembuf down = {0, -1, 0};
+    struct sembuf down_nowait = {1, -1, IPC_NOWAIT};
+    struct timespec timeout = {0, 10 * 1000 * 1000};
+    waiter_t waiters[2];
+    int semid = sem_create(3);
+    if (semid < 0) {
+        THROW_ERROR("semget() create failed (errno: %d)", errno);
+    }
+
+    // Scenario 1: Neither a timeout nor IPC_NOWAIT leaves a waiter
+    EXPECT_CALL(syscall(SYS_semtimedop, semid, &down, 1, &timeout), EAGAIN);
+    EXPECT_CALL(syscall(SYS_semop, semid, &down_nowait, 1), EAGAIN);
+    EXPECT_CALL(syscall(SYS_semctl, semid, 0, GETNCNT), 0);
+    EXPECT_CALL(syscall(SYS_semctl, semid, 1, GETNCNT), 0);
+
+    // Scenario 2: Two threads wait for semaphore 0 to increase
+    for (int i = 0; i < 2; i++) {
+        if (waiter_start(&waiters[i], semid, 0, -1) != SUCCESS) {
+            return FAIL;
+        }
+    }
+    if (wait_for_count(semid, 0, GETNCNT, 2) != SUCCESS) {
+        return FAIL;
+    }
+    EXPECT_CALL(syscall(SYS_semctl, semid, 0, GETZCNT), 0);
+    // Both can proceed
+    EXPECT_CALL(sem_op(semid, 0, 2, 0), 0);
+    for (int i = 0; i < 2; i++) {
+        if (waiter_finish(&waiters[i]) != SUCCESS) {
+            return FAIL;
+        }
+    }
+    EXPECT_CALL(syscall(SYS_semctl, semid, 0, GETNCNT), 0);
+
+    // Scenario 3: A thread waits for semaphore 2 to become 0
+    EXPECT_CALL(syscall(SYS_semctl, semid, 2, SETVAL, 1), 0);
+    if (waiter_start(&waiters[0], semid, 2, 0) != SUCCESS) {
+        return FAIL;
+    }
+    if (wait_for_count(semid, 2, GETZCNT, 1) != SUCCESS) {
+        return FAIL;
+    }
+    EXPECT_CALL(syscall(SYS_semctl, semid, 2, GETNCNT), 0);
+    EXPECT_CALL(sem_op(semid, 2, -1, 0), 0);
+    if (waiter_finish(&waiters[0]) != SUCCESS) {
+        return FAIL;
+    }
+    EXPECT_CALL(syscall(SYS_semctl, semid, 2, GETZCNT), 0);
+
+    EXPECT_CALL(syscall(SYS_semctl, semid, 0, IPC_RMID), 0);
+    INFO("Test semctl_wait_counts passed\n");
+    return SUCCESS;
+}
+
 // ============================================================================
 // Child Process Test Logic (Corresponding to parent process test types)
 // ============================================================================
@@ -1367,6 +1428,7 @@ static test_case_t test_cases[] = {
     TEST_CASE(test_sem_undo_removed_set),
     TEST_CASE(test_sem_undo_failed_ops),
     TEST_CASE(test_semop_one_after_the_other),
+    TEST_CASE(test_semctl_wait_counts),
     TEST_CASE(test_no_rmsem),
 };
 
