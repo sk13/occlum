@@ -8,6 +8,7 @@
 #include <unistd.h>
 #include <poll.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <spawn.h>
@@ -445,6 +446,175 @@ out:
 }
 
 // ============================================================================
+// Test cases: the files of a process that ends are removed from the epoll files
+// ============================================================================
+
+// A process that ends closes all its files. The epoll files that outlive it,
+// like the one that a child it spawned inherited, get to know which fds were
+// closed, and drop the files. The owner process has gaps in its fd numbers, so
+// that the number of a fd is more than its index among the open fds.
+#define OWNER_CTL_FD 50
+#define OWNER_SOCKET_FD_A 60
+#define OWNER_SOCKET_FD_B 70
+#define OWNER_GO_FD 80
+// The owner has 8 fds (0, 1, 2, the epoll file, and the four above), but not
+// this one, which is the number of a socket of the holder
+#define HOLDER_SOCKET_FD 6
+#define HOLDER_DATA 678
+
+static const char *g_self_path = "/bin/epoll";
+
+// The process that the test spawns. It makes an epoll file that monitors two
+// sockets, spawns the holder, which inherits the epoll file, waits until the
+// test tells it to end, and ends. It ends with exit, or, if die_in_vfork_child
+// is set, with a vforked child that a signal kills, which takes the process
+// with it, and nobody returns to the parent. The sockets are not inherited.
+static int owner_main(int die_in_vfork_child) {
+    int epfd = epoll_create1(0);
+    if (epfd < 0) {
+        return 1;
+    }
+    int socket_fds[] = { OWNER_SOCKET_FD_A, OWNER_SOCKET_FD_B };
+    for (int i = 0; i < 2; i++) {
+        struct epoll_event event = { .events = EPOLLIN, .data.fd = socket_fds[i] };
+        if (fcntl(socket_fds[i], F_SETFD, FD_CLOEXEC) < 0 ||
+                epoll_ctl(epfd, EPOLL_CTL_ADD, socket_fds[i], &event) < 0) {
+            return 2;
+        }
+    }
+    if (fcntl(OWNER_GO_FD, F_SETFD, FD_CLOEXEC) < 0) {
+        return 3;
+    }
+    pid_t holder;
+    char epfd_arg[16];
+    snprintf(epfd_arg, sizeof(epfd_arg), "%d", epfd);
+    char *argv[] = { (char *)g_self_path, "--holder", epfd_arg, NULL };
+    if (posix_spawn(&holder, g_self_path, NULL, NULL, argv, NULL) != 0) {
+        return 4;
+    }
+
+    char c;
+    if (read(OWNER_GO_FD, &c, 1) != 1) {
+        return 5;
+    }
+    if (die_in_vfork_child) {
+        if (vfork() == 0) {
+            kill(getpid(), SIGKILL);
+            _exit(1);
+        }
+        kill(getpid(), SIGKILL);
+        return 6;
+    }
+    return 0;
+}
+
+// The process that holds the epoll file of the owner open, until the test tells
+// it to end. It adds a socket of its own to the epoll file, which the end of the
+// owner must not remove.
+static int holder_main(int epfd) {
+    int sockets[2];
+    struct epoll_event event = { .events = EPOLLIN, .data.u32 = HOLDER_DATA };
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) < 0 ||
+            dup2(sockets[0], HOLDER_SOCKET_FD) != HOLDER_SOCKET_FD ||
+            write(sockets[1], "x", 1) != 1 ||
+            epoll_ctl(epfd, EPOLL_CTL_ADD, HOLDER_SOCKET_FD, &event) < 0) {
+        return 1;
+    }
+    char c;
+    if (write(OWNER_CTL_FD, "R", 1) != 1 || read(OWNER_CTL_FD, &c, 1) != 1 || c != 'q') {
+        return 2;
+    }
+    struct epoll_event ready;
+    c = epoll_wait(epfd, &ready, 1, 3000) == 1 && ready.data.u32 == HOLDER_DATA ? 'A' : 'F';
+    return write(OWNER_CTL_FD, &c, 1) == 1 ? 0 : 3;
+}
+
+static int check_end_of_file(int fd) {
+    char c;
+    struct pollfd pfd = { .fd = fd, .events = POLLIN };
+    return poll(&pfd, 1, 3000) == 1 && read(fd, &c, 1) == 0 ? 0 : -1;
+}
+
+static int check_closed_when_owner_ends(int die_in_vfork_child) {
+    int ctl[2], peer_a[2], peer_b[2], go[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, ctl) < 0 ||
+            socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, peer_a) < 0 ||
+            socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, peer_b) < 0 ||
+            socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, go) < 0) {
+        THROW_ERROR("failed to create the socket pairs");
+    }
+    // The owner gets the control socket, the go socket, and one end of each of the other pairs
+    posix_spawn_file_actions_t file_actions;
+    posix_spawn_file_actions_init(&file_actions);
+    posix_spawn_file_actions_adddup2(&file_actions, ctl[1], OWNER_CTL_FD);
+    posix_spawn_file_actions_adddup2(&file_actions, peer_a[0], OWNER_SOCKET_FD_A);
+    posix_spawn_file_actions_adddup2(&file_actions, peer_b[0], OWNER_SOCKET_FD_B);
+    posix_spawn_file_actions_adddup2(&file_actions, go[1], OWNER_GO_FD);
+    pid_t owner;
+    char *mode = die_in_vfork_child ? "--owner-vfork" : "--owner";
+    char *argv[] = { (char *)g_self_path, mode, NULL };
+    int spawned = posix_spawn(&owner, g_self_path, &file_actions, NULL, argv, NULL);
+    posix_spawn_file_actions_destroy(&file_actions);
+    close_files(4, ctl[1], peer_a[0], peer_b[0], go[1]);
+
+    int ret = -1;
+    if (spawned != 0) {
+        printf("\t\tERROR: failed to spawn the owner: %s\n", strerror(spawned));
+        goto out;
+    }
+    // The holder is running, and has the epoll file
+    char c = 0;
+    struct pollfd pfd = { .fd = ctl[0], .events = POLLIN };
+    if (poll(&pfd, 1, 5000) != 1 || read(ctl[0], &c, 1) != 1 || c != 'R') {
+        printf("\t\tERROR: the holder did not start\n");
+        goto out;
+    }
+    if (send(go[0], "g", 1, MSG_NOSIGNAL) != 1) {
+        printf("\t\tERROR: the owner ended before the holder started\n");
+        goto out;
+    }
+    int status = 0;
+    if (waitpid(owner, &status, 0) != owner ||
+            (die_in_vfork_child ? !WIFSIGNALED(status) || WTERMSIG(status) != SIGKILL :
+             !WIFEXITED(status) || WEXITSTATUS(status) != 0)) {
+        printf("\t\tERROR: the owner did not end as expected (status 0x%x)\n", status);
+        goto out;
+    }
+
+    // The sockets that the owner had are closed, and removed from the epoll file
+    if (check_end_of_file(peer_a[1]) < 0 || check_end_of_file(peer_b[1]) < 0) {
+        printf("\t\tERROR: the peer did not get end of file after the end of the owner\n");
+        goto out;
+    }
+
+    // The holder has been alive all the time, and held the epoll file. The socket
+    // that it added is still in the epoll file.
+    if (send(ctl[0], "q", 1, MSG_NOSIGNAL) != 1 || poll(&pfd, 1, 5000) != 1 ||
+            read(ctl[0], &c, 1) != 1) {
+        printf("\t\tERROR: the holder ended before the test did\n");
+        goto out;
+    }
+    if (c != 'A') {
+        printf("\t\tERROR: the socket of the holder is not in the epoll file any more\n");
+        goto out;
+    }
+    ret = 0;
+
+out:
+    // The holder ends when it sees that the control socket is closed
+    close_files(4, ctl[0], peer_a[1], peer_b[1], go[0]);
+    return ret;
+}
+
+int test_epoll_close_monitored_sockets_at_exit() {
+    return check_closed_when_owner_ends(0);
+}
+
+int test_epoll_close_monitored_sockets_at_death_in_vfork_child() {
+    return check_closed_when_owner_ends(1);
+}
+
+// ============================================================================
 // Test cases: epoll_wait does not leak kernel heap
 // ============================================================================
 
@@ -669,6 +839,8 @@ static test_case_t test_cases[] = {
     TEST_CASE(test_epoll_close_monitored_socket_after_closing_two_of_three_fds),
     TEST_CASE(test_epoll_close_monitored_socket_reuse_fd),
     TEST_CASE(test_epoll_close_monitored_socket_no_leak),
+    TEST_CASE(test_epoll_close_monitored_sockets_at_exit),
+    TEST_CASE(test_epoll_close_monitored_sockets_at_death_in_vfork_child),
     TEST_CASE(test_epoll_wait_idle_no_leak),
     TEST_CASE(test_epoll_wait_ready_no_leak),
     TEST_CASE(test_epoll_wait_timeout_no_leak),
@@ -676,6 +848,15 @@ static test_case_t test_cases[] = {
     TEST_CASE(test_epoll_wait_two_waiters),
 };
 
-int main() {
+int main(int argc, const char *argv[]) {
+    if (argc > 1 && strcmp(argv[1], "--owner") == 0) {
+        return owner_main(0);
+    }
+    if (argc > 1 && strcmp(argv[1], "--owner-vfork") == 0) {
+        return owner_main(1);
+    }
+    if (argc > 2 && strcmp(argv[1], "--holder") == 0) {
+        return holder_main(atoi(argv[2]));
+    }
     return test_suite_run(test_cases, ARRAY_SIZE(test_cases));
 }
