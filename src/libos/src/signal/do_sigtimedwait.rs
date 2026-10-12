@@ -1,11 +1,10 @@
 use std::sync::Weak;
 use std::time::Duration;
 
-use super::{has_signal_to_deliver, siginfo_t, SigNum, SigSet, Signal};
+use super::{siginfo_t, SigNum, SigSet, Signal};
 use crate::events::{Observer, Waiter, WaiterQueueObserver};
 use crate::prelude::*;
 use crate::process::{ProcessRef, TermStatus, ThreadRef};
-use crate::time::{do_clock_gettime, ClockId};
 
 pub fn do_sigtimedwait(interest: SigSet, timeout: Option<&Duration>) -> Result<siginfo_t> {
     debug!(
@@ -70,12 +69,6 @@ impl PendingSigWaiter {
     pub fn wait(&self, timeout: Option<&Duration>) -> Result<Box<dyn Signal>> {
         let waiter_queue = self.observer.waiter_queue();
         let waiter = Waiter::new();
-        // The wait goes on after an interrupt that is not for it (see below), for
-        // the time that is left. The deadline is computed when the thread is about
-        // to wait for the first time, so that a call that does not wait, e.g., with
-        // a zero timeout, does not read the clock.
-        let mut deadline = None;
-        let mut timeout = timeout.cloned();
         loop {
             // Try to dequeue a pending signal from the current process or thread
             if let Some(signal) =
@@ -86,7 +79,7 @@ impl PendingSigWaiter {
 
             // If the timeout is zero and if no pending signals, return immediately with an error.
             if let Some(duration) = timeout {
-                if duration == Duration::new(0, 0) {
+                if *duration == Duration::new(0, 0) {
                     return_errno!(ETIMEDOUT, "timeout");
                 }
             }
@@ -94,25 +87,18 @@ impl PendingSigWaiter {
             // Enqueue the waiter so that it can be waken up by the queue later.
             waiter_queue.reset_and_enqueue(&waiter);
 
-            // Read the clock after the waiter is enqueued, so that the time between the
-            // search for a pending signal and the enqueue is short: the queue does not
-            // wake up the waiter for a signal that arrives before it is enqueued.
-            if deadline.is_none() {
-                deadline = timeout.map(|timeout| monotonic_now() + timeout);
-            }
-
             // As there is no intersting signal to dequeue right now, let's wait
             // some time to try again later. Most likely, the waiter will keep
             // waiting until being waken up by the waiter queue, which means
             // the arrival of an interesting signal.
-            let res = waiter.wait(timeout.as_ref());
+            let res = waiter.wait(timeout);
 
-            // Do not try again if some error is encountered, except for an interrupt
-            // that is not for this call (see below). There are only two possible
-            // errors: ETIMEDOUT or EINTR.
+            // Do not try again if some error is encountered. There are only two
+            // possible errors: ETIMEDOUT or EINTR. The wait does not end with EINTR for
+            // an interrupt that is not for the thread (see must_return_eintr).
             if let Err(e) = res {
                 // The queue has not woken up the waiter, so it is still in the queue.
-                // Dequeue it as it is enqueued again if we wait again.
+                // Dequeue it as it is not used any more.
                 waiter_queue.dequeue(&waiter);
 
                 // When interrupted or timeout is reached, it is possible that the interrupting signal happens
@@ -125,18 +111,6 @@ impl PendingSigWaiter {
                     }
                 }
 
-                // The host interrupts a thread because it has a pending signal that it does
-                // not block, and the signal may have been delivered by the time the interrupt
-                // arrives (see suspend). If no signal is to be delivered to the thread and it
-                // does not have to exit or to stop, the interrupt is not for this call, and
-                // we wait again for the time that is left.
-                if e.errno() == Errno::EINTR
-                    && !self.is_forced_to_return()
-                    && !has_signal_to_deliver(&self.thread, &self.process)
-                {
-                    timeout = deadline.map(|deadline| deadline.saturating_sub(monotonic_now()));
-                    continue;
-                }
                 return Err(e);
             }
         }
@@ -145,7 +119,6 @@ impl PendingSigWaiter {
     pub fn suspend(&self) -> Result<()> {
         let waiter_queue = self.observer.waiter_queue();
         let waiter = Waiter::new();
-        // As EINTR may occur even if there are no interesting signals
         loop {
             // Try to search for an interesting signal from the current process or thread
             if has_interest_signal(&self.interest, &self.thread, &self.process) {
@@ -159,31 +132,17 @@ impl PendingSigWaiter {
             // the arrival of an interesting signal.
             let res = waiter.wait(None);
 
-            // The only possible error is EINTR, as there is no timeout.
+            // The only possible error is EINTR, as there is no timeout. The wait does not
+            // end with EINTR for an interrupt that is not for the thread, e.g., if the
+            // signal that has ended the previous sigsuspend of the thread has caused it
+            // (see must_return_eintr).
             if let Err(e) = res {
                 // The queue has not woken up the waiter, so it is still in the queue.
-                // Dequeue it as it is enqueued again if we wait again.
+                // Dequeue it as it is not used any more.
                 waiter_queue.dequeue(&waiter);
-
-                // The host interrupts a thread if it has a pending signal that it does not
-                // block, or if its process is forced to exit or the thread is forced to
-                // stop. The interrupt arrives some time after the host has looked for the
-                // pending signal, so the signal may have been delivered by then, e.g., if
-                // it has ended the previous sigsuspend of the thread and the thread has
-                // called sigsuspend again. Then the interrupt is not for this call, and we
-                // wait again, unless the thread has to exit or to stop.
-                if e.errno() == Errno::EINTR && !self.is_forced_to_return() {
-                    continue;
-                }
                 return Err(e);
             }
         }
-    }
-
-    // Returns whether the thread must leave its call when it is interrupted, even if
-    // it has no signal to deliver: its process is forced to exit or it is forced to stop.
-    fn is_forced_to_return(&self) -> bool {
-        self.process.is_forced_to_exit() || self.thread.is_forced_to_stop()
     }
 }
 
@@ -203,12 +162,6 @@ impl Drop for PendingSigWaiter {
             .notifier()
             .unregister(&weak_observer);
     }
-}
-
-fn monotonic_now() -> Duration {
-    do_clock_gettime(ClockId::CLOCK_MONOTONIC)
-        .unwrap()
-        .as_duration()
 }
 
 fn has_interest_signal(interest: &SigSet, thread: &ThreadRef, process: &ProcessRef) -> bool {

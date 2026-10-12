@@ -32,7 +32,7 @@ pub fn do_sigsuspend(mask: &SigSet) -> Result<()> {
         Ok(_) => {
             errno!(EINTR, "Wait for EINTR signal successfully")
         }
-        // The thread is interrupted because it has to exit or to stop
+        // The thread is interrupted because it has a signal to deliver, or has to exit or to stop
         Err(e) => e,
     };
 
