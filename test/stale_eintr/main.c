@@ -46,6 +46,7 @@
 #include <sys/sem.h>
 #include <sys/socket.h>
 #include <sys/syscall.h>
+#include <sys/timerfd.h>
 #include <sys/un.h>
 #include <sys/wait.h>
 #include <netinet/in.h>
@@ -154,6 +155,7 @@ enum {
     SITE_POLL,          // poll, ppoll, select, pselect6
     SITE_EPOLL,         // epoll_wait
     SITE_FUTEX,         // futex
+    SITE_HOST_FILE,     // eventfd and timerfd, which are files of the host
     NUM_SITES
 };
 
@@ -418,6 +420,29 @@ static void wake_futex(ctx_t *c) {
 }
 
 // ---- eventfd and timerfd ----
+
+static long call_eventfd_read(ctx_t *c, long timeout_us) {
+    uint64_t value;
+    long ret = read(c->fd, &value, sizeof(value));
+    if (ret > 0) {
+        c->num_consumed++;
+    }
+    return ret;
+}
+
+static int setup_timerfd(ctx_t *c) {
+    c->fd = timerfd_create(CLOCK_MONOTONIC, 0);
+    return c->fd < 0 ? -1 : 0;
+}
+
+static long call_timerfd_read(ctx_t *c, long timeout_us) {
+    struct itimerspec timer = { { 0, 0 }, us_to_timespec(timeout_us) };
+    uint64_t value;
+    if (timerfd_settime(c->fd, 0, &timer, NULL) < 0) {
+        return -1;
+    }
+    return read(c->fd, &value, sizeof(value));
+}
 
 // ---- unix and TCP sockets ----
 
@@ -728,6 +753,8 @@ static const blocking_call_t g_blocking_calls[] = {
     { "futex_wait", setup_nothing, teardown_nothing, call_futex_wait, NULL, SITE_FUTEX, F_CHILD },
     { "futex_wait_absolute", setup_nothing, teardown_nothing, call_futex_wait_absolute, NULL, SITE_FUTEX, 0 },
     { "futex_wait_woken", setup_nothing, teardown_nothing, call_futex_wait_forever, wake_futex, SITE_FUTEX, 0 },
+    { "eventfd_read", setup_eventfd, teardown_fd, call_eventfd_read, wake_eventfd_write, SITE_HOST_FILE, F_CHILD },
+    { "timerfd_read", setup_timerfd, teardown_fd, call_timerfd_read, NULL, SITE_HOST_FILE, 0 },
 };
 
 #define NUM_BLOCKING_CALLS ARRAY_SIZE(g_blocking_calls)
