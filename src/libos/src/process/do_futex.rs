@@ -1,9 +1,11 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::time::Duration;
 
+use crate::interrupt::must_return_eintr;
 use crate::prelude::*;
-use crate::time::{timespec_t, ClockId};
+use crate::time::{do_clock_gettime, timespec_t, ClockId};
 
 /// `FutexOp`, `FutexFlags`, and `futex_op_and_flags_from_u32` are helper types and
 /// functions for handling the versatile commands and arguments of futex system
@@ -444,10 +446,33 @@ impl Waiter {
         if current != self.thread {
             return Ok(());
         }
+        // The wait goes on after an interrupt that is not for the thread, see
+        // must_return_eintr. The host does not tell the time that is left of a
+        // relative timeout, so the wait goes on until the deadline. An absolute
+        // timeout is not affected.
+        let deadline = timeout
+            .filter(|timeout| !timeout.absolute_time())
+            .map(|timeout| monotonic_now() + timeout.ts().as_duration());
+        let mut timeout = *timeout;
         while self.is_woken.load(Ordering::Acquire) == false {
-            if let Err(e) = wait_event_timeout(self.thread, timeout) {
+            if let Err(e) = wait_event_timeout(self.thread, &timeout) {
+                let mut errno = e.errno();
+                if errno == Errno::EINTR && !must_return_eintr() {
+                    if let Some(deadline) = deadline {
+                        let remain = deadline.saturating_sub(monotonic_now());
+                        if remain != Duration::from_secs(0) {
+                            timeout = timeout.map(|timeout| {
+                                FutexTimeout::new(*timeout.clock_id(), remain.into(), false)
+                            });
+                            continue;
+                        }
+                        errno = Errno::ETIMEDOUT;
+                    } else {
+                        continue;
+                    }
+                }
                 self.is_woken.store(true, Ordering::Release);
-                return_errno!(e.errno(), "wait_timeout error");
+                return_errno!(errno, "wait_timeout error");
             }
         }
         Ok(())
@@ -493,6 +518,12 @@ impl PartialEq for Waiter {
 
 unsafe impl Send for Waiter {}
 unsafe impl Sync for Waiter {}
+
+fn monotonic_now() -> Duration {
+    do_clock_gettime(ClockId::CLOCK_MONOTONIC)
+        .unwrap()
+        .as_duration()
+}
 
 fn wait_event_timeout(thread: *const c_void, timeout: &Option<FutexTimeout>) -> Result<()> {
     let mut ret: c_int = 0;
