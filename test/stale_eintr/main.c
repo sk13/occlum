@@ -49,6 +49,7 @@
 #include <sys/un.h>
 #include <sys/wait.h>
 #include <netinet/in.h>
+#include <linux/futex.h>
 #include <fcntl.h>
 #include <poll.h>
 #include <pthread.h>
@@ -152,6 +153,7 @@ enum {
     SITE_NANOSLEEP,     // the sleep of the host
     SITE_POLL,          // poll, ppoll, select, pselect6
     SITE_EPOLL,         // epoll_wait
+    SITE_FUTEX,         // futex
     NUM_SITES
 };
 
@@ -392,6 +394,28 @@ static long call_epoll_wait_pipe_and_read(ctx_t *c, long timeout_us) {
 }
 
 // ---- futex ----
+
+static long call_futex_wait(ctx_t *c, long timeout_us) {
+    struct timespec ts = us_to_timespec(timeout_us);
+    return syscall(SYS_futex, &c->futex_word, FUTEX_WAIT | FUTEX_PRIVATE_FLAG, 0, &ts, NULL,
+                   0);
+}
+
+static long call_futex_wait_absolute(ctx_t *c, long timeout_us) {
+    struct timespec ts = timespec_after(CLOCK_MONOTONIC, timeout_us);
+    return syscall(SYS_futex, &c->futex_word, FUTEX_WAIT_BITSET | FUTEX_PRIVATE_FLAG, 0, &ts,
+                   NULL,
+                   FUTEX_BITSET_MATCH_ANY);
+}
+
+static long call_futex_wait_forever(ctx_t *c, long timeout_us) {
+    return syscall(SYS_futex, &c->futex_word, FUTEX_WAIT | FUTEX_PRIVATE_FLAG, 0, NULL, NULL,
+                   0);
+}
+
+static void wake_futex(ctx_t *c) {
+    syscall(SYS_futex, &c->futex_word, FUTEX_WAKE | FUTEX_PRIVATE_FLAG, 1, NULL, NULL, 0);
+}
 
 // ---- eventfd and timerfd ----
 
@@ -701,6 +725,9 @@ static const blocking_call_t g_blocking_calls[] = {
     { "poll_eventfd", setup_eventfd, teardown_fd, call_poll_eventfd_and_read, wake_eventfd_write, SITE_POLL, 0 },
     { "epoll_wait", setup_epoll_nothing, teardown_epoll, call_epoll_wait_nothing, NULL, SITE_EPOLL, F_CHILD },
     { "epoll_wait_pipe", setup_epoll_pipe, teardown_epoll_pipe, call_epoll_wait_pipe_and_read, wake_pipe_write, SITE_EPOLL, 0 },
+    { "futex_wait", setup_nothing, teardown_nothing, call_futex_wait, NULL, SITE_FUTEX, F_CHILD },
+    { "futex_wait_absolute", setup_nothing, teardown_nothing, call_futex_wait_absolute, NULL, SITE_FUTEX, 0 },
+    { "futex_wait_woken", setup_nothing, teardown_nothing, call_futex_wait_forever, wake_futex, SITE_FUTEX, 0 },
 };
 
 #define NUM_BLOCKING_CALLS ARRAY_SIZE(g_blocking_calls)
