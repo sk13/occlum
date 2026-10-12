@@ -201,11 +201,10 @@ pub fn signals_left_to_main_thread(thread: &ThreadRef, process: &ProcessRef) -> 
 /// dequeue and not discard, i.e., one with a user handler or one that terminates
 /// the process.
 ///
-/// A blocking syscall uses this to decide whether to return EINTR when the host
-/// interrupts it, which it does for threads with pending signals, see
-/// broadcast_interrupts. Signals that deliver_signal discards, e.g., SIGCHLD with
-/// the default action, do not interrupt it, as on Linux, which discards them when
-/// they are sent.
+/// A blocking syscall uses this to decide whether to return EINTR, and the interrupts
+/// of the host are for the threads that have such a signal, see broadcast_interrupts.
+/// Signals that deliver_signal discards, e.g., SIGCHLD with the default action, do not
+/// interrupt a blocking syscall, as on Linux, which discards them when they are sent.
 pub fn has_signal_to_deliver(thread: &ThreadRef, process: &ProcessRef) -> bool {
     let sig_mask = *thread.sig_mask().read().unwrap() | *thread.sig_tmp_mask().read().unwrap();
     let process_sig_mask = sig_mask | signals_left_to_main_thread(thread, process);

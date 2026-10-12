@@ -79,7 +79,7 @@ where
                 return false;
             }
             // The wait also returns when the host interrupts it with a signal, which
-            // it does for threads with pending signals, see broadcast_interrupts
+            // it does for threads with a signal to deliver, see broadcast_interrupts
             wait_event(self.thread);
         }
     }

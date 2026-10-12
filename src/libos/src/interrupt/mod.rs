@@ -36,27 +36,13 @@ pub fn do_handle_interrupt(
 }
 
 /// Broadcast interrupts to threads by sending POSIX signals.
+///
+/// A thread is interrupted only if it has a reason to leave its blocking call, see
+/// `has_reason_to_interrupt`.
 pub fn broadcast_interrupts() -> Result<usize> {
-    let should_interrupt_thread = |thread: &&ThreadRef| -> bool {
-        if thread.process().is_forced_to_exit() || thread.is_forced_to_stop() {
-            return true;
-        }
-
-        let interested = !*thread.sig_mask().read().unwrap();
-        // The process-directed signals that the thread leaves to the main thread
-        // are delivered by interrupting the main thread
-        let process_interested =
-            interested & !crate::signal::signals_left_to_main_thread(thread, &thread.process());
-        // In the nightly-2022-10-22 Rust compiler, this expression holds two nested read locks.
-        // However, in the stable-2023-12-21 Rust compiler, the expression drops the temporary variables
-        // (including: read lock guard) after each division code completes.
-        !((thread.process().sig_queues().read().unwrap().pending() & process_interested).empty())
-            || !((thread.sig_queues().read().unwrap().pending() & interested).empty())
-    };
-
     let num_signaled_threads = crate::process::table::get_all_threads()
         .iter()
-        .filter(should_interrupt_thread)
+        .filter(|thread| has_reason_to_interrupt(thread))
         .map(|thread| {
             let host_tid = {
                 let sched = thread.sched().lock().unwrap();
@@ -81,6 +67,22 @@ pub fn broadcast_interrupts() -> Result<usize> {
         .filter(|&is_signaled| is_signaled)
         .count();
     Ok(num_signaled_threads)
+}
+
+/// Returns whether the thread has to leave the blocking call that it is in, if it is in
+/// one: its process is forced to exit, or it is forced to stop (another thread of its
+/// process calls vfork), or it has a signal to deliver.
+///
+/// A signal that `deliver_signal` discards, e.g., one that is ignored, is no reason: the
+/// call has to go on, as Linux fails a blocking call with EINTR only if a signal handler
+/// has run for it. Such a signal stays in the queue of a thread that is blocked, as the
+/// thread discards it on its way back to user space, so it must not interrupt the thread
+/// at every tick until then.
+fn has_reason_to_interrupt(thread: &ThreadRef) -> bool {
+    let process = thread.process();
+    process.is_forced_to_exit()
+        || thread.is_forced_to_stop()
+        || crate::signal::has_signal_to_deliver(thread, process)
 }
 
 extern "C" {
