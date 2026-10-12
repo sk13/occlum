@@ -30,6 +30,7 @@
 //    the signal; and if pselect lets in a signal that the signal mask of the thread blocks;
 // 7. times out at its time if the interrupts that do not end it come at any time of the call: the
 //    signal is taken by another thread.
+// and that a sleep tells the time that is left only if it fails with EINTR.
 //
 // The blocking calls are in the table below. A call has a timeout, or a function that wakes it
 // up. The calls with a function are woken up by a thread every 100 us in the stream, which makes
@@ -86,6 +87,16 @@ static void sleep_us(long us) {
         ;
 }
 
+// The time that is us after now, in the given clock
+static struct timespec timespec_after(clockid_t clock, long us) {
+    struct timespec ts;
+    clock_gettime(clock, &ts);
+    long nsec = ts.tv_nsec + (us % 1000000) * 1000;
+    ts.tv_sec += us / 1000000 + nsec / 1000000000;
+    ts.tv_nsec = nsec % 1000000000;
+    return ts;
+}
+
 static int set_signal_action(int signum, void (*handler)(int)) {
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
@@ -135,6 +146,7 @@ static int create_thread(pthread_t *thread, void *(*func)(void *), void *arg) {
 enum {
     SITE_WAITER,        // the waiters of the LibOS: pipes, sockets of the LibOS, semaphores, locks
     SITE_SIGNAL,        // sigtimedwait and sigsuspend, which wait for a signal
+    SITE_NANOSLEEP,     // the sleep of the host
     NUM_SITES
 };
 
@@ -228,6 +240,21 @@ static void teardown_nothing(ctx_t *c) {
 }
 
 // ---- sleeps ----
+
+static long call_nanosleep(ctx_t *c, long timeout_us) {
+    struct timespec ts = us_to_timespec(timeout_us);
+    return syscall(SYS_nanosleep, &ts, NULL);
+}
+
+static long call_clock_nanosleep(ctx_t *c, long timeout_us) {
+    struct timespec ts = us_to_timespec(timeout_us);
+    return syscall(SYS_clock_nanosleep, CLOCK_MONOTONIC, 0, &ts, NULL);
+}
+
+static long call_clock_nanosleep_absolute(ctx_t *c, long timeout_us) {
+    struct timespec ts = timespec_after(CLOCK_REALTIME, timeout_us);
+    return syscall(SYS_clock_nanosleep, CLOCK_REALTIME, TIMER_ABSTIME, &ts, NULL);
+}
 
 // ---- poll, ppoll, select, pselect6 and epoll_wait ----
 
@@ -554,6 +581,9 @@ static const blocking_call_t g_blocking_calls[] = {
     { "sigtimedwait", setup_sigtimedwait, teardown_sigtimedwait, call_sigtimedwait, NULL, SITE_SIGNAL, F_CHILD },
     { "sigtimedwait_woken", setup_sigtimedwait, teardown_sigtimedwait, call_sigtimedwait_forever, wake_signal, SITE_SIGNAL, 0 },
     { "sigsuspend", setup_nothing, teardown_nothing, call_sigsuspend, NULL, SITE_SIGNAL, F_ANY_SIGNAL },
+    { "nanosleep", setup_nothing, teardown_nothing, call_nanosleep, NULL, SITE_NANOSLEEP, F_CHILD },
+    { "clock_nanosleep", setup_nothing, teardown_nothing, call_clock_nanosleep, NULL, SITE_NANOSLEEP, 0 },
+    { "clock_nanosleep_absolute", setup_nothing, teardown_nothing, call_clock_nanosleep_absolute, NULL, SITE_NANOSLEEP, 0 },
 };
 
 #define NUM_BLOCKING_CALLS ARRAY_SIZE(g_blocking_calls)
@@ -1759,6 +1789,80 @@ int test_pselect_with_temporary_mask() {
 // Test case: a sleep tells the time that is left only if it fails with EINTR
 // ============================================================================
 
+#define SLEEP_US            100000L
+#define REM_TOLERANCE_US    30000L
+
+static int check_sleep_rem(const char *name, int is_clock_nanosleep, long sleep_us,
+                           sender_t *sender) {
+    struct timespec req = us_to_timespec(sleep_us);
+    struct timespec rem = { 123, 456 };
+    long start_us = now_us();
+    if (sender != NULL) {
+        sender->start_us = start_us;
+    }
+    long ret = is_clock_nanosleep ?
+               syscall(SYS_clock_nanosleep, CLOCK_MONOTONIC, 0, &req, &rem) :
+               syscall(SYS_nanosleep, &req, &rem);
+    int err = errno;
+    long elapsed_us = now_us() - start_us;
+    if (ret == 0) {
+        if (rem.tv_sec != 123 || rem.tv_nsec != 456) {
+            THROW_ERROR("%s has written rem, although it has not failed: %ld s %ld ns", name,
+                        (long)rem.tv_sec, rem.tv_nsec);
+        }
+        if (elapsed_us < sleep_us - EARLY_TOLERANCE_US ||
+                elapsed_us > sleep_us + LATE_TOLERANCE_US) {
+            THROW_ERROR("%s has slept %ld ms instead of %ld ms", name, elapsed_us / 1000,
+                        sleep_us / 1000);
+        }
+        return 0;
+    }
+    if (err != EINTR) {
+        THROW_ERROR("%s has failed with errno %d", name, err);
+    }
+    long rem_us = rem.tv_sec * 1000000L + rem.tv_nsec / 1000;
+    if (rem_us + elapsed_us < sleep_us - REM_TOLERANCE_US ||
+            rem_us + elapsed_us > sleep_us + REM_TOLERANCE_US) {
+        THROW_ERROR("%s has slept %ld ms and tells that %ld ms are left of %ld ms", name,
+                    elapsed_us / 1000, rem_us / 1000, sleep_us / 1000);
+    }
+    return 1;
+}
+
+int test_sleep_rem() {
+    if (set_signal_action(SIGUSR1, count_sigusr1) < 0 ||
+            set_signal_action(SIGUSR2, SIG_IGN) < 0) {
+        THROW_ERROR("failed to set the signal actions");
+    }
+    for (int is_clock_nanosleep = 0; is_clock_nanosleep <= 1; is_clock_nanosleep++) {
+        const char *name = is_clock_nanosleep ? "clock_nanosleep" : "nanosleep";
+        // The sleep ends by itself
+        if (check_sleep_rem(name, is_clock_nanosleep, SLEEP_US, NULL) != 0) {
+            THROW_ERROR("%s has been interrupted", name);
+        }
+        // The sleep ends by itself, with an ignored signal pending
+        sender_t sender;
+        if (start_sender(&sender, g_main_worker.tid, SIGUSR2, 5000, 10000) != 0) {
+            THROW_ERROR("failed to create the thread");
+        }
+        int ret = check_sleep_rem(name, is_clock_nanosleep, SLEEP_US, &sender);
+        stop_sender(&sender);
+        if (ret != 0) {
+            THROW_ERROR("%s has been interrupted by an ignored signal", name);
+        }
+        // The sleep is interrupted by a signal that is handled
+        if (start_sender(&sender, g_main_worker.tid, SIGUSR1, SIGNAL_DELAY_US, 0) != 0) {
+            THROW_ERROR("failed to create the thread");
+        }
+        ret = check_sleep_rem(name, is_clock_nanosleep, HANDLED_TIMEOUT_US, &sender);
+        stop_sender(&sender);
+        if (ret != 1) {
+            THROW_ERROR("%s has not been interrupted by a signal that is handled", name);
+        }
+    }
+    return 0;
+}
+
 // ============================================================================
 // Test case: a TCP socket that is connected cannot connect again
 // ============================================================================
@@ -2015,6 +2119,7 @@ static test_case_t test_cases[] = {
     TEST_CASE(test_signal_after_main_thread_exits),
     TEST_CASE(test_signal_that_the_main_thread_blocks),
     TEST_CASE(test_pselect_with_temporary_mask),
+    TEST_CASE(test_sleep_rem),
     TEST_CASE(test_stale_interrupts_of_timed_calls),
 };
 
