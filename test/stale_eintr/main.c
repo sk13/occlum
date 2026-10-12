@@ -30,7 +30,7 @@
 //    the signal; and if pselect lets in a signal that the signal mask of the thread blocks;
 // 7. times out at its time if the interrupts that do not end it come at any time of the call: the
 //    signal is taken by another thread.
-// and that a sleep tells the time that is left only if it fails with EINTR.
+// and that a sleep tells the time that is left only if it fails with EINTR and that a TCP socket that is connected cannot connect again.
 //
 // The blocking calls are in the table below. A call has a timeout, or a function that wakes it
 // up. The calls with a function are woken up by a thread every 100 us in the stream, which makes
@@ -156,6 +156,7 @@ enum {
     SITE_EPOLL,         // epoll_wait
     SITE_FUTEX,         // futex
     SITE_HOST_FILE,     // eventfd and timerfd, which are files of the host
+    SITE_HOST_SOCKET,   // TCP sockets, which are sockets of the host
     NUM_SITES
 };
 
@@ -511,6 +512,11 @@ static void set_receive_timeout(int fd, long timeout_us) {
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 }
 
+static long call_accept_with_timeout(ctx_t *c, long timeout_us) {
+    set_receive_timeout(c->listener, timeout_us);
+    return call_accept(c, timeout_us);
+}
+
 static void wake_connect(ctx_t *c) {
     if (!can_produce(c)) {
         return;
@@ -755,6 +761,10 @@ static const blocking_call_t g_blocking_calls[] = {
     { "futex_wait_woken", setup_nothing, teardown_nothing, call_futex_wait_forever, wake_futex, SITE_FUTEX, 0 },
     { "eventfd_read", setup_eventfd, teardown_fd, call_eventfd_read, wake_eventfd_write, SITE_HOST_FILE, F_CHILD },
     { "timerfd_read", setup_timerfd, teardown_fd, call_timerfd_read, NULL, SITE_HOST_FILE, 0 },
+    { "tcp_recv", setup_tcp_socket_pair, teardown_tcp_socket_pair, call_recv, wake_send, SITE_HOST_SOCKET, F_CHILD },
+    { "tcp_accept", setup_tcp_listener, teardown_listener, call_accept, wake_connect, SITE_HOST_SOCKET, 0 },
+    { "tcp_recv_with_timeout", setup_tcp_socket_pair, teardown_tcp_socket_pair, call_recv_with_timeout, NULL, SITE_HOST_SOCKET, F_HOST_TIMEOUT },
+    { "tcp_accept_with_timeout", setup_tcp_listener, teardown_listener, call_accept_with_timeout, NULL, SITE_HOST_SOCKET, F_HOST_TIMEOUT },
 };
 
 #define NUM_BLOCKING_CALLS ARRAY_SIZE(g_blocking_calls)
@@ -2038,6 +2048,25 @@ int test_sleep_rem() {
 // Test case: a TCP socket that is connected cannot connect again
 // ============================================================================
 
+int test_connect_twice() {
+    ctx_t ctx;
+    ctx_init(&ctx);
+    int ret = -1;
+    if (setup_tcp_socket_pair(&ctx) < 0) {
+        printf("\t\tERROR: failed to set up the sockets: %s\n", strerror(errno));
+    } else if (connect(ctx.socks[0], (struct sockaddr *)&ctx.listener_addr,
+                       ctx.listener_addr_len) == 0) {
+        printf("\t\tERROR: a connected socket has connected again\n");
+    } else if (errno != EISCONN) {
+        printf("\t\tERROR: the second connect has failed with errno %d (%s) instead of EISCONN\n",
+               errno, strerror(errno));
+    } else {
+        ret = 0;
+    }
+    teardown_tcp_socket_pair(&ctx);
+    return ret;
+}
+
 // ============================================================================
 // Test case: the exit of a child process does not end a call or its timeout
 // ============================================================================
@@ -2291,6 +2320,7 @@ static test_case_t test_cases[] = {
     TEST_CASE(test_signal_that_the_main_thread_blocks),
     TEST_CASE(test_pselect_with_temporary_mask),
     TEST_CASE(test_sleep_rem),
+    TEST_CASE(test_connect_twice),
     TEST_CASE(test_stale_interrupts_of_timed_calls),
 };
 
