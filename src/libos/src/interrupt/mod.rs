@@ -112,10 +112,19 @@ pub fn must_return_eintr() -> bool {
 ///
 /// The host call must not have any effect if it fails with EINTR, and the closure must
 /// continue with the time that is left if the call has a timeout.
-pub fn retry_stale_interrupt<T>(mut host_call: impl FnMut() -> Result<T>) -> Result<T> {
+pub fn retry_stale_interrupt<T>(host_call: impl FnMut() -> Result<T>) -> Result<T> {
+    retry_stale_interrupt_if(|| true, host_call)
+}
+
+/// The same, but the host call is only run again if `can_retry` says so. It is asked after
+/// a stale interrupt only, and the call fails with EINTR if it says no.
+pub fn retry_stale_interrupt_if<T>(
+    can_retry: impl Fn() -> bool,
+    mut host_call: impl FnMut() -> Result<T>,
+) -> Result<T> {
     loop {
         match host_call() {
-            Err(e) if e.errno() == EINTR && !must_return_eintr() => continue,
+            Err(e) if e.errno() == EINTR && !must_return_eintr() && can_retry() => continue,
             ret => return ret,
         }
     }

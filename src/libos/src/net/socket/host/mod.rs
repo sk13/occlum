@@ -2,11 +2,13 @@ use atomic::Atomic;
 use std::any::Any;
 use std::io::{Read, Seek, SeekFrom, Write};
 
+use super::sockopt::getsockopt_by_host;
 use super::*;
 use crate::fs::{
     occlum_ocall_ioctl, AccessMode, CreationFlags, File, FileRef, HostFd, IoEvents, IoNotifier,
     IoctlRawCmd, StatusFlags,
 };
+use crate::interrupt::retry_stale_interrupt_if;
 
 use crate::process::IO_BUF_SIZE;
 
@@ -72,6 +74,26 @@ impl HostSocket {
         self.is_tcp
     }
 
+    /// Returns whether the host socket has the given timeout, SO_RCVTIMEO for receiving and
+    /// accepting, and SO_SNDTIMEO for sending and connecting.
+    ///
+    /// The host starts a timeout again when a call is made again, so a call that is made
+    /// again after an interrupt that is not for the thread may wait for much longer than the
+    /// timeout. Linux does not make a call with a timeout again after a signal either: it
+    /// fails the call with EINTR.
+    fn has_timeout(&self, optname: SockOptName) -> bool {
+        let mut timeout = [0u8; std::mem::size_of::<libc::timeval>()];
+        match getsockopt_by_host(
+            self.raw_host_fd(),
+            libc::SOL_SOCKET,
+            optname as i32,
+            &mut timeout,
+        ) {
+            Ok(len) => timeout[..len as usize].iter().any(|&byte| byte != 0),
+            Err(_) => true,
+        }
+    }
+
     pub fn listen(&self, backlog: i32) -> Result<()> {
         let ret = try_libc!(libc::ocall::listen(self.raw_host_fd() as i32, backlog));
         Ok(())
@@ -81,12 +103,17 @@ impl HostSocket {
         let mut sockaddr = SockAddr::default();
         let mut addr_len = sockaddr.len();
 
-        let raw_host_fd = try_libc!(libc::ocall::accept4(
-            self.raw_host_fd() as i32,
-            sockaddr.as_mut_ptr() as *mut _,
-            &mut addr_len as *mut _ as *mut _,
-            flags.bits()
-        )) as FileDesc;
+        let raw_host_fd = retry_stale_interrupt_if(
+            || !self.has_timeout(SockOptName::SO_RCVTIMEO_OLD),
+            || {
+                Ok(try_libc!(libc::ocall::accept4(
+                    self.raw_host_fd() as i32,
+                    sockaddr.as_mut_ptr() as *mut _,
+                    &mut addr_len as *mut _ as *mut _,
+                    flags.bits()
+                )))
+            },
+        )? as FileDesc;
         let host_fd = HostFd::new(raw_host_fd);
 
         let addr_option = if addr_len != 0 {
@@ -133,12 +160,28 @@ impl HostSocket {
             (std::ptr::null(), 0)
         };
 
-        let ret = try_libc!(libc::ocall::connect(
-            self.raw_host_fd() as i32,
-            addr_ptr,
-            addr_len as u32
-        ));
-        Ok(())
+        // The host goes on with the connection when it interrupts the wait for it.
+        // After an interrupt that is not for the thread, the thread waits for the
+        // connection with the same call, which fails with EISCONN if the connection
+        // has been established meanwhile.
+        let mut is_retried = false;
+        retry_stale_interrupt_if(
+            || !self.has_timeout(SockOptName::SO_SNDTIMEO_OLD),
+            || {
+                let ret = unsafe {
+                    libc::ocall::connect(self.raw_host_fd() as i32, addr_ptr, addr_len as u32)
+                };
+                if ret < 0 {
+                    let errno = Errno::from(unsafe { libc::errno() } as u32);
+                    if is_retried && errno == EISCONN {
+                        return Ok(());
+                    }
+                    is_retried = true;
+                    return_errno!(errno, "libc error");
+                }
+                Ok(())
+            },
+        )
     }
 
     pub fn sendto(

@@ -1,4 +1,5 @@
 use super::*;
+use crate::interrupt::retry_stale_interrupt_if;
 
 impl HostSocket {
     pub fn send(&self, buf: &[u8], flags: SendFlags) -> Result<usize> {
@@ -52,7 +53,6 @@ impl HostSocket {
         control: Option<&[u8]>,
     ) -> Result<usize> {
         // Prepare the arguments for OCall
-        let mut retval: isize = 0;
         // Host socket fd
         let host_fd = self.raw_host_fd() as i32;
         // Name
@@ -71,25 +71,31 @@ impl HostSocket {
         let raw_flags = flags.bits();
 
         // Do OCall
-        unsafe {
-            let status = occlum_ocall_sendmsg(
-                &mut retval as *mut isize,
-                host_fd,
-                msg_name,
-                msg_namelen as u32,
-                msg_iov,
-                msg_iovlen,
-                msg_control,
-                msg_controllen,
-                raw_flags,
-            );
-            assert!(status == sgx_status_t::SGX_SUCCESS);
-        }
-        let bytes_sent = if flags.contains(SendFlags::MSG_NOSIGNAL) {
-            try_libc!(retval)
-        } else {
-            try_libc_may_epipe!(retval)
-        };
+        let bytes_sent = retry_stale_interrupt_if(
+            || !self.has_timeout(SockOptName::SO_SNDTIMEO_OLD),
+            || {
+                let mut retval: isize = 0;
+                unsafe {
+                    let status = occlum_ocall_sendmsg(
+                        &mut retval as *mut isize,
+                        host_fd,
+                        msg_name,
+                        msg_namelen as u32,
+                        msg_iov,
+                        msg_iovlen,
+                        msg_control,
+                        msg_controllen,
+                        raw_flags,
+                    );
+                    assert!(status == sgx_status_t::SGX_SUCCESS);
+                }
+                Ok(if flags.contains(SendFlags::MSG_NOSIGNAL) {
+                    try_libc!(retval)
+                } else {
+                    try_libc_may_epipe!(retval)
+                })
+            },
+        )?;
 
         debug_assert!(bytes_sent >= 0);
         Ok(bytes_sent as usize)

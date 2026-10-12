@@ -1,4 +1,5 @@
 use super::*;
+use crate::interrupt::retry_stale_interrupt_if;
 use crate::untrusted::{SliceAsMutPtrAndLen, SliceAsPtrAndLen, UntrustedSliceAlloc};
 
 impl HostSocket {
@@ -77,28 +78,33 @@ impl HostSocket {
         let mut msg_flags_recvd = 0;
 
         // Do OCall
-        let retval = try_libc!({
-            let mut retval = 0_isize;
-            let status = occlum_ocall_recvmsg(
-                &mut retval as *mut isize,
-                host_fd,
-                msg_name as _,
-                msg_namelen as u32,
-                &mut msg_namelen_recvd as *mut u32,
-                msg_iov,
-                msg_iovlen,
-                msg_control,
-                msg_controllen,
-                &mut msg_controllen_recvd as *mut usize,
-                &mut msg_flags_recvd as *mut i32,
-                raw_flags,
-            );
-            assert!(status == sgx_status_t::SGX_SUCCESS);
+        let retval = retry_stale_interrupt_if(
+            || !self.has_timeout(SockOptName::SO_RCVTIMEO_OLD),
+            || {
+                Ok(try_libc!({
+                    let mut retval = 0_isize;
+                    let status = occlum_ocall_recvmsg(
+                        &mut retval as *mut isize,
+                        host_fd,
+                        msg_name as _,
+                        msg_namelen as u32,
+                        &mut msg_namelen_recvd as *mut u32,
+                        msg_iov,
+                        msg_iovlen,
+                        msg_control,
+                        msg_controllen,
+                        &mut msg_controllen_recvd as *mut usize,
+                        &mut msg_flags_recvd as *mut i32,
+                        raw_flags,
+                    );
+                    assert!(status == sgx_status_t::SGX_SUCCESS);
 
-            // TODO: what if retval < 0 but buffers are modified by the
-            // untrusted OCall? We reset the potentially tampered buffers.
-            retval
-        });
+                    // TODO: what if retval < 0 but buffers are modified by the
+                    // untrusted OCall? We reset the potentially tampered buffers.
+                    retval
+                }))
+            },
+        )?;
 
         let flags_recvd = MsgFlags::from_bits(msg_flags_recvd).unwrap();
 
