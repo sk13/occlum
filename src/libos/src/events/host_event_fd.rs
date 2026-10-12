@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use crate::interrupt::retry_stale_interrupt;
 use crate::prelude::*;
 use crate::time::{timespec_t, TIMERSLACK};
 
@@ -45,29 +46,36 @@ impl HostEventFd {
         self.poll_mut(timeout.as_mut())
     }
 
+    /// Wait until the host eventfd is written, or the timeout is up, or the thread
+    /// is interrupted. An interrupt that is not for the thread, see `must_return_eintr`,
+    /// does not end the wait.
     pub fn poll_mut(&self, timeout: Option<&mut Duration>) -> Result<()> {
         match timeout {
-            None => ocall_eventfd_poll(self.host_fd, std::ptr::null_mut()),
+            None => {
+                retry_stale_interrupt(|| ocall_eventfd_poll(self.host_fd, std::ptr::null_mut()))
+            }
             Some(timeout) => {
                 const ZERO: Duration = Duration::from_secs(0);
                 if *timeout == ZERO {
                     return_errno!(ETIMEDOUT, "should return immediately");
                 }
 
-                let mut remain_c = timespec_t::from(*timeout);
-                let ret = ocall_eventfd_poll(self.host_fd, &mut remain_c);
+                retry_stale_interrupt(|| {
+                    let mut remain_c = timespec_t::from(*timeout);
+                    let ret = ocall_eventfd_poll(self.host_fd, &mut remain_c);
 
-                let remain = remain_c.as_duration();
-                assert!(remain <= *timeout + TIMERSLACK.to_duration());
-                *timeout = remain;
+                    let remain = remain_c.as_duration();
+                    assert!(remain <= *timeout + TIMERSLACK.to_duration());
+                    *timeout = remain;
 
-                // Poll syscall does not treat timeout as error. So we need
-                // to distinguish the case by ourselves.
-                if *timeout == ZERO {
-                    return_errno!(ETIMEDOUT, "time is up");
-                }
+                    // Poll syscall does not treat timeout as error. So we need
+                    // to distinguish the case by ourselves.
+                    if *timeout == ZERO {
+                        return_errno!(ETIMEDOUT, "time is up");
+                    }
 
-                ret
+                    ret
+                })
             }
         }
     }

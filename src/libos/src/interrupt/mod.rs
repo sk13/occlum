@@ -89,6 +89,38 @@ extern "C" {
     fn occlum_ocall_tkill(retval: &mut i32, host_tid: pid_t, signum: i32) -> sgx_status_t;
 }
 
+/// Returns whether the current thread must leave a blocking call that the host has
+/// interrupted with EINTR, i.e., whether the interrupt is for the thread.
+///
+/// The interrupt of a thread arrives some time after `broadcast_interrupts` has found a
+/// reason for it, and the reason may be gone by then: a signal that the thread had
+/// pending may have been delivered meanwhile, e.g., the one that has ended the previous
+/// call of the thread, or another thread of the process may have taken it. Such a stale
+/// interrupt ends the next blocking call of the thread, which must not fail with EINTR,
+/// as Linux fails a call with EINTR only if a signal handler has run for it. So the
+/// thread asks again whether it has a reason to leave its call, see
+/// `has_reason_to_interrupt`. If not, the call has to go on.
+///
+/// This must be called after the interrupt, as the thread mask may be replaced during
+/// a call, e.g., by sigsuspend, and none of the locks that it takes can be held.
+pub fn must_return_eintr() -> bool {
+    has_reason_to_interrupt(&current!())
+}
+
+/// Runs a blocking call of the host, and runs it again as long as it fails with EINTR
+/// because of a stale interrupt, see `must_return_eintr`.
+///
+/// The host call must not have any effect if it fails with EINTR, and the closure must
+/// continue with the time that is left if the call has a timeout.
+pub fn retry_stale_interrupt<T>(mut host_call: impl FnMut() -> Result<T>) -> Result<T> {
+    loop {
+        match host_call() {
+            Err(e) if e.errno() == EINTR && !must_return_eintr() => continue,
+            ret => return ret,
+        }
+    }
+}
+
 pub fn enable_current_thread() {
     // Interruptible range
     let (addr, size) = {
