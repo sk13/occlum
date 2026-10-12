@@ -1,5 +1,6 @@
 use super::*;
 
+use crate::interrupt::retry_stale_interrupt;
 use crate::time::{clockid_t, itimerspec_t, timespec_t, ClockId};
 use atomic::{Atomic, Ordering};
 use std::time::Duration;
@@ -106,11 +107,13 @@ impl File for TimerFile {
     fn read(&self, buf: &mut [u8]) -> Result<usize> {
         let (buf_ptr, buf_len) = buf.as_mut().as_mut_ptr_and_len();
 
-        let ret = try_libc!(libc::ocall::read(
-            self.host_fd.to_raw() as i32,
-            buf_ptr as *mut c_void,
-            buf_len
-        )) as usize;
+        let ret = retry_stale_interrupt(|| {
+            Ok(try_libc!(libc::ocall::read(
+                self.host_fd.to_raw() as i32,
+                buf_ptr as *mut c_void,
+                buf_len
+            )))
+        })? as usize;
         assert!(ret <= buf.len());
         Ok(ret)
     }

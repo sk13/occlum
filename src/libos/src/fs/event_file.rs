@@ -1,5 +1,6 @@
 use super::*;
 
+use crate::interrupt::retry_stale_interrupt;
 use atomic::{Atomic, Ordering};
 
 /// Native Linux eventfd
@@ -53,22 +54,26 @@ impl File for EventFile {
     fn read(&self, buf: &mut [u8]) -> Result<usize> {
         let (buf_ptr, buf_len) = buf.as_mut().as_mut_ptr_and_len();
 
-        let ret = try_libc!(libc::ocall::read(
-            self.host_fd.to_raw() as i32,
-            buf_ptr as *mut c_void,
-            buf_len
-        )) as usize;
+        let ret = retry_stale_interrupt(|| {
+            Ok(try_libc!(libc::ocall::read(
+                self.host_fd.to_raw() as i32,
+                buf_ptr as *mut c_void,
+                buf_len
+            )))
+        })? as usize;
         assert!(ret <= buf.len());
         Ok(ret)
     }
 
     fn write(&self, buf: &[u8]) -> Result<usize> {
         let (buf_ptr, buf_len) = buf.as_ptr_and_len();
-        let ret = try_libc!(libc::ocall::write(
-            self.host_fd.to_raw() as i32,
-            buf_ptr as *const c_void,
-            buf_len
-        )) as usize;
+        let ret = retry_stale_interrupt(|| {
+            Ok(try_libc!(libc::ocall::write(
+                self.host_fd.to_raw() as i32,
+                buf_ptr as *const c_void,
+                buf_len
+            )))
+        })? as usize;
         assert!(ret <= buf.len());
         Ok(ret)
     }
