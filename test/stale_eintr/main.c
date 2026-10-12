@@ -5,26 +5,36 @@
 // threads that have a signal to deliver, and the threads that have to exit or to stop (their
 // process exits, or another thread of their process calls vfork). Linux fails a blocking call
 // with EINTR only if a signal handler has run during it, so an interrupt of the host must not
-// end a call if the signal is never delivered, e.g., if it is ignored. Such a signal stays in
-// the queue of a thread that is blocked, so the thread would be interrupted at every tick for as
-// long as it is blocked.
+// end a call in two cases:
+// - The signal is never delivered, e.g., it is ignored. It stays in the queue of a thread that
+//   is blocked, so the thread would be interrupted at every tick for as long as it is blocked.
+// - The interrupt arrives some time after the LibOS has found the reason for it, and the reason
+//   may be gone by then: the thread may have run the handler of the signal, and may be blocked
+//   in its next call, which the interrupt ends. Or another thread has taken the signal.
 //
 // usage: stale_eintr [-v] [test case name]...
 // -v prints the result of each call, and the names select the test cases to run.
 //
 // The test cases below check that a blocking call
-// 1. is not interrupted by a signal that is ignored, and times out when its timeout is up, not
+// 1. does not fail with EINTR unless a handler has run during it, in a stream of signals that
+//    a thread handles, with a lot of interrupts that are late, and that the stream interrupts
+//    calls, so that the test cannot pass because there are no interrupts;
+// 2. is not interrupted by a signal that is ignored, and times out when its timeout is up, not
 //    earlier and not later, also if the signal is sent to the process, or by the exit of a
 //    child process;
-// 2. is not interrupted by a signal that the thread blocks;
-// 3. still fails with EINTR if a handler runs;
-// 4. ends if its process exits, if its process is killed, and if another thread of its process
+// 3. is not interrupted by a signal that the thread blocks;
+// 4. still fails with EINTR if a handler runs;
+// 5. ends if its process exits, if its process is killed, and if another thread of its process
 //    calls vfork, and if it is called by the child of vfork;
-// 5. ends if a signal that is sent to the process is for it: the main thread has exited, or blocks
-//    the signal; and if pselect lets in a signal that the signal mask of the thread blocks.
+// 6. ends if a signal that is sent to the process is for it: the main thread has exited, or blocks
+//    the signal; and if pselect lets in a signal that the signal mask of the thread blocks;
+// 7. times out at its time if the interrupts that do not end it come at any time of the call: the
+//    signal is taken by another thread.
 //
 // The blocking calls are in the table below. A call has a timeout, or a function that wakes it
-// up.
+// up. The calls with a function are woken up by a thread every 100 us in the stream, which makes
+// them short: the interrupt of the host is the more likely to be late for a call that has just
+// begun.
 
 #define _GNU_SOURCE
 #include <sys/file.h>
@@ -870,6 +880,229 @@ static int run_checks_in_main_thread(check_t check, int skipped_flags,
 // Test case: the call does not fail with EINTR if no handler has run
 // ============================================================================
 
+// A thread sends the main thread a signal every 200 us, and two threads call
+// sched_setaffinity on it. A child process calls vfork in a loop: vfork stops the other threads of
+// the process, so the host interrupts them at once, and it interrupts the threads that have a
+// signal to deliver, wherever they are. That is thousands of interrupts a second instead of 40,
+// and each one may be late.
+#define SIGNAL_INTERVAL_US      200
+#define NUM_AFFINITY_THREADS    2
+#define INTERRUPTER_LIMIT_US    60000000L
+
+static volatile int g_is_stream_stopped;
+static int g_stream_signum;
+static pid_t g_stream_tid;
+static int g_is_stream_process_directed;
+static long g_stream_interval_us = SIGNAL_INTERVAL_US;
+// If the stream has a gate, it sends signals only until gate_us after gate_start_us, which a thread
+// sets before a call, and clears after it
+static volatile long g_stream_gate_start_us;
+static long g_stream_gate_us;
+static pthread_t g_stream_threads[1 + NUM_AFFINITY_THREADS];
+static int g_num_stream_threads;
+static pid_t g_interrupter_pid;
+
+static void *send_stream_of_signals(void *arg) {
+    block_all_signals();
+    while (!g_is_stream_stopped) {
+        sleep_us(g_stream_interval_us);
+        if (g_stream_gate_us != 0 &&
+                (g_stream_gate_start_us == 0 ||
+                 now_us() - g_stream_gate_start_us >= g_stream_gate_us)) {
+            continue;
+        }
+        if (g_is_stream_process_directed) {
+            kill(getpid(), g_stream_signum);
+        } else {
+            syscall(SYS_tgkill, getpid(), g_stream_tid, g_stream_signum);
+        }
+    }
+    return NULL;
+}
+
+static void *set_affinity(void *arg) {
+    block_all_signals();
+    cpu_set_t cpu_set;
+    if (sched_getaffinity(g_stream_tid, sizeof(cpu_set), &cpu_set) < 0) {
+        return NULL;
+    }
+    while (!g_is_stream_stopped) {
+        sched_setaffinity(g_stream_tid, sizeof(cpu_set), &cpu_set);
+    }
+    return NULL;
+}
+
+static void *sleep_for_ever(void *arg) {
+    for (;;) {
+        sleep(1000);
+    }
+    return NULL;
+}
+
+// The process that interrupts the threads of the other processes: it has a thread that is stopped
+// for each vfork. It ends after some time, or when its parent has ended.
+static int child_interrupter(void) {
+    pthread_t thread;
+    pid_t parent = getppid();
+    if (create_thread(&thread, sleep_for_ever, NULL) != 0) {
+        return EXIT_FAILURE;
+    }
+    long start_us = now_us();
+    for (unsigned long i = 0; now_us() - start_us < INTERRUPTER_LIMIT_US; i++) {
+        pid_t pid = vfork();
+        if (pid == 0) {
+            _exit(0);
+        }
+        if (pid < 0 || waitpid(pid, NULL, 0) != pid) {
+            return EXIT_FAILURE;
+        }
+        if (i % 256 == 0 && getppid() != parent) {
+            break;
+        }
+    }
+    return 0;
+}
+
+static int start_stream(void) {
+    char *argv[] = { (char *)g_self_path, "--interrupter", NULL };
+    g_is_stream_stopped = 0;
+    g_num_stream_threads = 0;
+    if (posix_spawn(&g_interrupter_pid, g_self_path, NULL, NULL, argv, environ) != 0) {
+        g_interrupter_pid = 0;
+        return -1;
+    }
+    if (create_thread(&g_stream_threads[0], send_stream_of_signals, NULL) != 0) {
+        return -1;
+    }
+    g_num_stream_threads++;
+    for (int i = 0; i < NUM_AFFINITY_THREADS; i++) {
+        if (create_thread(&g_stream_threads[g_num_stream_threads], set_affinity,
+                          NULL) != 0) {
+            return -1;
+        }
+        g_num_stream_threads++;
+    }
+    return 0;
+}
+
+static void stop_stream(void) {
+    g_is_stream_stopped = 1;
+    for (int i = 0; i < g_num_stream_threads; i++) {
+        pthread_join(g_stream_threads[i], NULL);
+    }
+    g_num_stream_threads = 0;
+    if (g_interrupter_pid > 0) {
+        kill(g_interrupter_pid, SIGKILL);
+        waitpid(g_interrupter_pid, NULL, 0);
+        g_interrupter_pid = 0;
+    }
+}
+
+// Every LONG_CALL_PERIOD_US, a call is long: it is not woken up, or has a long timeout, so that
+// the host interrupts it for the signal that is pending, and a handler runs. The number of these
+// interrupts tells that the stream does interrupt calls.
+#define STREAM_PER_CALL_US          100000L
+// A call goes on until it has been called often enough, but not for longer than this
+#define STREAM_MAX_PER_CALL_US      1500000L
+#define LONG_CALL_PERIOD_US         40000L
+#define SHORT_TIMEOUT_US            100
+#define LONG_TIMEOUT_US             100000L
+#define MIN_NUM_CALLS               40
+#define MIN_NUM_INTERRUPTS          3
+
+static int check_stream_of_signals(worker_t *w, const blocking_call_t *call) {
+    ctx_t ctx;
+    ctx_init(&ctx);
+    // The signals of the stream could interrupt the setup of the call (e.g., the connect of a
+    // TCP socket), which is not what is tested, so the thread blocks them meanwhile
+    sigset_t stream_signal;
+    sigemptyset(&stream_signal);
+    sigaddset(&stream_signal, g_stream_signum);
+    pthread_sigmask(SIG_BLOCK, &stream_signal, NULL);
+    int setup_ret = call->setup(&ctx);
+    int setup_errno = errno;
+    pthread_sigmask(SIG_UNBLOCK, &stream_signal, NULL);
+    if (setup_ret < 0) {
+        printf("\t\tERROR: failed to set up %s: %s\n", call->name, strerror(setup_errno));
+        call->teardown(&ctx);
+        return -1;
+    }
+    waker_t waker;
+    start_waker(&waker, call, &ctx, 0);
+
+    tally_t tally;
+    memset(&tally, 0, sizeof(tally));
+    unsigned long num_alarms = w->num_alarms;
+    long start_us = now_us();
+    long last_long_call_us = start_us;
+    do {
+        int is_long_call = now_us() - last_long_call_us >= LONG_CALL_PERIOD_US;
+        waker.is_paused = is_long_call;
+        run_call(w, call, &ctx, is_long_call ? LONG_TIMEOUT_US : SHORT_TIMEOUT_US, &tally);
+        waker.is_paused = 0;
+        if (is_long_call) {
+            last_long_call_us = now_us();
+        }
+    } while (now_us() - start_us < STREAM_PER_CALL_US ||
+             (tally.num_calls < MIN_NUM_CALLS && now_us() - start_us < STREAM_MAX_PER_CALL_US));
+
+    // The host interrupts a call that nothing wakes up. A LibOS that is slow spends little time
+    // in the calls of the host, so the calls above may have missed the interrupts.
+    stop_waker(&waker);
+    for (int i = 0; i < MAX_PENDING_EVENTS + MIN_NUM_INTERRUPTS &&
+            tally.num_eintr_with_handler < MIN_NUM_INTERRUPTS; i++) {
+        run_call(w, call, &ctx, LONG_TIMEOUT_US, &tally);
+    }
+    call->teardown(&ctx);
+
+    int ret = 0;
+    if (tally.num_eintr_without_handler != 0) {
+        printf("\t\tERROR: %s failed with EINTR without a signal handler that has run %lu times in %lu calls\n",
+               call->name, tally.num_eintr_without_handler, tally.num_calls);
+        ret = -1;
+    }
+    if (tally.num_other_errors != 0) {
+        printf("\t\tERROR: %s failed %lu times with errno %d (%s) in %lu calls\n", call->name,
+               tally.num_other_errors, tally.other_errno, strerror(tally.other_errno), tally.num_calls);
+        ret = -1;
+    }
+    if (w->num_alarms != num_alarms) {
+        printf("\t\tERROR: %s has not ended in %ld ms\n", call->name, WATCHDOG_LIMIT_US / 1000);
+        ret = -1;
+    }
+    if (tally.num_calls < MIN_NUM_CALLS ||
+            tally.num_eintr_with_handler < MIN_NUM_INTERRUPTS) {
+        printf("\t\tERROR: %s was called only %lu times, and %lu of them were interrupted by a signal\n",
+               call->name, tally.num_calls, tally.num_eintr_with_handler);
+        ret = -1;
+    }
+    if (g_is_verbose) {
+        printf("\t\t%-24s %6lu calls, %4lu timeouts, %4lu EINTR with a handler, %lu EINTR without\n",
+               call->name, tally.num_calls, tally.num_timeouts, tally.num_eintr_with_handler,
+               tally.num_eintr_without_handler);
+    }
+    return ret;
+}
+
+int test_stream_of_signals() {
+    g_stream_signum = SIGUSR2;
+    g_stream_tid = g_main_worker.tid;
+    g_is_stream_process_directed = 0;
+    g_stream_interval_us = SIGNAL_INTERVAL_US;
+    g_stream_gate_us = 0;
+    if (set_signal_action(g_stream_signum, count_handled_signal) < 0) {
+        THROW_ERROR("failed to set the signal action");
+    }
+    int ret = -1;
+    if (start_stream() == 0) {
+        ret = run_checks_in_main_thread(check_stream_of_signals, F_HOST_TIMEOUT, 0);
+    } else {
+        printf("\t\tERROR: failed to start the stream of signals\n");
+    }
+    stop_stream();
+    return ret;
+}
+
 // ============================================================================
 // Test case: a signal that is ignored does not interrupt the call
 // ============================================================================
@@ -1583,11 +1816,193 @@ int test_child_exit_during_receive_timeout() {
 // Test case: a stale interrupt does not end a call or change its time
 // ============================================================================
 
+// A signal that is sent to the process is delivered to a thread that does not block it, if the
+// main thread blocks it. The host interrupts the threads that can take the signal, and the one that
+// does not take it is interrupted for nothing. That is the case of the thread X, which runs the
+// calls, when the thread Y takes the signal: all interrupts for it are stale or for a signal that
+// is handled in Y, and it has to wait for the time that is left of its timeout. The signal is
+// sent in the first part of the call only: the last interrupt is far from the end of the call,
+// so a call that waits for its whole timeout again after it ends long after its time.
+#define TIMED_CALL_US           40000L
+#define TIMED_SIGNALS_US        20000L
+#define TIMED_TOLERANCE_US      8000L
+#define TIMED_SIGNAL_INTERVAL_US    5000L
+#define TIMED_TIME_PER_CALL_US  400000L
+#define TIMED_TIME_OF_HOST_TIMEOUT_US   100000L
+#define TIMED_NUM_CALLS         2
+
+static volatile unsigned long g_num_process_handled;
+static volatile int g_timed_thread_tid;
+static int g_timed_result;
+
+static void count_process_signal(int signum) {
+    __sync_fetch_and_add(&g_num_process_handled, 1);
+}
+
+static void unblock_signal(int signum) {
+    sigset_t set;
+    sigemptyset(&set);
+    sigaddset(&set, signum);
+    pthread_sigmask(SIG_UNBLOCK, &set, NULL);
+}
+
+static void *take_signals(void *arg) {
+    block_all_signals();
+    unblock_signal(SIGUSR1);
+    while (!g_is_stream_stopped) {
+        sleep_us(20);
+    }
+    return NULL;
+}
+
+static int is_timed_call(const blocking_call_t *call) {
+    return call->wake == NULL && !(call->flags & F_ANY_SIGNAL);
+}
+
+static int check_timed_call(worker_t *w, const blocking_call_t *call) {
+    ctx_t ctx;
+    ctx_init(&ctx);
+    if (call->setup(&ctx) < 0) {
+        printf("\t\tERROR: failed to set up %s: %s\n", call->name, strerror(errno));
+        call->teardown(&ctx);
+        return -1;
+    }
+    int num_ended = 0, num_interrupted = 0, ret = 0;
+    long max_over_us = -1000000;
+    long start_us = now_us();
+    long time_us = (call->flags & F_HOST_TIMEOUT) ? TIMED_TIME_OF_HOST_TIMEOUT_US :
+                   TIMED_TIME_PER_CALL_US;
+    while (num_ended < TIMED_NUM_CALLS && now_us() - start_us < time_us && ret == 0) {
+        unsigned long num_handled = g_num_process_handled;
+        unsigned long num_alarms = w->num_alarms;
+        errno = 0;
+        long call_start_us = now_us();
+        w->call_start_us = call_start_us;
+        w->in_call = 1;
+        g_stream_gate_start_us = call_start_us;
+        long call_ret = call->call(&ctx, TIMED_CALL_US);
+        int err = errno;
+        g_stream_gate_start_us = 0;
+        w->in_call = 0;
+        long elapsed_us = now_us() - call_start_us;
+        if (w->num_alarms != num_alarms) {
+            printf("\t\tERROR: %s has not ended in %ld ms\n", call->name,
+                   WATCHDOG_LIMIT_US / 1000);
+            ret = -1;
+        } else if (call_ret < 0 && err == EINTR) {
+            // A handler has run in the process, in the thread Y, which the thread X may not
+            // see yet. A call with a timeout of the host fails with EINTR for any stale
+            // interrupt, see F_HOST_TIMEOUT.
+            for (int i = 0; i < 200 && g_num_process_handled == num_handled; i++) {
+                usleep(100);
+            }
+            if (g_num_process_handled == num_handled && !(call->flags & F_HOST_TIMEOUT)) {
+                printf("\t\tERROR: %s failed with EINTR after %ld us, but no handler has run\n",
+                       call->name, elapsed_us);
+                ret = -1;
+            }
+            num_interrupted++;
+        } else if (call_ret < 0 && err != ETIMEDOUT && err != EAGAIN) {
+            printf("\t\tERROR: %s failed with errno %d (%s)\n", call->name, err, strerror(err));
+            ret = -1;
+        } else {
+            if (elapsed_us - TIMED_CALL_US > max_over_us) {
+                max_over_us = elapsed_us - TIMED_CALL_US;
+            }
+            if (elapsed_us < TIMED_CALL_US - EARLY_TOLERANCE_US ||
+                    elapsed_us > TIMED_CALL_US + TIMED_TOLERANCE_US) {
+                printf("\t\tERROR: %s has ended after %ld us instead of %ld us\n", call->name,
+                       elapsed_us, TIMED_CALL_US);
+                ret = -1;
+            }
+            num_ended++;
+        }
+    }
+    call->teardown(&ctx);
+    if (ret == 0 && num_ended == 0 && !(call->flags & F_HOST_TIMEOUT)) {
+        printf("\t\tERROR: %s has been interrupted %d times, and has not ended by its timeout\n",
+               call->name, num_interrupted);
+        ret = -1;
+    }
+    if (g_is_verbose) {
+        printf("\t\t%-24s ended by its timeout %d times (at most %ld us late), and %d calls were interrupted\n",
+               call->name, num_ended, max_over_us, num_interrupted);
+    }
+    return ret;
+}
+
+static void *run_timed_calls(void *arg) {
+    worker_t *w = arg;
+    block_all_signals();
+    unblock_signal(SIGUSR1);
+    unblock_signal(SIGALRM);
+    t_worker = w;
+    w->tid = gettid_();
+    g_timed_thread_tid = w->tid;
+    while (!g_is_start_released) {
+        usleep(200);
+    }
+    g_timed_result = 0;
+    for (size_t i = 0; i < NUM_BLOCKING_CALLS; i++) {
+        if (is_timed_call(&g_blocking_calls[i])) {
+            g_timed_result |= check_timed_call(w, &g_blocking_calls[i]);
+        }
+    }
+    return NULL;
+}
+
+int test_stale_interrupts_of_timed_calls() {
+    g_stream_signum = SIGUSR1;
+    g_is_stream_process_directed = 1;
+    g_stream_interval_us = TIMED_SIGNAL_INTERVAL_US;
+    g_stream_gate_us = TIMED_SIGNALS_US;
+    if (set_signal_action(SIGUSR1, count_process_signal) < 0) {
+        THROW_ERROR("failed to set the signal action");
+    }
+    // The main thread blocks the signal, and the thread that sends it
+    sigset_t sigusr1_mask, old_mask;
+    sigemptyset(&sigusr1_mask);
+    sigaddset(&sigusr1_mask, SIGUSR1);
+    pthread_sigmask(SIG_BLOCK, &sigusr1_mask, &old_mask);
+    pthread_t taker, runner;
+    g_is_start_released = 0;
+    g_timed_thread_tid = 0;
+    g_is_stream_stopped = 0;
+    int ret = -1;
+    if (create_thread(&taker, take_signals, NULL) != 0) {
+        pthread_sigmask(SIG_SETMASK, &old_mask, NULL);
+        THROW_ERROR("failed to create the thread");
+    }
+    // The watchdog ends a call that does not end
+    memset(&g_workers[0], 0, sizeof(g_workers[0]));
+    g_num_workers = 1;
+    if (create_thread(&runner, run_timed_calls, &g_workers[0]) == 0) {
+        while (g_timed_thread_tid == 0) {
+            usleep(200);
+        }
+        g_stream_tid = g_timed_thread_tid;
+        if (start_stream() == 0) {
+            g_is_start_released = 1;
+            pthread_join(runner, NULL);
+            ret = g_timed_result;
+        } else {
+            g_is_start_released = 1;
+            pthread_join(runner, NULL);
+        }
+        stop_stream();
+    }
+    g_is_stream_stopped = 1;
+    pthread_join(taker, NULL);
+    pthread_sigmask(SIG_SETMASK, &old_mask, NULL);
+    return ret == 0 ? 0 : -1;
+}
+
 // ============================================================================
 // Test suite main
 // ============================================================================
 
 static test_case_t test_cases[] = {
+    TEST_CASE(test_stream_of_signals),
     TEST_CASE(test_ignored_signal),
     TEST_CASE(test_signal_that_is_ignored_by_default),
     TEST_CASE(test_blocked_signal),
@@ -1600,6 +2015,7 @@ static test_case_t test_cases[] = {
     TEST_CASE(test_signal_after_main_thread_exits),
     TEST_CASE(test_signal_that_the_main_thread_blocks),
     TEST_CASE(test_pselect_with_temporary_mask),
+    TEST_CASE(test_stale_interrupts_of_timed_calls),
 };
 
 int main(int argc, const char *argv[]) {
@@ -1613,6 +2029,9 @@ int main(int argc, const char *argv[]) {
 #endif
     g_main_worker.tid = gettid_();
     t_worker = &g_main_worker;
+    if (argc > 1 && strcmp(argv[1], "--interrupter") == 0) {
+        return child_interrupter();
+    }
     if (argc > 1 && strcmp(argv[1], "--exit-soon") == 0) {
         return child_exit_soon();
     }
