@@ -25,7 +25,7 @@ mod waiter_queue;
 mod waiter_queue_observer;
 
 pub use self::event::{Event, EventFilter};
-pub use self::host_event_fd::HostEventFd;
+pub use self::host_event_fd::{poll_with_eventfd, HostEventFd};
 pub use self::notifier::Notifier;
 pub use self::observer::Observer;
 pub use self::poller::{Pollee, Poller};

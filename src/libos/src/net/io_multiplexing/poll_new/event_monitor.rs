@@ -1,11 +1,9 @@
-use std::ptr;
 use std::sync::Weak;
 use std::time::Duration;
 
-use crate::events::{Observer, Waiter, WaiterQueueObserver};
+use crate::events::{poll_with_eventfd, Observer, Waiter, WaiterQueueObserver};
 use crate::fs::IoEvents;
 use crate::prelude::*;
-use crate::time::{timespec_t, TIMERSLACK};
 
 /// Monitor events that happen on a set of interesting files.
 ///
@@ -106,44 +104,9 @@ impl EventMonitor {
     }
 
     fn do_poll_ocall(&mut self, timeout: &mut Option<&mut Duration>) -> Result<usize> {
-        extern "C" {
-            fn occlum_ocall_poll_with_eventfd(
-                ret: *mut i32,
-                fds: *mut libc::pollfd,
-                nfds: u32,
-                timeout: *mut timespec_t,
-                eventfd_idx: i32,
-            ) -> sgx_status_t;
-        }
-
         // Do poll syscall via OCall
-        let num_events = try_libc!({
-            let mut remain_c = timeout.as_ref().map(|timeout| timespec_t::from(**timeout));
-            let remain_c_ptr = remain_c.as_mut().map_or(ptr::null_mut(), |mut_ref| mut_ref);
-
-            let host_eventfd_idx = self.ocall_pollfds.len() - 1;
-
-            let mut ret = 0;
-            let status = unsafe {
-                occlum_ocall_poll_with_eventfd(
-                    &mut ret,
-                    (&mut self.ocall_pollfds[..]).as_mut_ptr(),
-                    self.ocall_pollfds.len() as u32,
-                    remain_c_ptr,
-                    host_eventfd_idx as i32,
-                )
-            };
-            assert!(status == sgx_status_t::SGX_SUCCESS);
-
-            if let Some(timeout) = timeout.as_mut() {
-                let remain = remain_c.unwrap().as_duration();
-                assert!(remain <= **timeout + TIMERSLACK.to_duration());
-                **timeout = remain;
-            }
-
-            ret
-        }) as usize;
-        Ok(num_events)
+        let host_eventfd_idx = self.ocall_pollfds.len() - 1;
+        poll_with_eventfd(&mut self.ocall_pollfds, timeout, host_eventfd_idx)
     }
 
     fn update_host_file_events(&self) {
