@@ -38,8 +38,11 @@
 // begun.
 
 #define _GNU_SOURCE
+#include <sys/epoll.h>
+#include <sys/eventfd.h>
 #include <sys/file.h>
 #include <sys/ipc.h>
+#include <sys/select.h>
 #include <sys/sem.h>
 #include <sys/socket.h>
 #include <sys/syscall.h>
@@ -147,6 +150,8 @@ enum {
     SITE_WAITER,        // the waiters of the LibOS: pipes, sockets of the LibOS, semaphores, locks
     SITE_SIGNAL,        // sigtimedwait and sigsuspend, which wait for a signal
     SITE_NANOSLEEP,     // the sleep of the host
+    SITE_POLL,          // poll, ppoll, select, pselect6
+    SITE_EPOLL,         // epoll_wait
     NUM_SITES
 };
 
@@ -267,6 +272,46 @@ static void teardown_pipe(ctx_t *c) {
     close_fd(&c->pipe_fds[1]);
 }
 
+static int timeout_us_to_ms(long timeout_us) {
+    return (timeout_us + 999) / 1000;
+}
+
+static long call_poll_nothing(ctx_t *c, long timeout_us) {
+    // The pointer is not NULL, which a debug build of the LibOS does not accept (the check of
+    // slice::from_raw_parts_mut in do_poll_common panics), although the number of files is 0
+    struct pollfd pollfd;
+    return syscall(SYS_poll, &pollfd, 0, timeout_us_to_ms(timeout_us));
+}
+
+static long call_ppoll_pipe(ctx_t *c, long timeout_us) {
+    struct timespec ts = us_to_timespec(timeout_us);
+    struct pollfd pollfd = { c->pipe_fds[0], POLLIN, 0 };
+    return syscall(SYS_ppoll, &pollfd, 1, &ts, NULL, 0);
+}
+
+static long call_select_nothing(ctx_t *c, long timeout_us) {
+    struct timeval tv = { timeout_us / 1000000, timeout_us % 1000000 };
+    return syscall(SYS_select, 0, NULL, NULL, NULL, &tv);
+}
+
+static long call_pselect6_pipe(ctx_t *c, long timeout_us) {
+    struct timespec ts = us_to_timespec(timeout_us);
+    fd_set read_fds;
+    FD_ZERO(&read_fds);
+    FD_SET(c->pipe_fds[0], &read_fds);
+    return syscall(SYS_pselect6, c->pipe_fds[0] + 1, &read_fds, NULL, NULL, &ts, NULL);
+}
+
+static long call_poll_pipe_and_read(ctx_t *c, long timeout_us) {
+    struct pollfd pollfd = { c->pipe_fds[0], POLLIN, 0 };
+    long ret = syscall(SYS_poll, &pollfd, 1, -1);
+    char ch;
+    if (ret > 0 && read(c->pipe_fds[0], &ch, 1) == 1) {
+        c->num_consumed++;
+    }
+    return ret;
+}
+
 static long call_pipe_read(ctx_t *c, long timeout_us) {
     char ch;
     long ret = read(c->pipe_fds[0], &ch, 1);
@@ -280,6 +325,70 @@ static void wake_pipe_write(ctx_t *c) {
     if (can_produce(c) && write(c->pipe_fds[1], "x", 1) == 1) {
         c->num_produced++;
     }
+}
+
+static int setup_eventfd(ctx_t *c) {
+    c->fd = eventfd(0, 0);
+    return c->fd < 0 ? -1 : 0;
+}
+
+static void teardown_fd(ctx_t *c) {
+    close_fd(&c->fd);
+}
+
+static void wake_eventfd_write(ctx_t *c) {
+    uint64_t one = 1;
+    if (can_produce(c) && write(c->fd, &one, sizeof(one)) == sizeof(one)) {
+        c->num_produced++;
+    }
+}
+
+// The eventfd is a file of the host, so the poll is for a file of the host too
+static long call_poll_eventfd_and_read(ctx_t *c, long timeout_us) {
+    struct pollfd pollfd = { c->fd, POLLIN, 0 };
+    long ret = syscall(SYS_poll, &pollfd, 1, -1);
+    uint64_t value;
+    if (ret > 0 && read(c->fd, &value, sizeof(value)) == sizeof(value)) {
+        c->num_consumed++;
+    }
+    return ret;
+}
+
+static int setup_epoll_nothing(ctx_t *c) {
+    c->epoll_fd = epoll_create1(0);
+    return c->epoll_fd < 0 ? -1 : 0;
+}
+
+static void teardown_epoll(ctx_t *c) {
+    close_fd(&c->epoll_fd);
+}
+
+static int setup_epoll_pipe(ctx_t *c) {
+    if (setup_pipe(c) < 0 || setup_epoll_nothing(c) < 0) {
+        return -1;
+    }
+    struct epoll_event event = { .events = EPOLLIN, .data.fd = c->pipe_fds[0] };
+    return epoll_ctl(c->epoll_fd, EPOLL_CTL_ADD, c->pipe_fds[0], &event);
+}
+
+static void teardown_epoll_pipe(ctx_t *c) {
+    teardown_epoll(c);
+    teardown_pipe(c);
+}
+
+static long call_epoll_wait_nothing(ctx_t *c, long timeout_us) {
+    struct epoll_event events[2];
+    return syscall(SYS_epoll_wait, c->epoll_fd, events, 2, timeout_us_to_ms(timeout_us));
+}
+
+static long call_epoll_wait_pipe_and_read(ctx_t *c, long timeout_us) {
+    struct epoll_event events[2];
+    long ret = syscall(SYS_epoll_wait, c->epoll_fd, events, 2, -1);
+    char ch;
+    if (ret > 0 && read(c->pipe_fds[0], &ch, 1) == 1) {
+        c->num_consumed++;
+    }
+    return ret;
 }
 
 // ---- futex ----
@@ -584,6 +693,14 @@ static const blocking_call_t g_blocking_calls[] = {
     { "nanosleep", setup_nothing, teardown_nothing, call_nanosleep, NULL, SITE_NANOSLEEP, F_CHILD },
     { "clock_nanosleep", setup_nothing, teardown_nothing, call_clock_nanosleep, NULL, SITE_NANOSLEEP, 0 },
     { "clock_nanosleep_absolute", setup_nothing, teardown_nothing, call_clock_nanosleep_absolute, NULL, SITE_NANOSLEEP, 0 },
+    { "poll", setup_nothing, teardown_nothing, call_poll_nothing, NULL, SITE_POLL, 0 },
+    { "ppoll", setup_pipe, teardown_pipe, call_ppoll_pipe, NULL, SITE_POLL, F_CHILD },
+    { "select", setup_nothing, teardown_nothing, call_select_nothing, NULL, SITE_POLL, 0 },
+    { "pselect6", setup_pipe, teardown_pipe, call_pselect6_pipe, NULL, SITE_POLL, 0 },
+    { "poll_pipe", setup_pipe, teardown_pipe, call_poll_pipe_and_read, wake_pipe_write, SITE_POLL, 0 },
+    { "poll_eventfd", setup_eventfd, teardown_fd, call_poll_eventfd_and_read, wake_eventfd_write, SITE_POLL, 0 },
+    { "epoll_wait", setup_epoll_nothing, teardown_epoll, call_epoll_wait_nothing, NULL, SITE_EPOLL, F_CHILD },
+    { "epoll_wait_pipe", setup_epoll_pipe, teardown_epoll_pipe, call_epoll_wait_pipe_and_read, wake_pipe_write, SITE_EPOLL, 0 },
 };
 
 #define NUM_BLOCKING_CALLS ARRAY_SIZE(g_blocking_calls)
