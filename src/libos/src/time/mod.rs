@@ -1,6 +1,7 @@
 use self::timer_slack::*;
 use super::*;
 use crate::exception::is_cpu_support_sgx2;
+use crate::interrupt::retry_stale_interrupt;
 use core::convert::TryFrom;
 use process::pid_t;
 use rcore_fs::dev::TimeProvider;
@@ -242,22 +243,32 @@ pub fn do_clock_nanosleep(
             return_errno!(EOPNOTSUPP, "does not support sleeping against this clockid");
         }
     }
-    let sgx_status = unsafe {
-        occlum_ocall_clock_nanosleep(&mut ret, clockid as clockid_t, flags, req, &mut u_rem)
-    };
-    assert!(sgx_status == sgx_status_t::SGX_SUCCESS);
-    assert!(ret == 0 || ret == Errno::EINTR as i32);
-    if ret != 0 {
-        assert!(u_rem.as_duration() <= req.as_duration() + (*TIMERSLACK).to_duration());
-        // rem is only valid if TIMER_ABSTIME flag is not set
-        if flags != TIMER_ABSTIME {
-            if let Some(rem) = rem {
-                *rem = u_rem;
+    // The sleep goes on if the interrupt is not for the thread, see
+    // retry_stale_interrupt: a relative sleep for the time that is left, and an
+    // absolute sleep until the same time.
+    let mut req = *req;
+    let result = retry_stale_interrupt(|| {
+        let sgx_status = unsafe {
+            occlum_ocall_clock_nanosleep(&mut ret, clockid as clockid_t, flags, &req, &mut u_rem)
+        };
+        assert!(sgx_status == sgx_status_t::SGX_SUCCESS);
+        assert!(ret == 0 || ret == Errno::EINTR as i32);
+        if ret != 0 {
+            assert!(u_rem.as_duration() <= req.as_duration() + (*TIMERSLACK).to_duration());
+            if flags != TIMER_ABSTIME {
+                req = u_rem;
             }
+            return_errno!(EINTR, "sleep interrupted");
         }
-        return_errno!(EINTR, "sleep interrupted");
+        Ok(())
+    });
+    // rem is only valid if TIMER_ABSTIME flag is not set
+    if result.is_err() && flags != TIMER_ABSTIME {
+        if let Some(rem) = rem {
+            *rem = u_rem;
+        }
     }
-    return Ok(());
+    result
 }
 
 pub fn do_nanosleep(req: &timespec_t, rem: Option<&mut timespec_t>) -> Result<()> {
