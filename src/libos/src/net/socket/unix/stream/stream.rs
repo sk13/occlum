@@ -69,6 +69,10 @@ impl Stream {
     pub fn socketpair(flags: SocketFlags) -> Result<(Self, Self)> {
         let nonblocking = flags.contains(SocketFlags::SOCK_NONBLOCK);
         let (end_a, end_b) = end_pair(nonblocking)?;
+        // The process that creates the sockets is the peer of both ends, like
+        // in Linux
+        end_a.set_ancillary(Ancillary::of_current_process());
+        end_b.set_ancillary(Ancillary::of_current_process());
         let notifier_a = Arc::new(RelayNotifier::new());
         let notifier_b = Arc::new(RelayNotifier::new());
         notifier_a.observe_endpoint(&end_a);

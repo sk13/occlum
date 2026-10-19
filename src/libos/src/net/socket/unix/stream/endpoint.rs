@@ -24,6 +24,7 @@ pub fn end_pair(nonblocking: bool) -> Result<(Endpoint, Endpoint)> {
         writer: pro_b,
         peer: Weak::default(),
         ancillary: RwLock::new(None),
+        peer_ancillary: RwLock::new(None),
     });
     let end_b = Arc::new(Inner {
         addr: name_b,
@@ -32,6 +33,7 @@ pub fn end_pair(nonblocking: bool) -> Result<(Endpoint, Endpoint)> {
         writer: pro_a,
         peer: Arc::downgrade(&end_a),
         ancillary: RwLock::new(None),
+        peer_ancillary: RwLock::new(None),
     });
 
     unsafe {
@@ -52,6 +54,9 @@ pub struct Inner {
     writer: Producer<u8>,
     peer: Weak<Self>,
     ancillary: RwLock<Option<Ancillary>>,
+    // The ancillary data of the peer, which the peer puts here when it sets
+    // its own. Unlike a lookup through `peer`, it stays when the peer is closed.
+    peer_ancillary: RwLock<Option<Ancillary>>,
 }
 
 impl Inner {
@@ -134,11 +139,14 @@ impl Inner {
     }
 
     pub fn set_ancillary(&self, ancillary: Ancillary) {
+        if let Some(peer) = self.peer.upgrade() {
+            *peer.peer_ancillary.write().unwrap() = Some(ancillary.clone());
+        }
         self.ancillary.write().unwrap().insert(ancillary);
     }
 
     pub fn peer_ancillary(&self) -> Option<Ancillary> {
-        self.peer.upgrade().map(|end| end.ancillary()).flatten()
+        self.peer_ancillary.read().unwrap().clone()
     }
 
     pub(self) fn register_relay_notifier(&self, observer: &Arc<RelayNotifier>) {
@@ -170,6 +178,18 @@ impl Ancillary {
         Self {
             tid: current.tid(),
             pid: current.process().pid(),
+        }
+    }
+
+    /// The ancillary data of the current process without a thread, for the ends
+    /// of a socket pair. recvmsg() looks up the descriptors that the peer sends
+    /// in the file table of the thread of the peer's ancillary data, which
+    /// connect() and accept() set. A socket pair has no such thread, so the tid
+    /// is 0: no thread.
+    pub fn of_current_process() -> Self {
+        Self {
+            tid: 0,
+            pid: current!().process().pid(),
         }
     }
 
