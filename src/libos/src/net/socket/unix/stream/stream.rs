@@ -1,5 +1,6 @@
 use super::address_space::ADDRESS_SPACE;
-use super::endpoint::{end_pair, Ancillary, Endpoint, RelayNotifier, DEFAULT_BUF_SIZE};
+use super::endpoint::{end_pair, Ancillary, Endpoint, RelayNotifier};
+use super::options::SockOptions;
 use super::*;
 use events::{Event, EventFilter, Notifier, Observer};
 use fs::channel::Channel;
@@ -24,6 +25,8 @@ pub struct Stream {
     pub(super) notifier: Arc<RelayNotifier>,
     // The IP addresses that the socket shows if it replaces a TCP socket
     inet: SgxMutex<Option<InetView>>,
+    // The options of SOL_SOCKET that the program set (see options.rs)
+    pub(super) options: SgxMutex<SockOptions>,
     // Whether accept returned the socket. Its endpoint has the address that
     // the listening socket bound (see connect), so the socket must not release
     // it when it is closed.
@@ -58,6 +61,7 @@ impl Stream {
             ))),
             notifier: Arc::new(RelayNotifier::new()),
             inet: SgxMutex::new(None),
+            options: SgxMutex::new(SockOptions::default()),
             accepted: false,
         }
     }
@@ -75,6 +79,7 @@ impl Stream {
             inner: SgxMutex::new(Status::Connected(end_a)),
             notifier: notifier_a,
             inet: SgxMutex::new(None),
+            options: SgxMutex::new(SockOptions::default()),
             accepted: false,
         };
 
@@ -83,6 +88,7 @@ impl Stream {
             inner: SgxMutex::new(Status::Connected(end_b)),
             notifier: notifier_b,
             inet: SgxMutex::new(None),
+            options: SgxMutex::new(SockOptions::default()),
             accepted: false,
         };
 
@@ -116,87 +122,6 @@ impl Stream {
 
     pub fn set_inet_view(&self, view: InetView) {
         *self.inet.lock().unwrap() = Some(view);
-    }
-
-    /// Returns the value of a socket option for a buffer of `optlen` bytes. As
-    /// the LibOS ignores setsockopt() for unix sockets, the options that it
-    /// does not determine have their default values, which are zero. A socket
-    /// that replaces a TCP socket has the domain and protocol of that socket,
-    /// and zeros for the options of the IP levels.
-    pub fn getsockopt(&self, level: i32, optname: i32, optlen: u32) -> Result<Vec<u8>> {
-        let inet = self.inet_view();
-        if let Some(inet) = &inet {
-            match level {
-                libc::IPPROTO_TCP | libc::IPPROTO_IP | libc::IPPROTO_IPV6 => {
-                    return Ok(vec![0; (optlen as usize).min(256)]);
-                }
-                _ => (),
-            }
-        }
-        if level != libc::SOL_SOCKET {
-            return_errno!(EOPNOTSUPP, "unix sockets have no options at this level");
-        }
-        let opt = SockOptName::try_from(optname)
-            .map_err(|_| errno!(ENOPROTOOPT, "Not a valid optname"))?;
-        let int = |value: i32| value.to_ne_bytes().to_vec();
-
-        Ok(match opt {
-            SockOptName::SO_TYPE => int(libc::SOCK_STREAM),
-            SockOptName::SO_DOMAIN => int(inet.as_ref().map_or(libc::AF_UNIX, InetView::family)),
-            SockOptName::SO_PROTOCOL => int(inet.as_ref().map_or(0, |_| libc::IPPROTO_TCP)),
-            // Connecting never fails asynchronously, see connect()
-            SockOptName::SO_ERROR => int(0),
-            SockOptName::SO_ACCEPTCONN => {
-                int(matches!(&*self.inner(), Status::Listening(_)) as i32)
-            }
-            SockOptName::SO_SNDBUF | SockOptName::SO_RCVBUF => int(DEFAULT_BUF_SIZE as i32),
-            SockOptName::SO_RCVLOWAT | SockOptName::SO_SNDLOWAT => int(1),
-            SockOptName::SO_PEERCRED => {
-                // The process that connected, for an accepted socket, and the
-                // one that accepted, for a connected one. All processes run
-                // as root. Like Linux, pid 0 and uid/gid -1 if unknown.
-                let cred = match self.peer_ancillary() {
-                    Some(peer) => libc::ucred {
-                        pid: peer.pid() as libc::pid_t,
-                        uid: 0,
-                        gid: 0,
-                    },
-                    None => libc::ucred {
-                        pid: 0,
-                        uid: u32::MAX,
-                        gid: u32::MAX,
-                    },
-                };
-                [
-                    cred.pid.to_ne_bytes(),
-                    cred.uid.to_ne_bytes(),
-                    cred.gid.to_ne_bytes(),
-                ]
-                .concat()
-            }
-            SockOptName::SO_PEERNAME => {
-                let (storage, len) = match inet.as_ref().map(|inet| inet.peer.as_ref()) {
-                    Some(Some(peer)) => peer.to_c_storage(),
-                    Some(None) => return_errno!(ENOTCONN, "the socket is not connected"),
-                    None => self.peer_addr()?.to_c_storage(),
-                };
-                // Like Linux, which does not truncate the address
-                if len < optlen as usize {
-                    return_errno!(EINVAL, "the address is shorter than the buffer");
-                }
-                let bytes =
-                    unsafe { std::slice::from_raw_parts(&storage as *const _ as *const u8, len) };
-                bytes.to_vec()
-            }
-            SockOptName::SO_PEERSEC => return_errno!(ENOPROTOOPT, "no security context"),
-            SockOptName::SO_LINGER => vec![0; std::mem::size_of::<libc::linger>()],
-            SockOptName::SO_RCVTIMEO_OLD | SockOptName::SO_SNDTIMEO_OLD => {
-                vec![0; std::mem::size_of::<libc::timeval>()]
-            }
-            // No device, no groups
-            SockOptName::SO_BINDTODEVICE | SockOptName::SO_PEERGROUPS => Vec::new(),
-            _ => int(0),
-        })
     }
 
     pub fn bind(&self, addr: &UnixAddr) -> Result<()> {
@@ -363,6 +288,7 @@ impl Stream {
                         inner: SgxMutex::new(Status::Connected(endpoint)),
                         notifier: notifier,
                         inet: SgxMutex::new(None),
+                        options: SgxMutex::new(self.options.lock().unwrap().of_accepted()),
                         accepted: true,
                     },
                     peer_addr,
@@ -533,7 +459,7 @@ impl Stream {
         }
     }
 
-    fn peer_ancillary(&self) -> Option<Ancillary> {
+    pub(super) fn peer_ancillary(&self) -> Option<Ancillary> {
         if let Status::Connected(endpoint) = &*self.inner() {
             endpoint.peer_ancillary()
         } else {

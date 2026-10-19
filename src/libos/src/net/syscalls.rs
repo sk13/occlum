@@ -357,10 +357,7 @@ pub fn do_setsockopt(
         let mut cmd = new_host_setsockopt_cmd(level, optname, optval)?;
         host_socket.ioctl(cmd.as_mut())?;
     } else if let Ok(unix_socket) = file_ref.as_unix_socket() {
-        // A socket that replaces a TCP socket takes its options silently
-        if unix_socket.inet_view().is_none() {
-            warn!("setsockopt for unix socket is unimplemented");
-        }
+        unix_socket.setsockopt(level, optname, optval)?;
     } else if let Ok(uring_socket) = file_ref.as_uring_socket() {
         let mut cmd = new_uring_setsockopt_cmd(level, optname, optval, uring_socket.get_type())?;
         uring_socket.ioctl(cmd.as_mut())?;
@@ -384,16 +381,22 @@ pub fn do_getsockopt(
     policy::check_getsockopt(level, optname)?;
     let optlen_mut = from_user::make_mut_ref(optlen)?;
     let optlen = *optlen_mut;
-    let optval_mut = from_user::make_mut_slice(optval as *mut u8, optlen as usize)?;
+    // Nothing is written to a buffer of zero bytes, so that it may be NULL
+    let optval_mut: &mut [u8] = if optlen == 0 {
+        &mut []
+    } else {
+        from_user::make_mut_slice(optval as *mut u8, optlen as usize)?
+    };
+
+    let file_ref = current!().file(fd as FileDesc)?;
 
     // Man getsockopt:
     // If the size of the option value is greater than option_len, the value stored in the object pointed to by the option_value argument will be silently truncated.
     // Thus if the optlen is 0, nothing is returned to optval. We can just return here.
-    if optlen == 0 {
+    // A unix socket checks the option, which may return the size that it needs.
+    if optlen == 0 && file_ref.as_unix_socket().is_err() {
         return Ok(0);
     }
-
-    let file_ref = current!().file(fd as FileDesc)?;
 
     if let Ok(host_socket) = file_ref.as_host_socket() {
         let mut cmd = new_host_getsockopt_cmd(level, optname, optlen)?;
@@ -401,7 +404,7 @@ pub fn do_getsockopt(
         let src_optval = get_optval(cmd.as_ref())?;
         copy_bytes_to_user(src_optval, optval_mut, optlen_mut);
     } else if let Ok(unix_socket) = file_ref.as_unix_socket() {
-        let src_optval = unix_socket.getsockopt(level, optname, optlen)?;
+        let src_optval = unix_socket.getsockopt(level, optname, optlen_mut)?;
         copy_bytes_to_user(&src_optval, optval_mut, optlen_mut);
     } else if let Ok(uring_socket) = file_ref.as_uring_socket() {
         let mut cmd = new_uring_getsockopt_cmd(level, optname, optlen, uring_socket.get_type())?;

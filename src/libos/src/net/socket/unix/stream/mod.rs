@@ -3,6 +3,7 @@ use super::*;
 mod address_space;
 mod endpoint;
 mod file;
+mod options;
 mod stream;
 
 pub use stream::{InetView, Stream};
