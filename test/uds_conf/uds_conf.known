@@ -82,11 +82,7 @@ shut.bound.rdwr.other_how
 shut.listening.rd.a_read
 shut.listening.wr.a_read
 shut.listening.rdwr.a_read
-shut.a_full.wr.a_ev
-shut.a_full.rdwr.a_ev
 shut.b_full.wr.b_write
-shut.b_full.rdwr.b_ev
-shut.rdwr.poll_never_sees_half_state
 
 # group c10_close_matrix
 close.sp.unread_at_a.b_ev

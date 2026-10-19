@@ -27,7 +27,7 @@ TESTS ?= env empty hello_world malloc mmap file fs_perms getpid spawn sched pipe
 	wait spawn_attribute exec statfs random umask pgrp vfork mount flock utimes shm epoll brk posix_shm \
 	raw_socket sem network_policy network_redirect vector_regs unix_socket_shutdown waiter_leak \
 	stale_eintr unix_socket_names unix_socket_options unix_socket_memory unix_socket_listen \
-	unix_socket_io unix_socket_sndbuf unix_socket_speed
+	unix_socket_io unix_socket_sndbuf unix_socket_speed unix_socket_events
 
 # Benchmarks: need to be compiled and run by bench-% target
 BENCHES := spawn_and_exit_latency pipe_throughput unix_socket_throughput
