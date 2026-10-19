@@ -11,6 +11,8 @@
 //  - MSG_DONTWAIT, MSG_PEEK and MSG_WAITALL, the flags that have no effect, and the address of a
 //    send on a connected (EISCONN) or an unconnected (EOPNOTSUPP) socket.
 //  - recvmsg and recvfrom tell the name of the peer; sendmmsg and recvmmsg work.
+//  - Writing to a socket that cannot send raises SIGPIPE in the calling thread, unless the call has
+//    MSG_NOSIGNAL, or has waited for room before it failed.
 //
 // MSG_OOB is not supported by the LibOS: it takes the byte as plain data (see
 // test_oob_flag_does_not_hang).
@@ -68,6 +70,9 @@ static atomic_int stuck_threads;
 static atomic_long watchdog_deadline;
 static const char *current_case = "";
 
+static atomic_int sigpipes;
+static atomic_int sigpipe_tid;
+
 static long now_ms(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -98,6 +103,11 @@ static void *watchdog_main(void *arg) {
 
 // SIGUSR1 interrupts the calls (the handler is installed without SA_RESTART)
 static void on_signal(int sig) {
+}
+
+static void on_sigpipe(int sig) {
+    atomic_store(&sigpipe_tid, get_tid());
+    atomic_fetch_add(&sigpipes, 1);
 }
 
 static void set_nonblocking(int fd, int nonblocking) {
@@ -379,6 +389,22 @@ static long call_recvmmsg(call_t *c) {
     for (int i = 0; i < c->pieces; i++) {
         c->lens[i] = msgs[i].msg_len;
     }
+    return ret;
+}
+
+// Writes with SIGPIPE blocked in the thread, and tells whether it has been left pending
+static long call_write_sigpipe_blocked(call_t *c) {
+    sigset_t set;
+    sigemptyset(&set);
+    sigaddset(&set, SIGPIPE);
+    pthread_sigmask(SIG_BLOCK, &set, NULL);
+    long ret = write(c->fd, c->buf, c->len);
+    int err = errno;
+    // Takes the signal away, so that it is not raised when the thread unblocks it
+    struct timespec zero = { 0, 0 };
+    c->msg_flags = sigtimedwait(&set, NULL, &zero) == SIGPIPE;
+    pthread_sigmask(SIG_UNBLOCK, &set, NULL);
+    errno = err;
     return ret;
 }
 
@@ -903,6 +929,55 @@ static int test_write_timeout_restarts_with_progress(void) {
     CHECK(reader.bad_pos == total, "a wrong byte at %zu", reader.bad_pos);
     close(sv[0]);
     close(sv[1]);
+    free(data);
+    return 0;
+}
+
+// The peer goes while a write waits for room: the bytes that were written, or an error if none,
+// and no SIGPIPE, as the call has waited
+static int test_peer_goes_while_a_write_waits(void) {
+    static const int hows[] = { STIM_CLOSE, SHUT_RD };
+    char *data = malloc(4 * MIB);
+    fill_pattern(data, 4 * MIB, 0);
+
+    for (size_t i = 0; i < ARRAY_SIZE(hows); i++) {
+        int how = hows[i];
+        int sv[2];
+        stimulus_t s;
+        call_t c;
+
+        // Some bytes are written before the call waits
+        CHECK(make_pair(sv) == 0, "failed to create a socket pair");
+        atomic_store(&sigpipes, 0);
+        CHECK(stimulus_start(&s, sv[1], SETTLE_MS * 2, NULL, how) == 0, "failed to start");
+        CHECK(call_start(&c, call_write, sv[0], data, 4 * MIB, 0) == 0, "failed to start write");
+        CHECK(call_wait(&c, WAKE_MS), "the write does not return");
+        CHECK(c.ret > 0 && c.ret < 4 * MIB, "the write returns %ld (errno %d)", c.ret, c.err);
+        stimulus_join(&s);
+        call_finish(&c);
+        CHECK(atomic_load(&sigpipes) == 0, "the write raised SIGPIPE");
+        close(sv[0]);
+        if (how != STIM_CLOSE) {
+            close(sv[1]);
+        }
+
+        // The buffer is full already: the shutdown wakes the write, which fails with EPIPE (the
+        // close with ECONNRESET, in Linux, as there are bytes that nobody reads)
+        CHECK(make_pair(sv) == 0, "failed to create a socket pair");
+        CHECK(fill(sv[0]) > 0, "failed to fill the buffer");
+        CHECK(stimulus_start(&s, sv[1], SETTLE_MS * 2, NULL, how) == 0, "failed to start");
+        CHECK(call_start(&c, call_write, sv[0], data, 100, 0) == 0, "failed to start write");
+        CHECK(call_wait(&c, WAKE_MS), "the write does not return");
+        CHECK(c.ret == -1 && (c.err == EPIPE || (how == STIM_CLOSE && c.err == ECONNRESET)),
+              "the write returns %ld (errno %d)", c.ret, c.err);
+        stimulus_join(&s);
+        call_finish(&c);
+        CHECK(atomic_load(&sigpipes) == 0, "the write raised SIGPIPE");
+        close(sv[0]);
+        if (how != STIM_CLOSE) {
+            close(sv[1]);
+        }
+    }
     free(data);
     return 0;
 }
@@ -1600,6 +1675,159 @@ static int test_oob_flag_does_not_hang(void) {
 }
 
 // ---------------------------------------------------------------------------------------------
+// SIGPIPE
+// ---------------------------------------------------------------------------------------------
+
+// The call fails with EPIPE, and raises SIGPIPE in the thread of the call if `signals` is 1
+static int expect_epipe(call_fn fn, int fd, size_t len, int flags, int signals,
+                        const char *what) {
+    static char data[16] = "0123456789abcde";
+    call_t c;
+
+    atomic_store(&sigpipes, 0);
+    CHECK(call_start(&c, fn, fd, data, len, flags) == 0, "failed to start %s", what);
+    EXPECT_NOW(&c, -1, EPIPE, what);
+    call_finish(&c);
+    CHECK(atomic_load(&sigpipes) == signals, "%s raised %d SIGPIPE, instead of %d", what,
+          atomic_load(&sigpipes), signals);
+    CHECK(signals == 0 || atomic_load(&sigpipe_tid) == atomic_load(&c.tid),
+          "SIGPIPE of %s is not raised in the thread of the call", what);
+    return 0;
+}
+
+// Writing to a socket that cannot send fails with EPIPE, and raises SIGPIPE in the thread that
+// writes, unless the call has MSG_NOSIGNAL
+static int test_write_to_a_closed_peer_raises_sigpipe(void) {
+    int sv[2];
+
+    for (size_t i = 0; i < ARRAY_SIZE(send_calls); i++) {
+        CHECK(make_pair(sv) == 0, "failed to create a socket pair");
+        close(sv[1]);
+        // Every call raises it
+        for (int round = 0; round < 2; round++) {
+            if (expect_epipe(send_calls[i].fn, sv[0], 2, 0, 1, send_calls[i].name) < 0) {
+                return -1;
+            }
+        }
+        close(sv[0]);
+    }
+
+    // MSG_NOSIGNAL
+    for (size_t i = 0; i < ARRAY_SIZE(send_flag_calls); i++) {
+        CHECK(make_pair(sv) == 0, "failed to create a socket pair");
+        close(sv[1]);
+        if (expect_epipe(send_flag_calls[i].fn, sv[0], 2, MSG_NOSIGNAL, 0,
+                         send_flag_calls[i].name) < 0) {
+            return -1;
+        }
+        close(sv[0]);
+    }
+
+    // No bytes to write do not matter
+    CHECK(make_pair(sv) == 0, "failed to create a socket pair");
+    close(sv[1]);
+    if (expect_epipe(call_write, sv[0], 0, 0, 1, "write of 0 bytes") < 0 ||
+            expect_epipe(call_send, sv[0], 0, 0, 1, "send of 0 bytes") < 0 ||
+            expect_epipe(call_send, sv[0], 0, MSG_NOSIGNAL, 0, "send of 0 bytes, MSG_NOSIGNAL") < 0) {
+        return -1;
+    }
+    close(sv[0]);
+
+    // The socket that has been shut down for writing, and the one whose peer is shut down for
+    // reading
+    CHECK(make_pair(sv) == 0, "failed to create a socket pair");
+    CHECK(shutdown(sv[0], SHUT_WR) == 0, "failed to shut down");
+    if (expect_epipe(call_write, sv[0], 2, 0, 1, "write after shutdown(SHUT_WR)") < 0 ||
+            expect_epipe(call_send, sv[0], 2, MSG_NOSIGNAL, 0, "send after shutdown(SHUT_WR)") < 0) {
+        return -1;
+    }
+    close(sv[0]);
+    close(sv[1]);
+    CHECK(make_pair(sv) == 0, "failed to create a socket pair");
+    CHECK(shutdown(sv[1], SHUT_RD) == 0, "failed to shut down");
+    if (expect_epipe(call_write, sv[0], 2, 0, 1,
+                     "write after shutdown(SHUT_RD) of the peer") < 0) {
+        return -1;
+    }
+    close(sv[0]);
+    close(sv[1]);
+
+    // A socket that has been shut down for reading, and a socket whose peer is shut down for
+    // writing, can send
+    for (int self = 0; self < 2; self++) {
+        call_t c;
+        CHECK(make_pair(sv) == 0, "failed to create a socket pair");
+        CHECK(shutdown(self ? sv[0] : sv[1], self ? SHUT_RD : SHUT_WR) == 0,
+              "failed to shut down");
+        atomic_store(&sigpipes, 0);
+        CHECK(call_start(&c, call_write, sv[0], "ab", 2, 0) == 0, "failed to start write");
+        EXPECT_NOW(&c, 2, 0, "write");
+        call_finish(&c);
+        CHECK(atomic_load(&sigpipes) == 0, "write raised SIGPIPE");
+        close(sv[0]);
+        close(sv[1]);
+    }
+
+    // No SIGPIPE for the errors that are not EPIPE: an unconnected socket, and no bytes on a full
+    // buffer
+    {
+        call_t c;
+        int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+        atomic_store(&sigpipes, 0);
+        CHECK(call_start(&c, call_write, fd, "ab", 2, 0) == 0, "failed to start write");
+        EXPECT_NOW(&c, -1, ENOTCONN, "write of an unconnected socket");
+        call_finish(&c);
+        close(fd);
+        CHECK(make_pair(sv) == 0, "failed to create a socket pair");
+        CHECK(fill(sv[0]) > 0, "failed to fill the buffer");
+        CHECK(call_start(&c, call_write, sv[0], "ab", 0, 0) == 0, "failed to start write");
+        EXPECT_NOW(&c, 0, 0, "write of 0 bytes to a full buffer");
+        call_finish(&c);
+        CHECK(atomic_load(&sigpipes) == 0, "write raised SIGPIPE");
+        close(sv[0]);
+        close(sv[1]);
+    }
+    return 0;
+}
+
+// A thread that blocks SIGPIPE keeps it pending
+static int test_blocked_sigpipe_stays_pending(void) {
+    int sv[2];
+    call_t c;
+    CHECK(make_pair(sv) == 0, "failed to create a socket pair");
+    close(sv[1]);
+    atomic_store(&sigpipes, 0);
+    CHECK(call_start(&c, call_write_sigpipe_blocked, sv[0], "ab", 2, 0) == 0,
+          "failed to start write");
+    EXPECT_NOW(&c, -1, EPIPE, "write");
+    CHECK(c.msg_flags == 1, "SIGPIPE is not pending");
+    call_finish(&c);
+    CHECK(atomic_load(&sigpipes) == 0, "the handler of SIGPIPE ran");
+    close(sv[0]);
+    return 0;
+}
+
+// sendmmsg to a socket that cannot send fails with EPIPE, and raises SIGPIPE like the other calls
+static int test_sendmmsg_to_a_closed_peer_raises_sigpipe(void) {
+    int sv[2];
+    call_t c;
+
+    for (int nosignal = 0; nosignal < 2; nosignal++) {
+        CHECK(make_pair(sv) == 0, "failed to create a socket pair");
+        close(sv[1]);
+        atomic_store(&sigpipes, 0);
+        CHECK(call_start_n(&c, call_sendmmsg, sv[0], "aabb", 2, nosignal ? MSG_NOSIGNAL : 0,
+                           2) == 0, "failed to start sendmmsg");
+        EXPECT_NOW(&c, -1, EPIPE, "sendmmsg");
+        call_finish(&c);
+        CHECK(atomic_load(&sigpipes) == (nosignal ? 0 : 1), "sendmmsg raised %d SIGPIPE",
+              atomic_load(&sigpipes));
+        close(sv[0]);
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------------------------------------
 // Addresses
 // ---------------------------------------------------------------------------------------------
 
@@ -1927,6 +2155,7 @@ static test_case_t test_cases[] = {
     TEST_CASE(test_interrupted_write_returns_the_progress),
     TEST_CASE(test_write_timeout),
     TEST_CASE(test_write_timeout_restarts_with_progress),
+    TEST_CASE(test_peer_goes_while_a_write_waits),
     TEST_CASE(test_read_timeout),
     TEST_CASE(test_timeouts_belong_to_the_socket),
     TEST_CASE(test_nonblocking_socket_ignores_the_timeouts),
@@ -1940,6 +2169,9 @@ static test_case_t test_cases[] = {
     TEST_CASE(test_msg_peek_of_a_long_queue),
     TEST_CASE(test_msg_flags_without_effect),
     TEST_CASE(test_oob_flag_does_not_hang),
+    TEST_CASE(test_write_to_a_closed_peer_raises_sigpipe),
+    TEST_CASE(test_blocked_sigpipe_stays_pending),
+    TEST_CASE(test_sendmmsg_to_a_closed_peer_raises_sigpipe),
     TEST_CASE(test_sendto_and_sendmsg_with_an_address),
     TEST_CASE(test_receive_tells_the_name_of_the_peer),
     TEST_CASE(test_sendmmsg),
@@ -1948,11 +2180,13 @@ static test_case_t test_cases[] = {
 };
 
 int main(int argc, const char *argv[]) {
-    // SIGUSR1 interrupts the calls, without SA_RESTART
+    // SIGUSR1 interrupts the calls, and SIGPIPE is counted: both without SA_RESTART
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
     sa.sa_handler = on_signal;
     sigaction(SIGUSR1, &sa, NULL);
+    sa.sa_handler = on_sigpipe;
+    sigaction(SIGPIPE, &sa, NULL);
 
     test_case_t selected[ARRAY_SIZE(test_cases)];
     test_case_t *cases = test_cases;
