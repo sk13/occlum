@@ -165,6 +165,27 @@ pub(crate) enum Attempt<T> {
 pub(crate) fn wait_for<T>(
     queue: &WaiterQueue,
     timeout: Option<Duration>,
+    attempt: impl FnMut() -> Result<Attempt<T>>,
+) -> Result<T> {
+    wait_for_moving(queue, timeout, || false, attempt)
+}
+
+/// The number of times that a call tries again, without sleeping, while the other end of the
+/// channel is copying the items that the call waits for, or the room that it waits for. A copy
+/// takes about as long as the host needs to wake up a thread (some 35 us for 128 KiB in an
+/// enclave), and a thread that does not sleep does not make the other end call the host to wake
+/// it up. The other end may be preempted in the middle of its copy, so the thread gives up after
+/// the attempts, which take about a hundred microseconds, and sleeps.
+const MAX_SPINS: usize = 1000;
+
+/// Like `wait_for`, but a thread that finds that it has to wait tries again for a while if
+/// `other_end_copies()` says that the other end is moving items (see
+/// `State::is_producer_copying`), which a bulk transfer is, all the time. The attempts do not count
+/// for the timeout.
+pub(crate) fn wait_for_moving<T>(
+    queue: &WaiterQueue,
+    timeout: Option<Duration>,
+    other_end_copies: impl Fn() -> bool,
     mut attempt: impl FnMut() -> Result<Attempt<T>>,
 ) -> Result<T> {
     // Try without creating a waiter. This saves some CPU cycles if the first attempt succeeds.
@@ -180,6 +201,25 @@ pub(crate) fn wait_for<T>(
     let mut remaining = timeout;
     let mut timed_out = false;
     loop {
+        // The waiter is out of the queue while the thread tries again, as a thread that does not
+        // sleep needs no wake-up. The time does not count for the timeout, and the thread does not
+        // spend more of it once the timeout is over.
+        queue.dequeue(&waiter);
+        let mut spins = 0;
+        // Not after the timeout is over: an attempt that makes progress here starts the time
+        // again, but the attempt below clears `timed_out`, not this one
+        while !timed_out && spins < MAX_SPINS && other_end_copies() {
+            match attempt()? {
+                Attempt::Done(value) => return Ok(value),
+                Attempt::Wait => spins += 1,
+                Attempt::WaitAfterProgress => {
+                    remaining = timeout;
+                    spins = 0;
+                }
+            }
+            std::hint::spin_loop();
+        }
+
         // Before the attempt, so that no wake-up gets lost between the attempt and the wait
         queue.reset_and_enqueue(&waiter);
         match attempt()? {
@@ -430,7 +470,9 @@ impl<I: Copy> Producer<I> {
         // The items that were pushed, which the call returns if it stops early
         let mut done = 0;
 
-        let result = wait_for(self.observer.waiter_queue(), opts.timeout, || {
+        let queue = self.observer.waiter_queue();
+        let consumer_copies = || self.state.is_consumer_copying();
+        let result = wait_for_moving(queue, opts.timeout, consumer_copies, || {
             let mut rb_producer = self.inner.lock().unwrap();
             if self.is_self_shutdown() || self.is_peer_shutdown() {
                 return_errno!(EPIPE, "one or both endpoints have been shutdown");
@@ -451,6 +493,10 @@ impl<I: Copy> Producer<I> {
                 };
             // The slices begin with the items that were pushed by an earlier attempt
             let mut skip = done;
+            let copying = rb_producer.remaining() > 0 && !slices.is_empty();
+            if copying {
+                self.state.set_producer_copying(true);
+            }
             for items in slices {
                 if skip >= items.len() {
                     skip -= items.len();
@@ -469,6 +515,9 @@ impl<I: Copy> Producer<I> {
                 if count < items.len() {
                     break;
                 }
+            }
+            if copying {
+                self.state.set_producer_copying(false);
             }
             drop(rb_producer);
             if pushed > 0 {
@@ -623,7 +672,9 @@ impl<I: Copy> Consumer<I> {
         // The items that were popped, which the call returns if it stops early
         let mut done = 0;
 
-        let result = wait_for(self.observer.waiter_queue(), opts.timeout, || {
+        let queue = self.observer.waiter_queue();
+        let producer_copies = || self.state.is_producer_copying();
+        let result = wait_for_moving(queue, opts.timeout, producer_copies, || {
             let mut rb_consumer = self.inner.lock().unwrap();
             // Get the flag before the items, see pop()
             let is_peer_shutdown = self.is_peer_shutdown();
@@ -631,6 +682,10 @@ impl<I: Copy> Consumer<I> {
             // The slices begin with the items that were popped by an earlier attempt
             let mut skip = done;
             let mut popped = 0;
+            let copying = !rb_consumer.is_empty();
+            if copying {
+                self.state.set_consumer_copying(true);
+            }
             for items in item_slices.iter_mut() {
                 if skip >= items.len() {
                     skip -= items.len();
@@ -643,6 +698,9 @@ impl<I: Copy> Consumer<I> {
                 if count < items.len() {
                     break;
                 }
+            }
+            if copying {
+                self.state.set_consumer_copying(false);
             }
             drop(rb_consumer);
             if popped > 0 {
@@ -718,6 +776,12 @@ impl<I> Drop for Consumer<I> {
 struct State {
     is_producer_shutdown: AtomicBool,
     is_consumer_shutdown: AtomicBool,
+    /// Whether the producer is copying items into the queue, or the consumer is copying items out
+    /// of it. The other end, which waits for the items, or for the room that they take, may be
+    /// woken up within the time that a copy takes, so that it is better off to try again than to
+    /// sleep (see `wait_for_moving`).
+    is_producer_copying: AtomicBool,
+    is_consumer_copying: AtomicBool,
 }
 
 impl State {
@@ -725,6 +789,8 @@ impl State {
         Self {
             is_producer_shutdown: AtomicBool::new(false),
             is_consumer_shutdown: AtomicBool::new(false),
+            is_producer_copying: AtomicBool::new(false),
+            is_consumer_copying: AtomicBool::new(false),
         }
     }
 
@@ -742,5 +808,21 @@ impl State {
 
     pub fn set_consumer_shutdown(&self) {
         self.is_consumer_shutdown.store(true, Ordering::Release)
+    }
+
+    pub fn is_producer_copying(&self) -> bool {
+        self.is_producer_copying.load(Ordering::Acquire)
+    }
+
+    pub fn is_consumer_copying(&self) -> bool {
+        self.is_consumer_copying.load(Ordering::Acquire)
+    }
+
+    pub fn set_producer_copying(&self, copying: bool) {
+        self.is_producer_copying.store(copying, Ordering::Release)
+    }
+
+    pub fn set_consumer_copying(&self, copying: bool) {
+        self.is_consumer_copying.store(copying, Ordering::Release)
     }
 }
