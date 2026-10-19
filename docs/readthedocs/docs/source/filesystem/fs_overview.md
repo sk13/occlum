@@ -103,6 +103,8 @@ Here is the configuration of rootfs, the first item is the lower layer RO-SEFS a
           source: ./run/mount/__ROOT
 ```
 
+The inode numbers (`st_ino`) of the UnionFS are those of the names that the LibOS has looked up while it runs, not the inode numbers of its two layers. The names of the hard links that are made while the enclave runs have the number of their file, so tools that tell the links of a file by its number (`tar`, `rsync -H`, `find -samefile`), and the Unix sockets, which are found by the inode number of their file, see one file. The hard links that were made before, by an earlier run of the enclave or in the image, get a number of their own after the enclave has started, and so do the files in a directory that is renamed: `connect()` to a Unix socket through a hard link that an earlier run made to its socket file fails with `ECONNREFUSED`.
+
 ## Ext2
 The [Ext2](https://github.com/occlum/ext2-rs) is an independent filesystem Rust crate that resembles Linux's Ext2. For the sake of performance and security, it utilizes [SwornDisk](https://github.com/asterinas/mlsdisk) as its underlying block device. Compared with SEFS, the file I/O performance of "Ext2+SwornDisk" is superior. If your App's performance is highly dependent on file I/O, it is recommended to enable Ext2 in Occlum.json.
 

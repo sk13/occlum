@@ -1,0 +1,30 @@
+diff --git a/rcore-fs-unionfs/src/lib.rs b/rcore-fs-unionfs/src/lib.rs
+index b2ebf5e..8321632 100644
+--- a/rcore-fs-unionfs/src/lib.rs
++++ b/rcore-fs-unionfs/src/lib.rs
+@@ -708,6 +708,9 @@ impl INode for UnionINode {
+             }
+         }
+-        // add `name` to entry cache
+-        inner.entries().insert(String::from(name), None);
++        // add `name` to entry cache, with the id of the file: a hard link has
++        // the inode number of the file
++        inner
++            .entries()
++            .insert(String::from(name), Some(Entry::File(Weak::new(), child.id)));
+         Ok(())
+     }
+diff --git a/rcore-fs-unionfs/src/tests.rs b/rcore-fs-unionfs/src/tests.rs
+index cb67835..4348f2d 100644
+--- a/rcore-fs-unionfs/src/tests.rs
++++ b/rcore-fs-unionfs/src/tests.rs
+@@ -213,2 +213,4 @@ fn link_container() -> Result<()> {
+     let file1_link = root.lookup("dir/file1_link")?;
++    // a hard link has the inode number of the file
++    assert_eq!(file1_link.metadata()?.inode, file1.metadata()?.inode);
+     assert_eq!(file1_link.read_as_vec()?, b"container");
+@@ -234,2 +236,4 @@ fn link_image() -> Result<()> {
+     let file3_link = root.lookup("dir/file3_link")?;
++    // a hard link has the inode number of the file
++    assert_eq!(file3_link.metadata()?.inode, file3.metadata()?.inode);
+     assert_eq!(file3_link.read_as_vec()?, b"image");
