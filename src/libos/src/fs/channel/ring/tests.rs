@@ -602,6 +602,97 @@ fn counters_and_lengths() {
     assert_eq!(c.pop_slice(&mut all), 0);
 }
 
+// The status reads the number of the items without a lock of an end, and has the numbers of the
+// ends, in all the states of the queue
+#[test]
+fn status_follows_the_queue() {
+    track();
+    let ring = Ring::<u8>::new(1000);
+    let status = ring.status();
+    let (mut p, mut c) = ring.split();
+    assert!(status.is_empty());
+    assert_eq!(
+        (status.len(), status.remaining(), status.capacity()),
+        (0, 1000, 1000)
+    );
+    assert_eq!(p.push_slice(&[1u8; 600]), Ok(600));
+    assert!(!status.is_empty());
+    assert_eq!((status.len(), status.remaining()), (600, 400));
+    assert_eq!(p.push_slice(&[2u8; 600]), Ok(400));
+    assert_eq!((status.len(), status.remaining()), (1000, 0));
+    let mut buf = [0u8; 300];
+    assert_eq!(c.pop_slice(&mut buf), 300);
+    assert_eq!((status.len(), status.remaining()), (700, 300));
+    // a queue that is above its capacity has no room, and keeps its items
+    p.set_capacity(10);
+    assert_eq!(
+        (status.len(), status.remaining(), status.capacity()),
+        (700, 0, 10)
+    );
+    p.set_capacity(2000);
+    assert_eq!(
+        (status.len(), status.remaining(), status.capacity()),
+        (700, 1300, 2000)
+    );
+    // a clone sees the same queue, which the ends being dropped does not change
+    let other = status.clone();
+    drop(p);
+    assert_eq!(other.len(), 700);
+    let mut all = [0u8; 700];
+    assert_eq!(c.pop_slice(&mut all), 700);
+    assert!(other.is_empty() && status.is_empty());
+}
+
+// A thread that is neither the producer nor the consumer reads the number of the items while they
+// push and pop one item after the other, so that the queue is nearly empty and the counters are
+// close. The number that it reads may be a little above what the queue holds, as the ends go on
+// between the two reads, but it is never negative. A status that reads the number of the pushed
+// items first sees a number of the popped items that is above it every now and then, and so a
+// length that is a huge number.
+#[test]
+fn status_is_never_negative() {
+    track();
+    const CAPACITY: usize = 100;
+    const ITEMS: usize = 3_000_000;
+    let ring = Ring::<u8>::new(CAPACITY);
+    let status = ring.status();
+    let (mut p, mut c) = ring.split();
+    let done = Arc::new(AtomicBool::new(false));
+    let writer = spawn(move || {
+        for i in 0..ITEMS {
+            while p.push(byte(i)).is_err() {
+                std::hint::spin_loop();
+            }
+        }
+    });
+    let reader = spawn(move || {
+        for i in 0..ITEMS {
+            loop {
+                if let Some(item) = c.pop() {
+                    assert_eq!(item, byte(i));
+                    break;
+                }
+                std::hint::spin_loop();
+            }
+        }
+    });
+    let done2 = done.clone();
+    let observer = spawn(move || {
+        let mut looks = 0u64;
+        while !done2.load(Ordering::Relaxed) {
+            let len = status.len();
+            assert!(len < (1 << 40), "the status shows {} items", len);
+            assert!(status.remaining() <= CAPACITY);
+            looks += 1;
+        }
+        looks
+    });
+    writer.join().unwrap();
+    reader.join().unwrap();
+    done.store(true, Ordering::Relaxed);
+    assert!(observer.join().unwrap() > 0);
+}
+
 #[test]
 fn zero_capacity_takes_nothing() {
     track();
