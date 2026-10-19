@@ -247,7 +247,9 @@ static int is_sender(int type) {
 }
 
 // The waiter needs a full buffer on its end. If the peer closes while the buffer is full, and
-// the data was not read, the socket gets ECONNRESET, which the LibOS does not have (yet)
+// the data was not read, the socket gets ECONNRESET, as on Linux, and not what this test expects
+// of a close (see run_type()): test_close_wakes_a_blocked_write_with_the_error of
+// test/unix_socket_events checks these waiters
 static int needs_full_buffer(int type) {
     return is_sender(type) || type == W_POLL_OUT_FULL || type == W_POLL_OUT_IN_FULL ||
            type == W_EPOLL_OUT_FULL;

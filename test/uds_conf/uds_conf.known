@@ -36,39 +36,8 @@ files.open_socket_file_wronly
 files.truncate_socket_file
 files.chmod_socket_file.stat
 
-# group c04_connect
-connect.listener_closed_pending.ev
-connect.listener_closed_pending.read
-
 # group c09_shutdown_matrix
 shut.b_full.wr.b_write
-
-# group c10_close_matrix
-close.sp.unread_at_a.b_ev
-close.sp.unread_at_a.b_read1_first
-close.client.unread_at_a.b_ev
-close.client.unread_at_a.b_read1_first
-close.accepted.unread_at_a.b_ev
-close.accepted.unread_at_a.b_read1_first
-close.sp.both_data.b_ev
-close.sp.both_data.b_so_error_after_read
-close.client.both_data.b_ev
-close.client.both_data.b_so_error_after_read
-close.accepted.both_data.b_ev
-close.accepted.both_data.b_so_error_after_read
-close.listener_pending.client_idle.pathname.ev
-close.listener_pending.client_idle.pathname.read1_first
-close.listener_pending.client_idle.pathname.so_error_first
-close.listener_pending.client_idle.abstract.ev
-close.listener_pending.client_idle.abstract.read1_first
-close.listener_pending.client_idle.abstract.so_error_first
-close.listener_pending.client_wrote.pathname.ev
-close.listener_pending.client_wrote.pathname.read1_first
-close.listener_pending.client_wrote.pathname.so_error_first
-close.listener_pending.client_wrote.abstract.ev
-close.listener_pending.client_wrote.abstract.read1_first
-close.listener_pending.client_wrote.abstract.so_error_first
-close.so_error.first
 
 # group c11_events
 ev.out_threshold.after_reading
@@ -79,7 +48,6 @@ epoll.dup_stays_registered
 epoll.out.after_1_byte_read
 
 # group c13_blocking
-blk.write_full.peer_close
 blk.write_full.woken_by_peer_read
 
 # group c13_signals
@@ -94,9 +62,6 @@ opt.get.SO_PEERSEC.sp
 # The expected value is twice net.core.wmem_max of the host that ran Linux for it (4 MiB there). The
 # LibOS limits the size to 208 KiB, the default of Linux (see MAX_SOCK_BUF_SIZE in options.rs)
 opt.set.SO_SNDBUF.huge
-
-# group c16_sigpipe
-pipe.blocked_write_peer_closes
 
 # group c17_ancillary
 anc.rights.recv
@@ -120,10 +85,6 @@ anc.short_controllen.peer_read
 
 # group c19_memory
 mem.many_sockets_created
-
-# group c20_listener_close
-lclose.pending_client.ev
-lclose.pending_client.read
 
 # group c90_anc_rights_over_socketpair, c90_anc_rights_sender_closed_fd, c90_anc_rights_sender_thread_exited
 # (the LibOS drops the control message of a descriptor that it cannot look up at the receiver: MSG_CTRUNC)

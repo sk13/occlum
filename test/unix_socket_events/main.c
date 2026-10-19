@@ -20,6 +20,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/epoll.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/uio.h>
@@ -116,6 +117,11 @@ static long poll_now(int fd) {
         CHECK(__events == (long)__expected, "%s: the events are %s, instead of %s", what, \
               __events < 0 ? "an error" : events_str(__events), events_str(__expected)); \
     } while (0)
+
+static void set_nonblocking(int fd, int nonblocking) {
+    int flags = fcntl(fd, F_GETFL);
+    fcntl(fd, F_SETFL, nonblocking ? (flags | O_NONBLOCK) : (flags & ~O_NONBLOCK));
+}
 
 typedef struct {
     struct sockaddr_un sa;
@@ -593,6 +599,604 @@ static int test_shutdown_of_a_bound_socket_stays_after_listen(void) {
     return 0;
 }
 
+// ---------------------------------------------------------------------------------------------
+// A connection that is reset
+// ---------------------------------------------------------------------------------------------
+
+// Reads the error of the socket, which is cleared by it
+static int so_error(int fd) {
+    int err = -1;
+    socklen_t len = sizeof(err);
+    if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len) < 0) {
+        return -1;
+    }
+    return err;
+}
+
+#define CHECK_SO_ERROR(fd, expected, what) do { \
+        int __err = so_error(fd); \
+        CHECK(__err == (expected), "%s: SO_ERROR is %d, instead of %d", what, __err, expected); \
+    } while (0)
+
+// The events of a connection whose peer was closed (the end of the file, and a hangup), with the
+// error of a reset if there is one
+#define EV_CLOSED       (POLLIN | POLLOUT | POLLHUP | POLLRDHUP)
+#define EV_RESET        (EV_CLOSED | POLLERR)
+
+// What the closing of a socket tells its peer: the ends of connections are made, `a` is closed, and
+// the peer `b` finds out. `how` is what is done before the close.
+enum {
+    CLOSE_PLAIN,            // nothing: the end of the file
+    CLOSE_UNREAD_AT_B,      // `a` has written bytes that `b` has not read: the end of the file
+    CLOSE_UNREAD_AT_A,      // `b` has written bytes that `a` has not read: a reset
+    CLOSE_BOTH_UNREAD,      // both have: a reset, after `b` has read what `a` wrote
+    CLOSE_A_READ_ALL,       // `b` has written bytes, which `a` has read: the end of the file
+    CLOSE_A_SHUT_RD,        // `a` has shut down reading with bytes of `b` that it has not read: a reset
+    NUM_CLOSE_KINDS
+};
+static const char *close_names[] = {
+    "plain close", "unread bytes at the peer", "unread bytes at the closed socket",
+    "unread bytes at both", "bytes read before the close", "unread bytes after SHUT_RD",
+};
+
+static int prepare_close(int how, int a, int b) {
+    char buf[8];
+    switch (how) {
+        case CLOSE_UNREAD_AT_B:
+            return write(a, "u", 1) == 1 ? 0 : -1;
+        case CLOSE_UNREAD_AT_A:
+        case CLOSE_A_SHUT_RD:
+            if (write(b, "u", 1) != 1) {
+                return -1;
+            }
+            return how == CLOSE_A_SHUT_RD ? shutdown(a, SHUT_RD) : 0;
+        case CLOSE_BOTH_UNREAD:
+            return write(a, "1", 1) == 1 && write(b, "2", 1) == 1 ? 0 : -1;
+        case CLOSE_A_READ_ALL:
+            return write(b, "r", 1) == 1 && read(a, buf, sizeof(buf)) == 1 ? 0 : -1;
+        default:
+            return 0;
+    }
+}
+
+static int is_reset(int how) {
+    return how == CLOSE_UNREAD_AT_A || how == CLOSE_BOTH_UNREAD || how == CLOSE_A_SHUT_RD;
+}
+
+// If the closed socket has bytes that it has not read, its peer gets a reset: the first read fails
+// with ECONNRESET, instead of returning the end of the file, and poll() reports an error. The error
+// is gone after that. Bytes that the peer has sent before are read first, and then it is the error
+// that SO_ERROR returns. A close that leaves no bytes is the end of the file, for all kinds of
+// connections (a socket pair, and the client or the server of a connection).
+static int test_close_with_unread_bytes_resets_the_peer(void) {
+    for (int kind = 0; kind < NUM_PAIR_KINDS; kind++) {
+        for (int how = 0; how < NUM_CLOSE_KINDS; how++) {
+            int a, b;
+            char what[128];
+            snprintf(what, sizeof(what), "%s, %s", pair_names[kind], close_names[how]);
+            context = what;
+            CHECK(make_pair(kind, &a, &b) == 0, "failed to make a connection");
+            CHECK(prepare_close(how, a, b) == 0, "failed to prepare the close");
+            close(a);
+            char buf[8];
+            int reset = is_reset(how);
+            // The bytes that the peer has not read come before the error, and before the end
+            int data = how == CLOSE_UNREAD_AT_B || how == CLOSE_BOTH_UNREAD;
+
+            CHECK_EVENTS(b, reset ? EV_RESET : EV_CLOSED, "events");
+            if (data) {
+                CHECK_CALL(recv(b, buf, sizeof(buf), MSG_DONTWAIT), 1, "the first read");
+            }
+            if (reset && data) {
+                // The error is still there, and read once by SO_ERROR
+                CHECK_EVENTS(b, EV_RESET, "events after reading the bytes");
+                CHECK_SO_ERROR(b, ECONNRESET, "after the bytes");
+            } else if (reset) {
+                CHECK_CALL(recv(b, buf, sizeof(buf), MSG_DONTWAIT), -ECONNRESET, "the first read");
+            } else {
+                CHECK_SO_ERROR(b, 0, "no reset");
+            }
+            // Only once: then it is the end of the file
+            CHECK_EVENTS(b, EV_CLOSED, "events after the error");
+            CHECK_SO_ERROR(b, 0, "after the error");
+            CHECK_CALL(recv(b, buf, sizeof(buf), MSG_DONTWAIT), 0, "the second read");
+            CHECK_CALL(recv(b, buf, sizeof(buf), MSG_DONTWAIT), 0, "the third read");
+            CHECK_CALL(send(b, "w", 1, MSG_NOSIGNAL), -EPIPE, "send");
+            CHECK_CALL(shutdown(b, SHUT_RDWR), 0, "shutdown");
+            close(b);
+        }
+    }
+    return 0;
+}
+
+// SO_ERROR returns the reset, and a read finds the end of the file after that
+static int test_so_error_returns_the_reset_once(void) {
+    for (int kind = 0; kind < NUM_PAIR_KINDS; kind++) {
+        int a, b;
+        context = pair_names[kind];
+        CHECK(make_pair(kind, &a, &b) == 0, "failed to make a connection");
+        CHECK(write(b, "u", 1) == 1, "failed to write");
+        CHECK_SO_ERROR(b, 0, "before the close");
+        close(a);
+        CHECK_SO_ERROR(b, ECONNRESET, "first");
+        CHECK_SO_ERROR(b, 0, "second");
+        char buf[8];
+        CHECK_CALL(recv(b, buf, sizeof(buf), MSG_DONTWAIT), 0, "read");
+        close(b);
+    }
+    return 0;
+}
+
+// The read of a message that peeks at the bytes is told of the error, too, and so are the other
+// calls that read
+static int test_reset_is_told_to_all_calls_that_read(void) {
+    enum { PEEK, READ, READV, RECVMSG, RECVFROM, NUM_CALLS };
+    for (int call = 0; call < NUM_CALLS; call++) {
+        int a, b;
+        CHECK(make_pair(PAIR_SOCKETPAIR, &a, &b) == 0, "failed to make a connection");
+        CHECK(write(b, "u", 1) == 1, "failed to write");
+        close(a);
+        char buf[8];
+        struct iovec iov = { buf, sizeof(buf) };
+        struct msghdr msg = { .msg_iov = &iov, .msg_iovlen = 1 };
+        struct iovec none = { buf, 0 };
+        set_nonblocking(b, 1);
+        // Reading no bytes is no read, and leaves the error to the next one
+        CHECK_CALL(read(b, buf, 0), 0, "read of no bytes");
+        CHECK_CALL(readv(b, &none, 1), 0, "readv of no bytes");
+        switch (call) {
+            case PEEK:
+                CHECK_CALL(recv(b, buf, sizeof(buf), MSG_PEEK), -ECONNRESET, "recv peek");
+                break;
+            case READ:
+                CHECK_CALL(read(b, buf, sizeof(buf)), -ECONNRESET, "read");
+                break;
+            case READV:
+                CHECK_CALL(readv(b, &iov, 1), -ECONNRESET, "readv");
+                break;
+            case RECVMSG:
+                CHECK_CALL(recvmsg(b, &msg, 0), -ECONNRESET, "recvmsg");
+                break;
+            case RECVFROM:
+                CHECK_CALL(recvfrom(b, buf, sizeof(buf), 0, NULL, NULL), -ECONNRESET, "recvfrom");
+                break;
+        }
+        CHECK_CALL(recv(b, buf, sizeof(buf), 0), 0, "the second read");
+        close(b);
+    }
+    return 0;
+}
+
+// A write to a connection that was reset fails with EPIPE, and raises SIGPIPE, like to any
+// connection that is closed. The error stays for the read.
+static atomic_int sigpipes;
+
+static void on_sigpipe(int sig) {
+    atomic_fetch_add(&sigpipes, 1);
+}
+
+static int test_write_to_a_reset_connection(void) {
+    for (int kind = 0; kind < NUM_PAIR_KINDS; kind++) {
+        int a, b;
+        context = pair_names[kind];
+        CHECK(make_pair(kind, &a, &b) == 0, "failed to make a connection");
+        CHECK(write(b, "u", 1) == 1, "failed to write");
+        close(a);
+        int signals = atomic_load(&sigpipes);
+        CHECK_CALL(write(b, "w", 1), -EPIPE, "write");
+        CHECK(atomic_load(&sigpipes) == signals + 1, "the write raises no SIGPIPE");
+        CHECK_CALL(send(b, "w", 1, MSG_NOSIGNAL), -EPIPE, "send");
+        CHECK(atomic_load(&sigpipes) == signals + 1, "the send raises SIGPIPE");
+        CHECK_EVENTS(b, EV_RESET, "events");
+        char buf[8];
+        CHECK_CALL(recv(b, buf, sizeof(buf), MSG_DONTWAIT), -ECONNRESET, "read");
+        close(b);
+    }
+    return 0;
+}
+
+// The socket stays open as long as a descriptor of it is: only its last close resets the peer
+static int test_reset_comes_with_the_last_close(void) {
+    int a, b;
+    CHECK(make_pair(PAIR_SOCKETPAIR, &a, &b) == 0, "failed to make a connection");
+    CHECK(write(b, "u", 1) == 1, "failed to write");
+    int d = dup(a);
+    CHECK(d >= 0, "failed to dup");
+    close(a);
+    CHECK_EVENTS(b, POLLOUT, "events with the duplicate open");
+    close(d);
+    CHECK_EVENTS(b, EV_RESET, "events");
+    char buf[8];
+    CHECK_CALL(recv(b, buf, sizeof(buf), MSG_DONTWAIT), -ECONNRESET, "read");
+    close(b);
+    return 0;
+}
+
+// A listener that is closed resets the connections that it has not accepted, whether the client has
+// written or not. The connections that it has accepted do not notice. A client that has closed is
+// not reset, whatever the listener has done: its connection is read to the end of the file.
+static int test_close_of_a_listener_resets_pending_connections(void) {
+    for (int wrote = 0; wrote <= 1; wrote++) {
+        unix_addr_t a;
+        int l = make_socket(SOCK_LISTENING, &a);
+        CHECK(l >= 0, "failed to listen");
+        char what[64];
+        snprintf(what, sizeof(what), "%s", wrote ? "the client has written" : "idle client");
+        context = what;
+        int gone = socket(AF_UNIX, SOCK_STREAM, 0);
+        int accepted = socket(AF_UNIX, SOCK_STREAM, 0);
+        int pending = socket(AF_UNIX, SOCK_STREAM, 0);
+        CHECK(gone >= 0 && accepted >= 0 && pending >= 0, "failed to make sockets");
+        char buf[8];
+        CHECK_CALL(connect_to(gone, &a), 0, "connect");
+        CHECK_CALL(write(gone, "early", 5), 5, "write");
+        close(gone);
+        int s_gone = accept(l, NULL, NULL);
+        CHECK(s_gone >= 0, "failed to accept");
+        CHECK_CALL(read(s_gone, buf, sizeof(buf)), 5, "read of the client that closed");
+        CHECK_CALL(read(s_gone, buf, sizeof(buf)), 0, "read of the end of the file");
+        CHECK_SO_ERROR(s_gone, 0, "no reset of the client that closed");
+        close(s_gone);
+        CHECK_CALL(connect_to(accepted, &a), 0, "connect");
+        int s = accept(l, NULL, NULL);
+        CHECK(s >= 0, "failed to accept");
+        CHECK_CALL(connect_to(pending, &a), 0, "connect");
+        if (wrote) {
+            CHECK_CALL(write(pending, "d", 1), 1, "write");
+        }
+        close(l);
+
+        // The connection that was accepted goes on
+        CHECK_EVENTS(accepted, POLLOUT, "events of the accepted connection");
+        CHECK_CALL(write(s, "ok", 2), 2, "write to the client of the accepted connection");
+        CHECK_CALL(recv(accepted, buf, sizeof(buf), 0), 2, "read of the accepted connection");
+        // The other is reset
+        CHECK_EVENTS(pending, EV_RESET, "events of the pending connection");
+        CHECK_CALL(recv(pending, buf, sizeof(buf), MSG_DONTWAIT), -ECONNRESET, "read");
+        CHECK_EVENTS(pending, EV_CLOSED, "events after the error");
+        CHECK_CALL(recv(pending, buf, sizeof(buf), MSG_DONTWAIT), 0, "the second read");
+        CHECK_CALL(send(pending, "x", 1, MSG_NOSIGNAL), -EPIPE, "send");
+        close(pending);
+        close(accepted);
+        close(s);
+    }
+    return 0;
+}
+
+// The same, with SO_ERROR before any read
+static int test_close_of_a_listener_sets_so_error(void) {
+    unix_addr_t a;
+    int l = make_socket(SOCK_LISTENING, &a);
+    CHECK(l >= 0, "failed to listen");
+    int pending = socket(AF_UNIX, SOCK_STREAM, 0);
+    CHECK_CALL(connect_to(pending, &a), 0, "connect");
+    close(l);
+    CHECK_SO_ERROR(pending, ECONNRESET, "first");
+    CHECK_SO_ERROR(pending, 0, "second");
+    char buf[8];
+    CHECK_CALL(recv(pending, buf, sizeof(buf), MSG_DONTWAIT), 0, "read");
+    close(pending);
+    return 0;
+}
+
+// What blocked calls get when the peer is closed with unread bytes
+enum { OP_RECV, OP_SEND, OP_POLL, OP_EPOLL };
+
+typedef struct {
+    int kind;
+    int fd;
+    pthread_t thread;
+    atomic_int started;
+    atomic_int done;
+    long ret;
+    int err;
+    unsigned revents;
+} op_t;
+
+static void *op_main(void *arg) {
+    op_t *op = arg;
+    char buf[8];
+    long ret = -2;
+    unsigned revents = 0;
+    atomic_store(&op->started, 1);
+    errno = 0;
+    switch (op->kind) {
+        case OP_RECV:
+            ret = recv(op->fd, buf, sizeof(buf), 0);
+            break;
+        case OP_SEND:
+            ret = send(op->fd, buf, 1, 0);
+            break;
+        case OP_POLL: {
+            struct pollfd pfd = { .fd = op->fd, .events = POLLIN };
+            ret = poll(&pfd, 1, -1);
+            revents = (unsigned short)pfd.revents;
+            break;
+        }
+        case OP_EPOLL: {
+            // The descriptor is an epoll file
+            struct epoll_event event;
+            ret = epoll_wait(op->fd, &event, 1, -1);
+            revents = ret > 0 ? event.events : 0;
+            break;
+        }
+    }
+    op->err = errno;
+    op->ret = ret;
+    op->revents = revents;
+    atomic_store(&op->done, 1);
+    return NULL;
+}
+
+static int op_start(op_t *op, int kind, int fd) {
+    memset(op, 0, sizeof(*op));
+    op->kind = kind;
+    op->fd = fd;
+    if (pthread_create(&op->thread, NULL, op_main, op) != 0) {
+        return -1;
+    }
+    while (!atomic_load(&op->started)) {
+        usleep(100);
+    }
+    // The call has blocked by now
+    usleep(100 * 1000);
+    return atomic_load(&op->done) ? -1 : 0;
+}
+
+// Waits for the thread to return. Returns -1 if it does not.
+static int op_finish(op_t *op) {
+    for (int i = 0; i < 5000 && !atomic_load(&op->done); i++) {
+        usleep(1000);
+    }
+    if (!atomic_load(&op->done)) {
+        return -1;
+    }
+    pthread_join(op->thread, NULL);
+    return 0;
+}
+
+// A read that waits is told of the reset when the peer is closed. A poll that waits is told, too.
+static int test_close_with_unread_bytes_wakes_a_blocked_read_with_the_error(void) {
+    for (int kind = 0; kind < NUM_PAIR_KINDS; kind++) {
+        for (int call = OP_RECV; call <= OP_POLL; call += OP_POLL - OP_RECV) {
+            int a, b;
+            context = pair_names[kind];
+            CHECK(make_pair(kind, &a, &b) == 0, "failed to make a connection");
+            CHECK(write(b, "u", 1) == 1, "failed to write");
+            op_t op;
+            CHECK(op_start(&op, call, b) == 0, "the %s does not wait", call == OP_RECV ? "read" :
+                  "poll");
+            close(a);
+            CHECK(op_finish(&op) == 0, "the %s is not woken by the close", call == OP_RECV ? "read" :
+                  "poll");
+            if (call == OP_RECV) {
+                CHECK(op.ret == -1 && op.err == ECONNRESET, "the read returns %ld, errno %d, "
+                      "instead of ECONNRESET", op.ret, op.err);
+            } else {
+                // Only IN was asked for, and an error and a hangup are always reported
+                unsigned expected = POLLIN | POLLERR | POLLHUP;
+                CHECK(op.ret == 1 && op.revents == expected, "the poll returns %ld, events %s, "
+                      "instead of %s", op.ret, events_str(op.revents), events_str(expected));
+            }
+            close(b);
+        }
+    }
+    return 0;
+}
+
+// A write that waits for room gets the error, too, and no SIGPIPE, if the peer is closed. Without
+// unread bytes, it is EPIPE, as before: one end only is closed, as the peer has shut down reading.
+static int test_close_wakes_a_blocked_write_with_the_error(void) {
+    for (int kind = 0; kind < NUM_PAIR_KINDS; kind++) {
+        for (int how = 0; how < 2; how++) {
+            int a, b;
+            char what[64];
+            snprintf(what, sizeof(what), "%s, %s", pair_names[kind],
+                     how ? "SHUT_RD" : "close");
+            context = what;
+            CHECK(make_pair(kind, &a, &b) == 0, "failed to make a connection");
+            // The send buffer of `a` is full, and `b` has not read it
+            CHECK(fill(a) == 0, "failed to fill the buffer");
+            op_t op;
+            int signals = atomic_load(&sigpipes);
+            CHECK(op_start(&op, OP_SEND, a) == 0, "the write does not wait");
+            if (how == 0) {
+                close(b);
+            } else {
+                CHECK(shutdown(b, SHUT_RD) == 0, "failed to shut down");
+            }
+            CHECK(op_finish(&op) == 0, "the write is not woken");
+            // A close with bytes that nobody has read is a reset, and a shutdown is not
+            int err = how == 0 ? ECONNRESET : EPIPE;
+            CHECK(op.ret == -1 && op.err == err, "the write returns %ld, errno %d, instead of %d",
+                  op.ret, op.err, err);
+            CHECK(atomic_load(&sigpipes) == signals, "the write that waited raises SIGPIPE");
+            close(a);
+            if (how == 1) {
+                close(b);
+            }
+        }
+    }
+    return 0;
+}
+
+// A peer that reads while the socket is closed finds the bytes that the socket sent, then, once, the
+// error of a reset if the closed socket had bytes that it had not read, and the end of the file.
+typedef struct {
+    int fd;
+    atomic_int started;
+    atomic_int done;
+    long bytes;
+    int resets;
+    int in_order;       // no byte after an error, and no error after the end of the file
+    int bad_errno;
+} reader_t;
+
+static void *reader_main(void *arg) {
+    reader_t *r = arg;
+    char buf[64];
+    atomic_store(&r->started, 1);
+    r->in_order = 1;
+    for (;;) {
+        errno = 0;
+        ssize_t n = recv(r->fd, buf, sizeof(buf), 0);
+        if (n > 0) {
+            r->in_order &= r->resets == 0;
+            r->bytes += n;
+        } else if (n == 0) {
+            break;
+        } else if (errno == ECONNRESET) {
+            r->resets++;
+        } else {
+            r->bad_errno = errno;
+            break;
+        }
+    }
+    atomic_store(&r->done, 1);
+    return NULL;
+}
+
+static int test_close_while_the_peer_reads(void) {
+    for (int i = 0; i < 120; i++) {
+        int a, b;
+        char what[64];
+        int unread_at_a = i % 2;
+        snprintf(what, sizeof(what), "%s, round %d, %s", pair_names[(i / 2) % NUM_PAIR_KINDS], i,
+                 unread_at_a ? "unread bytes" : "no unread bytes");
+        context = what;
+        CHECK(make_pair((i / 2) % NUM_PAIR_KINDS, &a, &b) == 0, "failed to make a connection");
+        static const char data[100];
+        long sent = 0;
+        for (int k = 0; k < i % 4; k++) {
+            CHECK(write(a, data, sizeof(data)) == sizeof(data), "failed to write");
+            sent += sizeof(data);
+        }
+        if (unread_at_a) {
+            CHECK(write(b, "u", 1) == 1, "failed to write");
+        }
+        reader_t r;
+        memset(&r, 0, sizeof(r));
+        r.fd = b;
+        pthread_t thread;
+        CHECK(pthread_create(&thread, NULL, reader_main, &r) == 0, "failed to start a thread");
+        while (!atomic_load(&r.started)) {
+            usleep(50);
+        }
+        usleep((i % 5) * 100);
+        close(a);
+        for (int w = 0; w < 5000 && !atomic_load(&r.done); w++) {
+            usleep(1000);
+        }
+        CHECK(atomic_load(&r.done), "the read is not woken by the close");
+        pthread_join(thread, NULL);
+        CHECK(r.bad_errno == 0, "read fails with errno %d", r.bad_errno);
+        CHECK(r.bytes == sent, "read %ld bytes, instead of %ld", r.bytes, sent);
+        CHECK(r.resets == unread_at_a, "read fails with ECONNRESET %d times, instead of %d",
+              r.resets, unread_at_a);
+        CHECK(r.in_order, "a byte comes after the error");
+        close(b);
+    }
+    return 0;
+}
+
+// The bytes that a closed socket has not read are gone: its peer, whose buffer was full, has room
+// again, and a write fails with EPIPE, instead of waiting for it
+static int test_full_buffer_has_room_after_the_peer_closes(void) {
+    for (int kind = 0; kind < NUM_PAIR_KINDS; kind++) {
+        context = pair_names[kind];
+        int a, b;
+        CHECK(make_pair(kind, &a, &b) == 0, "failed to make a connection");
+        CHECK(fill(a) == 0, "failed to fill the buffer");
+        CHECK_EVENTS(a, 0, "full buffer");
+        close(b);
+        CHECK_EVENTS(a, EV_RESET, "events after the close of the peer");
+        CHECK_CALL(send(a, "x", 1, MSG_NOSIGNAL | MSG_DONTWAIT), -EPIPE, "send");
+        char buf[8];
+        CHECK_CALL(recv(a, buf, sizeof(buf), MSG_DONTWAIT), -ECONNRESET, "read");
+        close(a);
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Edge triggered epoll
+// ---------------------------------------------------------------------------------------------
+
+static int epoll_add(int epfd, int fd, unsigned events) {
+    struct epoll_event event = { .events = events, .data.fd = fd };
+    return epoll_ctl(epfd, EPOLL_CTL_ADD, fd, &event);
+}
+
+// The events that epoll_wait returns at once: 0 if there are none, -1 if it fails
+static long epoll_now(int epfd) {
+    struct epoll_event event;
+    int ret = epoll_wait(epfd, &event, 1, 0);
+    return ret < 0 ? -1 : ret == 0 ? 0 : (long)event.events;
+}
+
+// Checks the events of epoll_wait, which does not wait: there are none if `expected` is 0
+#define CHECK_EPOLL(epfd, expected, what) do { \
+        long __events = epoll_now(epfd); \
+        unsigned __expected = (expected); \
+        CHECK(__events == (long)__expected, "%s: epoll_wait returns the events %s, instead of %s", \
+              what, __events < 0 ? "an error" : events_str(__events), events_str(__expected)); \
+    } while (0)
+
+#define EV_EDGE (EPOLLIN | EPOLLOUT | EPOLLRDHUP | EPOLLET)
+
+// epoll tells the reset: an error, and the hangup that comes with it, once
+static int test_epoll_is_told_of_the_reset(void) {
+    for (int kind = 0; kind < NUM_PAIR_KINDS; kind++) {
+        context = pair_names[kind];
+        int a, b;
+        CHECK(make_pair(kind, &a, &b) == 0, "failed to make a connection");
+        CHECK(write(b, "u", 1) == 1, "failed to write");
+        int edge = epoll_create1(0);
+        int level = epoll_create1(0);
+        CHECK(edge >= 0 && epoll_add(edge, b, EV_EDGE) == 0, "failed to make an epoll file");
+        CHECK(level >= 0 && epoll_add(level, b, EPOLLIN | EPOLLOUT | EPOLLRDHUP) == 0,
+              "failed to make an epoll file");
+        CHECK_EPOLL(edge, POLLOUT, "at the registration");
+        CHECK_EPOLL(level, POLLOUT, "of the level triggered registration");
+
+        close(a);
+        CHECK_EPOLL(edge, EV_RESET, "after the close");
+        CHECK_EPOLL(edge, 0, "again");
+        CHECK_EPOLL(level, EV_RESET, "of the level triggered registration after the close");
+        // The error is gone after it is read, and the registration that is level triggered has the
+        // end of the file
+        char buf[8];
+        CHECK_CALL(recv(b, buf, sizeof(buf), MSG_DONTWAIT), -ECONNRESET, "read");
+        CHECK_EPOLL(level, EV_CLOSED, "of the level triggered registration after the read");
+        close(edge);
+        close(level);
+        close(b);
+    }
+    return 0;
+}
+
+// A thread that waits in epoll_wait for the socket is woken up by the close that resets it
+static int test_epoll_wait_is_woken_by_the_reset(void) {
+    for (int kind = 0; kind < NUM_PAIR_KINDS; kind++) {
+        context = pair_names[kind];
+        int a, b;
+        CHECK(make_pair(kind, &a, &b) == 0, "failed to make a connection");
+        CHECK(write(b, "u", 1) == 1, "failed to write");
+        int ep = epoll_create1(0);
+        CHECK(ep >= 0 && epoll_add(ep, b, EV_EDGE) == 0, "failed to make an epoll file");
+        CHECK_EPOLL(ep, POLLOUT, "at the registration");
+        op_t op;
+        CHECK(op_start(&op, OP_EPOLL, ep) == 0, "epoll_wait does not wait");
+        close(a);
+        CHECK(op_finish(&op) == 0, "epoll_wait is not woken");
+        CHECK(op.ret == 1 && op.revents == EV_RESET, "epoll_wait returns %ld, events %s, "
+              "instead of %s", op.ret, events_str(op.revents), events_str(EV_RESET));
+        close(ep);
+        close(b);
+    }
+    return 0;
+}
+
 static test_case_t test_cases[] = {
     TEST_CASE(test_shutdown_changes_the_events_at_once),
     TEST_CASE(test_full_buffer_is_not_writable_after_shutdown),
@@ -602,11 +1206,27 @@ static test_case_t test_cases[] = {
     TEST_CASE(test_shutdown_of_an_idle_or_bound_socket),
     TEST_CASE(test_shutdown_of_an_idle_socket_stays_after_connect),
     TEST_CASE(test_shutdown_of_a_bound_socket_stays_after_listen),
+    TEST_CASE(test_close_with_unread_bytes_resets_the_peer),
+    TEST_CASE(test_so_error_returns_the_reset_once),
+    TEST_CASE(test_reset_is_told_to_all_calls_that_read),
+    TEST_CASE(test_write_to_a_reset_connection),
+    TEST_CASE(test_reset_comes_with_the_last_close),
+    TEST_CASE(test_close_of_a_listener_resets_pending_connections),
+    TEST_CASE(test_close_of_a_listener_sets_so_error),
+    TEST_CASE(test_close_with_unread_bytes_wakes_a_blocked_read_with_the_error),
+    TEST_CASE(test_close_wakes_a_blocked_write_with_the_error),
+    TEST_CASE(test_close_while_the_peer_reads),
+    TEST_CASE(test_full_buffer_has_room_after_the_peer_closes),
+    TEST_CASE(test_epoll_is_told_of_the_reset),
+    TEST_CASE(test_epoll_wait_is_woken_by_the_reset),
 };
 
 int main(int argc, const char *argv[]) {
-    // A write to a socket that cannot write is a normal error here
-    signal(SIGPIPE, SIG_IGN);
+    // A write to a socket that cannot write is a normal error here, but some tests count the signals
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = on_sigpipe;
+    sigaction(SIGPIPE, &sa, NULL);
 
     test_case_t selected[ARRAY_SIZE(test_cases)];
     test_case_t *cases = test_cases;
