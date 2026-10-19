@@ -2,6 +2,7 @@ use super::endpoint::Endpoint;
 use super::endpoint::RelayNotifier;
 use super::stream::Listener;
 use super::*;
+use misc::get_random;
 use std::collections::btree_map::BTreeMap;
 
 lazy_static! {
@@ -47,7 +48,13 @@ impl AddressSpace {
         }
     }
 
-    pub fn add_binder(&self, addr: &UnixAddr) -> Result<()> {
+    /// Binds the address, which is automatically chosen if it is unnamed.
+    /// Returns the address that was bound.
+    pub fn add_binder(&self, addr: &UnixAddr) -> Result<UnixAddr> {
+        if let UnixAddr::Unnamed = addr {
+            return self.add_autobinder();
+        }
+
         let key = Self::get_key(addr)?;
         let mut space = self.get_space(addr)?;
         if space.contains_key(&key) {
@@ -60,8 +67,37 @@ impl AddressSpace {
                     listener: None,
                 },
             );
-            Ok(())
+            Ok(addr.clone())
         }
+    }
+
+    /// Binds an abstract name of the form that Linux chooses for a socket that
+    /// does not ask for one: a NUL and five hexadecimal digits.
+    fn add_autobinder(&self) -> Result<UnixAddr> {
+        const NAMES: u32 = 0x100000;
+
+        let mut first = [0; 4];
+        // The names do not have to be random
+        let _ = get_random(&mut first);
+        let first = u32::from_ne_bytes(first);
+
+        let mut space = self.abstr.lock().unwrap();
+        for i in 0..NAMES {
+            let name = format!("{:05x}", first.wrapping_add(i) % NAMES);
+            let addr = UnixAddr::Abstract(name.into_bytes());
+            let key = Self::get_key(&addr)?;
+            if !space.contains_key(&key) {
+                space.insert(
+                    key,
+                    Binding {
+                        addr: addr.clone(),
+                        listener: None,
+                    },
+                );
+                return Ok(addr);
+            }
+        }
+        return_errno!(ENOSPC, "all the names of the autobind are in use");
     }
 
     pub(super) fn add_listener(

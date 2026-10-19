@@ -195,10 +195,30 @@ impl Stream {
     }
 
     pub fn bind(&self, addr: &UnixAddr) -> Result<()> {
+        let bound = self.addr() != UnixAddr::Unnamed;
+        // Linux does not choose another name for a socket that has one
+        if bound && *addr == UnixAddr::Unnamed {
+            return Ok(());
+        }
+
         let mut unix_addr = addr.clone();
         let addr = &mut unix_addr;
 
         if let UnixAddr::File(inode_num, path) = addr {
+            // Linux creates the file before it finds out that the socket is
+            // bound already, so the name that exists is in use
+            if bound {
+                let exists = {
+                    let current = current!();
+                    let fs = current.fs().read().unwrap();
+                    fs.lookup_inode_no_follow(path.path_str()).is_ok()
+                };
+                return_errno!(
+                    if exists { EADDRINUSE } else { EINVAL },
+                    "the socket is already bound"
+                );
+            }
+
             // create the corresponding file in the fs and fill Addr with its inode
             let corresponding_inode_num = {
                 let current = current!();
@@ -220,16 +240,16 @@ impl Stream {
                 }
 
                 // check the global address space to see if the address is available before bind
-                ADDRESS_SPACE.add_binder(addr)?;
-                info.set_addr(addr);
+                let addr = ADDRESS_SPACE.add_binder(addr)?;
+                info.set_addr(&addr);
             }
             Status::Connected(endpoint) => {
                 if endpoint.addr().is_some() {
                     return_errno!(EINVAL, "the socket is already bound");
                 }
 
-                ADDRESS_SPACE.add_binder(addr)?;
-                endpoint.set_addr(addr);
+                let addr = ADDRESS_SPACE.add_binder(addr)?;
+                endpoint.set_addr(&addr);
             }
             Status::Listening(_) => return_errno!(EINVAL, "the socket is already bound"),
         }
@@ -260,6 +280,9 @@ impl Stream {
                     return_errno!(EINVAL, "the socket is not bound");
                 }
             }
+            // Like Linux, which takes the socket that accept returned for a
+            // bound one, and does not change it
+            Status::Connected(_) if self.accepted => (),
             Status::Connected(_) => return_errno!(EINVAL, "the socket is already connected"),
             // Modify the capacity of the channel holding incoming sockets
             Status::Listening(addr) => ADDRESS_SPACE.resize_listener(&addr, capacity)?,
@@ -272,6 +295,10 @@ impl Stream {
     /// Therefore, the connect function in our implementation will never block.
     pub fn connect(&self, addr: &UnixAddr) -> Result<()> {
         debug!("connect to {:?}", addr);
+
+        if let UnixAddr::Unnamed = addr {
+            return_errno!(EINVAL, "the address has no name");
+        }
 
         let mut inner = self.inner();
         match &*inner {
