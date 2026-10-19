@@ -98,24 +98,9 @@ shut.bound.rdwr.a_ev
 shut.bound.rdwr.a_read
 shut.bound.rdwr.again
 shut.bound.rdwr.other_how
-shut.listening.rd.rc
-shut.listening.rd.a_ev
 shut.listening.rd.a_read
-shut.listening.rd.new_connect
-shut.listening.rd.accept
-shut.listening.rd.again
-shut.listening.rd.other_how
-shut.listening.wr.rc
 shut.listening.wr.a_read
-shut.listening.wr.again
-shut.listening.wr.other_how
-shut.listening.rdwr.rc
-shut.listening.rdwr.a_ev
 shut.listening.rdwr.a_read
-shut.listening.rdwr.new_connect
-shut.listening.rdwr.accept
-shut.listening.rdwr.again
-shut.listening.rdwr.other_how
 shut.a_full.wr.a_ev
 shut.a_full.rdwr.a_ev
 shut.b_full.wr.b_write
@@ -160,11 +145,6 @@ epoll.out.after_1_byte_read
 # group c13_blocking
 blk.write_full.peer_close
 blk.write_full.woken_by_peer_read
-blk.accept.shut_rd
-blk.accept.shut_rd.after
-blk.accept.shut_wr
-blk.accept.shut_rdwr
-blk.accept.shut_rdwr.after
 
 # group c13_signals
 sig.read.sa_restart

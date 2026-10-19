@@ -1,7 +1,7 @@
 // The listening side of unix stream sockets: the backlog, connect() on a full backlog, accept()
-// with a timeout, and listen() while another thread waits in accept(). The expectations are the
-// behavior of Linux (checked on Linux 7.0): the test passes there, too (gcc -pthread
-// -I../include main.c).
+// with a timeout, listen() while another thread waits in accept(), and shutdown() of a listening
+// socket. The expectations are the behavior of Linux (checked on Linux 7.0): the test passes there,
+// too (gcc -pthread -I../include main.c).
 //
 // The calls that may block run in threads, so that a call that does not return when it should makes
 // the test case fail after a timeout instead of hanging it. A thread that never returns is left
@@ -20,6 +20,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/epoll.h>
+#include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/syscall.h>
 #include <sys/time.h>
@@ -226,7 +228,7 @@ static const char *events_str(unsigned events) {
 // Operations in threads
 // ---------------------------------------------------------------------------------------------
 
-enum { OP_ACCEPT, OP_CONNECT, OP_LISTEN };
+enum { OP_ACCEPT, OP_CONNECT, OP_LISTEN, OP_POLL, OP_EPOLL, OP_SELECT };
 
 typedef struct {
     int kind;
@@ -264,6 +266,27 @@ static void *op_main(void *arg) {
         case OP_LISTEN:
             ret = listen(op->fd, op->arg);
             break;
+        case OP_POLL: {
+            struct pollfd pfd = { .fd = op->fd, .events = EV_ALL };
+            ret = poll(&pfd, 1, -1);
+            revents = (unsigned short)pfd.revents;
+            break;
+        }
+        case OP_EPOLL: {
+            // The descriptor is an epoll file
+            struct epoll_event event;
+            ret = epoll_wait(op->fd, &event, 1, -1);
+            revents = ret > 0 ? event.events : 0;
+            break;
+        }
+        case OP_SELECT: {
+            fd_set rfds;
+            FD_ZERO(&rfds);
+            FD_SET(op->fd, &rfds);
+            ret = select(op->fd + 1, &rfds, NULL, NULL, NULL);
+            revents = FD_ISSET(op->fd, &rfds) ? POLLIN : 0;
+            break;
+        }
     }
     op->err = errno;
     op->ret = ret;
@@ -1072,6 +1095,457 @@ static int test_events_of_a_listener(void) {
     return 0;
 }
 
+// ---------------------------------------------------------------------------------------------
+// shutdown() of a listening socket
+// ---------------------------------------------------------------------------------------------
+
+// shutdown(SHUT_RD) and shutdown(SHUT_RDWR) end the wait of accept() with EINVAL, and the listener
+// refuses the connections, and shows the events. They return 0, as often as they are called
+static int test_shutdown_of_a_listener(void) {
+    static const struct {
+        int how;
+        const char *name;
+        long events;
+    } cases[] = {
+        { SHUT_RD, "SHUT_RD", POLLIN | POLLRDHUP },
+        { SHUT_RDWR, "SHUT_RDWR", POLLIN | POLLHUP | POLLRDHUP },
+    };
+    for (size_t i = 0; i < ARRAY_SIZE(cases); i++) {
+        unix_addr_t a;
+        int l = listener(&a, 4);
+        CHECK(l >= 0, "failed to listen");
+        CHECK(poll_now(l, EV_ALL) == 0, "events of a listener without connections: %s",
+              events_str(poll_now(l, EV_ALL)));
+        op_t acc;
+        CHECK(op_start(&acc, OP_ACCEPT, l) == 0, "failed to start the thread");
+        CHECK(op_blocks(&acc), "accept() does not wait");
+
+        CHECK(shutdown(l, cases[i].how) == 0, "%s of a listener fails", cases[i].name);
+        EXPECT_RETURNS(&acc, -1, EINVAL,
+                       "accept() that waits while the listener is shut down");
+        op_finish(&acc);
+
+        long events = poll_now(l, EV_ALL);
+        CHECK(events == cases[i].events, "%s: the events are %s, instead of %s",
+              cases[i].name, events_str(events), events_str(cases[i].events));
+
+        // A new accept() fails at once, unless it is nonblocking
+        CHECK(op_start(&acc, OP_ACCEPT, l) == 0, "failed to start the thread");
+        EXPECT_RETURNS(&acc, -1, EINVAL, "accept() on a listener that is shut down");
+        op_finish(&acc);
+        set_nonblocking(l, 1);
+        CHECK(accept_fails(l, EAGAIN),
+              "nonblocking accept() on a listener that is shut down");
+
+        // New connections are refused
+        int c = new_socket(0);
+        CHECK(connect_fails(c, &a, ECONNREFUSED),
+              "connect() to a listener that is shut down");
+        int c2 = new_socket(1);
+        CHECK(connect_fails(c2, &a, ECONNREFUSED),
+              "nonblocking connect() to a listener that is shut down");
+        CHECK(poll_now(l, EV_ALL) == cases[i].events,
+              "the refused connections change the events");
+
+        CHECK(shutdown(l, cases[i].how) == 0, "the second %s of a listener fails",
+              cases[i].name);
+        CHECK(shutdown(l, SHUT_RDWR) == 0, "SHUT_RDWR of a listener fails");
+        CHECK(shutdown(l, SHUT_WR) == 0, "SHUT_WR of a listener fails");
+
+        // It still listens, and listen() again does not undo the shutdown
+        int accepting = 0;
+        socklen_t len = sizeof(accepting);
+        CHECK(listen(l, 5) == 0, "listen() after the shutdown fails");
+        getsockopt(l, SOL_SOCKET, SO_ACCEPTCONN, &accepting, &len);
+        CHECK(accepting == 1, "the listener that is shut down does not listen");
+        CHECK(connect_fails(c, &a, ECONNREFUSED),
+              "connect() to a listener that is shut down, after listen() again");
+        close(c2);
+        close(c);
+        close(l);
+    }
+    return 0;
+}
+
+// The connections that were queued before the shutdown can still be accepted
+static int test_shutdown_of_a_listener_keeps_the_queued_connections(void) {
+    unix_addr_t a;
+    int l = listener(&a, 4);
+    CHECK(l >= 0, "failed to listen");
+    int c1 = new_socket(0);
+    int c2 = new_socket(0);
+    CHECK(connect_to(c1, &a) == 0 && connect_to(c2, &a) == 0, "failed to connect");
+    CHECK(shutdown(l, SHUT_RD) == 0, "failed to shut down the listener");
+    CHECK(poll_now(l, EV_ALL) == (POLLIN | POLLRDHUP), "wrong events: %s",
+          events_str(poll_now(l, EV_ALL)));
+    for (int i = 0; i < 2; i++) {
+        op_t acc;
+        CHECK(op_start(&acc, OP_ACCEPT, l) == 0, "failed to start the thread");
+        CHECK(op_wait(&acc, WAKE_MS) && acc.ret >= 0,
+              "accept() of the connection %d fails", i);
+        close((int)acc.ret);
+        op_finish(&acc);
+    }
+    op_t acc;
+    CHECK(op_start(&acc, OP_ACCEPT, l) == 0, "failed to start the thread");
+    EXPECT_RETURNS(&acc, -1, EINVAL, "accept() after the queued connections");
+    op_finish(&acc);
+    close(c2);
+    close(c1);
+    close(l);
+    return 0;
+}
+
+// shutdown(SHUT_WR) does nothing to a listener
+static int test_shutdown_of_a_listener_for_writing(void) {
+    unix_addr_t a;
+    int l = listener(&a, 4);
+    CHECK(l >= 0, "failed to listen");
+    op_t acc;
+    CHECK(op_start(&acc, OP_ACCEPT, l) == 0, "failed to start the thread");
+    CHECK(op_blocks(&acc), "accept() does not wait");
+
+    CHECK(shutdown(l, SHUT_WR) == 0, "SHUT_WR of a listener fails");
+    CHECK(op_blocks(&acc), "SHUT_WR ends the wait of accept()");
+    CHECK(poll_now(l, EV_ALL) == 0, "SHUT_WR changes the events of a listener: %s",
+          events_str(poll_now(l, EV_ALL)));
+    int c = new_socket(0);
+    CHECK(connect_to(c, &a) == 0,
+          "connect() to a listener that is shut down for writing fails");
+    CHECK(op_wait(&acc, WAKE_MS) && acc.ret >= 0, "accept() does not get the connection");
+    close((int)acc.ret);
+    op_finish(&acc);
+    CHECK(shutdown(l, SHUT_WR) == 0, "the second SHUT_WR of a listener fails");
+
+    // Both together are SHUT_RDWR
+    CHECK(shutdown(l, SHUT_RD) == 0, "SHUT_RD after SHUT_WR fails");
+    CHECK(poll_now(l, EV_ALL) == (POLLIN | POLLHUP | POLLRDHUP), "wrong events: %s",
+          events_str(poll_now(l, EV_ALL)));
+    close(c);
+    close(l);
+    return 0;
+}
+
+// The threads that wait for events of a listener are woken by its shutdown
+static int test_shutdown_of_a_listener_wakes_pollers(void) {
+    unix_addr_t a;
+    int l = listener(&a, 4);
+    CHECK(l >= 0, "failed to listen");
+    int epfd = epoll_create1(0);
+    int epfd_et = epoll_create1(0);
+    struct epoll_event event = { .events = EPOLLIN | EPOLLRDHUP, .data.fd = l };
+    CHECK(epfd >= 0 && epoll_ctl(epfd, EPOLL_CTL_ADD, l, &event) == 0,
+          "failed to use epoll");
+    event.events |= EPOLLET;
+    CHECK(epfd_et >= 0 && epoll_ctl(epfd_et, EPOLL_CTL_ADD, l, &event) == 0,
+          "failed to use epoll");
+
+    op_t ops[4];
+    CHECK(op_start(&ops[0], OP_POLL, l) == 0, "failed to start the thread");
+    CHECK(op_start(&ops[1], OP_EPOLL, epfd) == 0, "failed to start the thread");
+    CHECK(op_start(&ops[2], OP_EPOLL, epfd_et) == 0, "failed to start the thread");
+    CHECK(op_start(&ops[3], OP_SELECT, l) == 0, "failed to start the thread");
+    sleep_ms(SETTLE_MS);
+    for (int i = 0; i < 4; i++) {
+        CHECK(!op_done(&ops[i]), "a thread that waits for events of a listener returns");
+    }
+    CHECK(shutdown(l, SHUT_RDWR) == 0, "failed to shut down the listener");
+    for (int i = 0; i < 4; i++) {
+        CHECK(op_wait(&ops[i], WAKE_MS), "the thread %d is not woken by the shutdown", i);
+        CHECK(ops[i].ret == 1 && (ops[i].revents & POLLIN), "the thread %d got %ld, %s",
+              i, ops[i].ret, events_str(ops[i].revents));
+        if (i < 3) {
+            CHECK(ops[i].revents & POLLRDHUP, "the thread %d did not get RDHUP: %s", i,
+                  events_str(ops[i].revents));
+        }
+        op_finish(&ops[i]);
+    }
+    close(epfd_et);
+    close(epfd);
+    close(l);
+    return 0;
+}
+
+// After shutdown(SHUT_RD), connect() fails at once, also if the backlog is full, and the one that
+// waits fails when there is room. Occlum does not make it wait for an accept() that may never come,
+// and refuses it when the listener is shut down
+static int test_connect_after_shutdown_of_the_listener(void) {
+    unix_addr_t a;
+    int l = listener(&a, 0);
+    CHECK(l >= 0, "failed to listen");
+    int first = new_socket(0);
+    CHECK(connect_to(first, &a) == 0, "failed to connect");
+    int c = new_socket(0);
+    op_t con;
+    CHECK(op_start_connect(&con, c, &a) == 0, "failed to start the thread");
+    CHECK(op_blocks(&con), "connect() does not wait");
+
+    CHECK(shutdown(l, SHUT_RD) == 0, "failed to shut down the listener");
+    int c2 = new_socket(0);
+    op_t con2;
+    CHECK(op_start_connect(&con2, c2, &a) == 0, "failed to start the thread");
+    EXPECT_RETURNS(&con2, -1, ECONNREFUSED,
+                   "connect() to the listener that is shut down");
+    op_finish(&con2);
+
+    if (in_occlum()) {
+        EXPECT_RETURNS(&con, -1, ECONNREFUSED,
+                       "connect() that waited for the listener that is shut down");
+    }
+    // The accept makes room for the one that waited, which is refused
+    int s = accept(l, NULL, NULL);
+    CHECK(s >= 0, "failed to accept the connection that was queued before the shutdown");
+    EXPECT_RETURNS(&con, -1, ECONNREFUSED,
+                   "connect() that waited for the listener that is shut down");
+    op_finish(&con);
+    close(s);
+    close(c2);
+    close(c);
+    close(first);
+    close(l);
+    return 0;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Closing and shutting down while connecting
+// ---------------------------------------------------------------------------------------------
+
+// How the listener goes: closed, or shut down with shutdown() and this how
+#define CLOSE   (-1)
+static const char *go_name(int how) {
+    return how == CLOSE ? "close" : how == SHUT_RD ? "SHUT_RD" : "SHUT_RDWR";
+}
+
+typedef struct {
+    int fd;
+    int how;
+    atomic_int ready;
+    atomic_int go;
+} race_t;
+
+static void *go_when_told(void *arg) {
+    race_t *race = arg;
+    atomic_store(&race->ready, 1);
+    while (!atomic_load(&race->go)) {
+    }
+    if (race->how == CLOSE) {
+        close(race->fd);
+    } else {
+        shutdown(race->fd, race->how);
+    }
+    return NULL;
+}
+
+// connect() while the listener is closed or shut down never fails with EPIPE or another error
+// that is not the refusal: it connects, or it is refused. If the backlog is full, connect() is
+// refused, or, if it is nonblocking, it may fail with EAGAIN, too, before the listener goes
+static int test_connect_while_the_listener_goes(void) {
+    static const int hows[] = { CLOSE, SHUT_RD, SHUT_RDWR };
+    for (int round = 0; round < 300; round++) {
+        int how = hows[round % 3];
+        int full = round % 2;
+        // Linux does not wake the connect() that waits for room when the listener is shut down
+        // (but when it is closed, or when there is room), so it would wait for ever
+        int nonblocking = (full && how != CLOSE) || (round / 2) % 2;
+        unix_addr_t a;
+        int l = listener(&a, 0);
+        CHECK(l >= 0, "failed to listen");
+        int first = -1;
+        if (full) {
+            first = new_socket(0);
+            CHECK(connect_to(first, &a) == 0, "failed to connect");
+        }
+
+        race_t race;
+        memset(&race, 0, sizeof(race));
+        race.fd = l;
+        race.how = how;
+        pthread_t thread;
+        pthread_attr_t attr;
+        pthread_attr_init(&attr);
+        pthread_attr_setstacksize(&attr, STACK_SIZE);
+        CHECK(pthread_create(&thread, &attr, go_when_told, &race) == 0,
+              "failed to start the thread");
+        pthread_attr_destroy(&attr);
+        while (!atomic_load(&race.ready)) {
+        }
+        int c = new_socket(nonblocking);
+        atomic_store(&race.go, 1);
+        int ret = connect_to(c, &a);
+        int err = errno;
+        pthread_join(thread, NULL);
+
+        int allowed = ret == 0 ? !full :
+                      err == ECONNREFUSED || (full && nonblocking && err == EAGAIN);
+        errno = err;
+        CHECK(allowed,
+              "connect() as the listener goes (%s, full: %d, nonblocking: %d) returned %d",
+              go_name(how), full, nonblocking, ret);
+        close(c);
+        if (first >= 0) {
+            close(first);
+        }
+        if (how != CLOSE) {
+            close(l);
+        }
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Stopping a thread that accepts
+// ---------------------------------------------------------------------------------------------
+
+typedef struct {
+    int fd;
+    int nonblocking_with_poll;
+    atomic_int served;
+    atomic_int stopped;
+    atomic_int err;
+} server_t;
+
+// The loop of a server, which ends when accept() fails
+static void *serve_main(void *arg) {
+    server_t *server = arg;
+    for (;;) {
+        if (server->nonblocking_with_poll) {
+            struct pollfd pfd = { .fd = server->fd, .events = POLLIN };
+            poll(&pfd, 1, -1);
+        }
+        int s = accept(server->fd, NULL, NULL);
+        if (s < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            // The loop ends with EINVAL (blocking) or EAGAIN (poll, then nonblocking)
+            atomic_store(&server->err, errno);
+            break;
+        }
+        char msg;
+        ssize_t n = read(s, &msg, 1);
+        if (n == 1) {
+            // The count is up before the client gets the reply
+            atomic_fetch_add(&server->served, 1);
+            n = write(s, &msg, 1);
+        }
+        (void)n;
+        close(s);
+    }
+    atomic_store(&server->stopped, 1);
+    return NULL;
+}
+
+static int serve_clients(const unix_addr_t *a, int n) {
+    for (int i = 0; i < n; i++) {
+        int c = new_socket(0);
+        char msg = 'a' + i, reply = 0;
+        if (connect_to(c, a) < 0 || write(c, &msg, 1) != 1 || read(c, &reply, 1) != 1 ||
+                reply != msg) {
+            close(c);
+            return -1;
+        }
+        close(c);
+    }
+    return 0;
+}
+
+// The way to stop an accept loop, e.g., when a database server shuts down: shutdown() of the
+// listening socket from another thread, and then close(). The loop is a blocking accept(), or
+// a poll() before a nonblocking accept()
+static int test_stop_an_accept_loop(void) {
+    for (int poll_loop = 0; poll_loop < 2; poll_loop++) {
+        unix_addr_t a;
+        int l = listener(&a, 8);
+        CHECK(l >= 0, "failed to listen");
+        if (poll_loop) {
+            set_nonblocking(l, 1);
+        }
+        server_t server;
+        memset(&server, 0, sizeof(server));
+        server.fd = l;
+        server.nonblocking_with_poll = poll_loop;
+        pthread_t thread;
+        pthread_attr_t attr;
+        pthread_attr_init(&attr);
+        pthread_attr_setstacksize(&attr, STACK_SIZE);
+        CHECK(pthread_create(&thread, &attr, serve_main, &server) == 0,
+              "failed to start the server");
+        pthread_attr_destroy(&attr);
+        CHECK(serve_clients(&a, 3) == 0, "the server does not serve the clients");
+        CHECK(atomic_load(&server.served) == 3, "the server served %d clients",
+              atomic_load(&server.served));
+
+        CHECK(shutdown(l, SHUT_RDWR) == 0, "failed to shut down the listener");
+        long deadline = now_ms() + WAKE_MS;
+        while (!atomic_load(&server.stopped) && now_ms() < deadline) {
+            usleep(1000);
+        }
+        if (!atomic_load(&server.stopped)) {
+            atomic_fetch_add(&stuck_threads, 1);
+            THROW_ERROR("the accept loop (%s) does not stop after shutdown()",
+                        poll_loop ? "poll, nonblocking" : "blocking");
+        }
+        pthread_join(thread, NULL);
+        int expected = poll_loop ? EAGAIN : EINVAL;
+        CHECK(atomic_load(&server.err) == expected,
+              "the accept loop ended with errno %d, instead of %d",
+              atomic_load(&server.err), expected);
+        close(l);
+
+        // A client finds no one at the address
+        int c = new_socket(0);
+        CHECK(connect_fails(c, &a, ECONNREFUSED), "the client connects after the stop");
+        close(c);
+    }
+    return 0;
+}
+
+static int g_handler_fd;
+static void shutdown_in_handler(int sig) {
+    shutdown(g_handler_fd, SHUT_RDWR);
+}
+
+// The same, in a signal handler of the thread that accepts: the signal interrupts accept(), the
+// handler shuts down the listener, and the loop, which tries accept() again, ends
+static int test_stop_an_accept_loop_in_a_signal_handler(void) {
+    unix_addr_t a;
+    int l = listener(&a, 8);
+    CHECK(l >= 0, "failed to listen");
+    g_handler_fd = l;
+    struct sigaction sa, old;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = shutdown_in_handler;
+    CHECK(sigaction(SIGUSR2, &sa, &old) == 0, "failed to install the handler");
+
+    server_t server;
+    memset(&server, 0, sizeof(server));
+    server.fd = l;
+    pthread_t thread;
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr, STACK_SIZE);
+    CHECK(pthread_create(&thread, &attr, serve_main, &server) == 0,
+          "failed to start the server");
+    pthread_attr_destroy(&attr);
+    CHECK(serve_clients(&a, 2) == 0, "the server does not serve the clients");
+    sleep_ms(SETTLE_MS);
+    pthread_kill(thread, SIGUSR2);
+    long deadline = now_ms() + WAKE_MS;
+    while (!atomic_load(&server.stopped) && now_ms() < deadline) {
+        usleep(1000);
+    }
+    if (!atomic_load(&server.stopped)) {
+        atomic_fetch_add(&stuck_threads, 1);
+        THROW_ERROR("the accept loop does not stop after the signal");
+    }
+    pthread_join(thread, NULL);
+    sigaction(SIGUSR2, &old, NULL);
+    CHECK(atomic_load(&server.err) == EINVAL, "the accept loop ended with errno %d",
+          atomic_load(&server.err));
+    close(l);
+    return 0;
+}
+
 static test_case_t test_cases[] = {
     TEST_CASE(test_backlog_takes_one_more_connection),
     TEST_CASE(test_negative_backlog_is_the_greatest),
@@ -1090,6 +1564,14 @@ static test_case_t test_cases[] = {
     TEST_CASE(test_accept_is_interrupted),
     TEST_CASE(test_accept_timeout),
     TEST_CASE(test_events_of_a_listener),
+    TEST_CASE(test_shutdown_of_a_listener),
+    TEST_CASE(test_shutdown_of_a_listener_keeps_the_queued_connections),
+    TEST_CASE(test_shutdown_of_a_listener_for_writing),
+    TEST_CASE(test_shutdown_of_a_listener_wakes_pollers),
+    TEST_CASE(test_connect_after_shutdown_of_the_listener),
+    TEST_CASE(test_connect_while_the_listener_goes),
+    TEST_CASE(test_stop_an_accept_loop),
+    TEST_CASE(test_stop_an_accept_loop_in_a_signal_handler),
 };
 
 int main(int argc, const char *argv[]) {
