@@ -153,7 +153,10 @@ pub fn do_close(fd: FileDesc) -> Result<isize> {
 }
 
 pub fn do_read(fd: FileDesc, buf: *mut u8, size: usize) -> Result<isize> {
-    let safe_buf = {
+    // Like Linux, which does not look at the address of an empty buffer
+    let safe_buf: &mut [u8] = if size == 0 {
+        &mut []
+    } else {
         from_user::check_mut_array(buf, size)?;
         unsafe { std::slice::from_raw_parts_mut(buf, size) }
     };
@@ -162,7 +165,10 @@ pub fn do_read(fd: FileDesc, buf: *mut u8, size: usize) -> Result<isize> {
 }
 
 pub fn do_write(fd: FileDesc, buf: *const u8, size: usize) -> Result<isize> {
-    let safe_buf = {
+    // Like Linux, which does not look at the address of an empty buffer
+    let safe_buf: &[u8] = if size == 0 {
+        &[]
+    } else {
         from_user::check_array(buf, size)?;
         unsafe { std::slice::from_raw_parts(buf, size) }
     };
