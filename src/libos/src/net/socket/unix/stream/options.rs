@@ -546,8 +546,9 @@ impl Stream {
             SockOptName::SO_TYPE => int(libc::SOCK_STREAM),
             SockOptName::SO_DOMAIN => int(inet.as_ref().map_or(libc::AF_UNIX, InetView::family)),
             SockOptName::SO_PROTOCOL => int(inet.as_ref().map_or(0, |_| libc::IPPROTO_TCP)),
-            // Connecting never fails asynchronously, see connect()
-            SockOptName::SO_ERROR => int(0),
+            // The error of the socket is the reset of the connection, which reading it clears.
+            // Connecting never fails asynchronously, see connect().
+            SockOptName::SO_ERROR => int(self.take_error()),
             SockOptName::SO_ACCEPTCONN => {
                 int(matches!(&*self.inner(), Status::Listening(_)) as i32)
             }

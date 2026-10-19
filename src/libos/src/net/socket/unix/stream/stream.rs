@@ -273,6 +273,7 @@ impl Stream {
                 // the name that this socket used, which may have changed
                 // meanwhile, e.g., by renaming the socket file
                 end_incoming.set_addr(&listener_addr);
+                end_incoming.set_embryo(true);
                 if let Some(self_addr) = self_addr_opt {
                     end_self.set_addr(self_addr);
                 }
@@ -296,6 +297,7 @@ impl Stream {
         match status {
             Status::Listening(addr) => {
                 let endpoint = ADDRESS_SPACE.pop_incoming(&addr, self.recv_timeout())?;
+                endpoint.set_embryo(false);
                 endpoint.set_nonblocking(flags.contains(SocketFlags::SOCK_NONBLOCK));
                 endpoint.set_ancillary(Ancillary::of_current());
                 let notifier = Arc::new(RelayNotifier::new());
@@ -450,6 +452,15 @@ impl Stream {
             crate::signal::raise_sigpipe();
         }
         result
+    }
+
+    /// Returns the error of the socket, which is the reset of a connection, and clears it. Zero if
+    /// there is none.
+    pub(super) fn take_error(&self) -> i32 {
+        match &*self.inner() {
+            Status::Connected(endpoint) if endpoint.take_reset() => libc::ECONNRESET,
+            _ => 0,
+        }
     }
 
     /// Returns the endpoint of a connected socket

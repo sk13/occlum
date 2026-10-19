@@ -3,7 +3,7 @@ use events::{Event, EventFilter, Notifier, Observer};
 use fs::channel::{Channel, Consumer, IoOpts, Producer};
 use fs::{IoEvents, IoNotifier};
 use std::any::Any;
-use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::{Arc, Weak};
 
 pub type Endpoint = Arc<Inner>;
@@ -27,6 +27,7 @@ pub fn end_pair(nonblocking: bool) -> Result<(Endpoint, Endpoint)> {
         peer: Weak::default(),
         flags: flags.clone(),
         flags_shift: 0,
+        embryo: AtomicBool::new(false),
         ancillary: RwLock::new(None),
         peer_ancillary: RwLock::new(None),
     });
@@ -38,6 +39,7 @@ pub fn end_pair(nonblocking: bool) -> Result<(Endpoint, Endpoint)> {
         peer: Arc::downgrade(&end_a),
         flags,
         flags_shift: 8,
+        embryo: AtomicBool::new(false),
         ancillary: RwLock::new(None),
         peer_ancillary: RwLock::new(None),
     });
@@ -60,6 +62,10 @@ const RCV_SHUTDOWN: u16 = 1;
 /// The end writes nothing more: it has shut down writing, or the peer has shut down reading, or
 /// it is closed.
 const SND_SHUTDOWN: u16 = 2;
+/// The connection was reset: the peer is closed, and it had bytes that it did not read, or accept()
+/// had not returned it. This is the error of the socket in Linux (sk_err). A read at the end of the
+/// file fails with ECONNRESET, or SO_ERROR returns it, which clears the flag.
+const RESET: u16 = 4;
 
 /// One end of the connected unix socket
 pub struct Inner {
@@ -75,6 +81,8 @@ pub struct Inner {
     // them before these, and the drop of an end after.
     flags: Arc<AtomicU16>,
     flags_shift: u16,
+    // The connection waits in the queue of a listener: accept() has not returned it yet
+    embryo: AtomicBool,
     ancillary: RwLock<Option<Ancillary>>,
     // The ancillary data of the peer, which the peer puts here when it sets
     // its own. Unlike a lookup through `peer`, it stays when the peer is closed.
@@ -108,16 +116,51 @@ impl Inner {
     }
 
     pub fn read(&self, bufs: &mut [&mut [u8]], opts: &IoOpts) -> Result<usize> {
-        self.reader.pop_slices_with(bufs, opts)
+        let result = self.reader.pop_slices_with(bufs, opts);
+        self.fail_if_reset(result, bufs)
     }
 
     /// Reads the bytes without taking them
     pub fn peek(&self, bufs: &mut [&mut [u8]], opts: &IoOpts) -> Result<usize> {
-        self.reader.peek_slices_with(bufs, opts)
+        let result = self.reader.peek_slices_with(bufs, opts);
+        self.fail_if_reset(result, bufs)
+    }
+
+    /// The end of the file that a read finds is an error, once, if the connection was reset. The
+    /// bytes that were sent before come first.
+    fn fail_if_reset(&self, result: Result<usize>, bufs: &[&mut [u8]]) -> Result<usize> {
+        match result {
+            Ok(0) if bufs.iter().any(|buf| !buf.is_empty()) && self.take_reset() => {
+                return_errno!(ECONNRESET, "the connection was reset")
+            }
+            result => result,
+        }
     }
 
     pub fn write(&self, bufs: &[&[u8]], opts: &IoOpts) -> Result<usize> {
-        self.writer.push_slices_with(bufs, opts)
+        let was_shutdown = self.is_write_shutdown();
+        let result = self.writer.push_slices_with(bufs, opts);
+        // A write that waited, and finds that the peer is closed, fails with the error of the
+        // socket first, like in Linux. A write that finds it closed at once fails with EPIPE, and
+        // leaves the error for the next read.
+        if !was_shutdown && result.has_errno(EPIPE) && self.take_reset() {
+            return_errno!(ECONNRESET, "the connection was reset");
+        }
+        result
+    }
+
+    /// Tells that the connection is in the queue of a listener, as long as accept() has not
+    /// returned it. If the endpoint is closed meanwhile, its peer gets a reset.
+    pub fn set_embryo(&self, embryo: bool) {
+        self.embryo.store(embryo, Ordering::Release);
+    }
+
+    /// Reads the reset of the connection, if there is one, which clears it. Like Linux does with
+    /// the error of a socket, once.
+    pub fn take_reset(&self) -> bool {
+        let reset = self.own_flags(RESET);
+        self.flags.load(Ordering::SeqCst) & reset != 0
+            && self.flags.fetch_and(!reset, Ordering::SeqCst) & reset != 0
     }
 
     /// Changes the number of bytes that the endpoint may have in flight to its peer. If it can take
@@ -178,8 +221,9 @@ impl Inner {
         Ok(())
     }
 
-    /// Returns the events of the endpoint. The flags of the shutdown are read in one step. The
-    /// endpoint is writable if there is room, whether it can write or not, like in Linux.
+    /// Returns the events of the endpoint. The flags of the shutdown, and the reset, are read in
+    /// one step. The endpoint is writable if there is room, whether it can write or not, like in
+    /// Linux.
     pub fn poll(&self) -> IoEvents {
         let flags = self.flags.load(Ordering::SeqCst) >> self.flags_shift;
         let mut events = IoEvents::empty();
@@ -190,10 +234,14 @@ impl Inner {
                 events |= IoEvents::HUP;
             }
         }
+        if flags & RESET != 0 {
+            events |= IoEvents::ERR;
+        }
         if self.reader.items_to_consume() > 0 {
             events |= IoEvents::IN;
         }
-        if self.writer.room() > 0 {
+        // The bytes that the peer did not read are gone when it is closed, which makes room
+        if self.writer.room() > 0 || self.peer.strong_count() == 0 {
             events |= IoEvents::OUT;
         }
         events
@@ -241,12 +289,15 @@ impl Inner {
 
 impl Drop for Inner {
     fn drop(&mut self) {
-        // The peer reads the end of the file, and cannot write any more. Its flags change before
-        // the channels, which notify it of the close as they are dropped.
-        self.flags.fetch_or(
-            self.peer_flags(RCV_SHUTDOWN | SND_SHUTDOWN),
-            Ordering::SeqCst,
-        );
+        // The peer reads the end of the file, and cannot write any more, and the connection is
+        // reset if bytes of the peer are not read, or accept() did not return it, like in Linux.
+        // Its flags change before the channels, which notify it of the close as they are dropped.
+        let mut flags = RCV_SHUTDOWN | SND_SHUTDOWN;
+        if self.embryo.load(Ordering::Acquire) || self.bytes_to_read() > 0 {
+            flags |= RESET;
+        }
+        self.flags
+            .fetch_or(self.peer_flags(flags), Ordering::SeqCst);
     }
 }
 
