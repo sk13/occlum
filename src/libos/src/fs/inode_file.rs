@@ -317,6 +317,12 @@ impl INodeFile {
         if access_mode.writable() && inode.metadata()?.type_ == FileType::Dir {
             return_errno!(EISDIR, "Directory cannot be open to write");
         }
+        // Like in Linux, the file of a socket cannot be opened, but it can be named (O_PATH)
+        if inode.metadata()?.type_ == FileType::Socket
+            && !StatusFlags::from_bits_truncate(flags).is_fast_open()
+        {
+            return_errno!(ENXIO, "the file is a socket");
+        }
         let creation_flags = CreationFlags::from_bits_truncate(flags);
         if creation_flags.should_truncate()
             && inode.metadata()?.type_ == FileType::File

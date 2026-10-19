@@ -7,6 +7,10 @@ pub fn do_truncate(path: &str, len: usize) -> Result<()> {
         let fs = current.fs().read().unwrap();
         fs.lookup_inode(&path)?
     };
+    // Like in Linux, the file of a socket cannot be truncated
+    if inode.metadata()?.type_ == FileType::Socket {
+        return_errno!(EINVAL, "the file is a socket");
+    }
     inode.resize(len)?;
     Ok(())
 }
