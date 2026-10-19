@@ -98,6 +98,18 @@ impl Inner {
         self.writer.push_slices_with(bufs, opts)
     }
 
+    /// Changes the number of bytes that the endpoint may have in flight to its peer. If it can take
+    /// more bytes now, returns true, and the caller has to call `notify_send_room()`.
+    pub fn set_send_buf_size(&self, size: usize) -> bool {
+        self.writer.set_capacity(size)
+    }
+
+    /// Wakes up the threads that wait for room to send, and those that poll the endpoint, after
+    /// `set_send_buf_size()` has returned true
+    pub fn notify_send_room(&self) {
+        self.writer.notify_room()
+    }
+
     /// Whether the endpoint cannot write: it has been shut down for writing, or its peer for
     /// reading (the peer is closed)
     pub fn is_write_shutdown(&self) -> bool {
@@ -206,8 +218,9 @@ impl Ancillary {
     }
 }
 
-// TODO: Add SO_SNDBUF and SO_RCVBUF to set/getsockopt to dynamcally change the size.
-// This value is got from /proc/sys/net/core/rmem_max and wmem_max that are same on linux.
+// The limit of the bytes that an endpoint has in flight to its peer, until the program sets
+// SO_SNDBUF (see `Endpoint::set_send_buf_size`). This value is got from
+// /proc/sys/net/core/rmem_max and wmem_max that are same on linux.
 pub const DEFAULT_BUF_SIZE: usize = 208 * 1024;
 
 /// An observer used to observe both reader and writer of the endpoint. It also contains a

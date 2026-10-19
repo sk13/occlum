@@ -388,6 +388,24 @@ impl<I> Producer<I> {
     pub fn room(&self) -> usize {
         self.inner.lock().unwrap().remaining()
     }
+
+    /// Changes the number of items that the channel holds. A channel that holds more items than
+    /// the new capacity keeps them, but it takes no more until it holds fewer. If the channel can
+    /// take more now, it returns true, and the caller has to call `notify_room()`, which wakes up
+    /// the threads that wait for room and those that poll the channel. It is a call of its own, so
+    /// that the caller can do it without holding the locks that those threads need.
+    pub fn set_capacity(&self, capacity: usize) -> bool {
+        let rb_producer = self.inner.lock().unwrap();
+        let grown = capacity > rb_producer.capacity();
+        rb_producer.set_capacity(capacity);
+        grown
+    }
+
+    /// Wakes up the threads that wait for room and those that poll the channel, after
+    /// `set_capacity()` has returned true.
+    pub fn notify_room(&self) {
+        self.notifier.broadcast(&IoEvents::OUT);
+    }
 }
 
 impl<I: Copy> Producer<I> {

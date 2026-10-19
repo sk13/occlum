@@ -256,6 +256,9 @@ impl Stream {
             Status::Idle(info) => {
                 let self_addr_opt = info.addr();
                 let (end_self, end_incoming) = end_pair(info.nonblocking())?;
+                // The socket may have set the size of its send buffer before it connects. It is
+                // read with the status locked, see `setsockopt`.
+                end_self.set_send_buf_size(self.send_buf_size());
                 // The name of the listener is the one that it bound, whatever
                 // the name that this socket used, which may have changed
                 // meanwhile, e.g., by renaming the socket file
@@ -296,6 +299,8 @@ impl Stream {
                 // that replaces a TCP socket takes over from the listening one
                 let options = self.options_of_accepted();
                 let timeouts = AtomicTimeouts::of(&options);
+                // So has the size of the send buffer, which a TCP socket passes on, too
+                endpoint.set_send_buf_size(options.send_buf_size());
                 Ok((
                     Self {
                         ino: next_ino(),

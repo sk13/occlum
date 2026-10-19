@@ -230,6 +230,11 @@ impl SockOptions {
         }
     }
 
+    /// Returns the size that getsockopt() returns for SO_SNDBUF
+    pub fn send_buf_size(&self) -> usize {
+        self.sndbuf as usize
+    }
+
     /// Sets an option. The errors are those of Linux. `tcp` is whether the
     /// socket shows to be a TCP socket, which may set SO_REUSEPORT.
     fn set(&mut self, optname: i32, optval: &[u8], tcp: bool) -> Result<()> {
@@ -632,6 +637,30 @@ impl Stream {
             self.timeouts.store(options.timeouts);
             result
         };
+        // The size of the buffer limits the bytes in flight: the connection takes the new size, also
+        // that of a socket that replaces a TCP socket. The size is read, and set, with the status
+        // locked, so that the connection ends up with the size of the options if two threads set it.
+        // The threads that wait for room are woken up after the lock is released, like shutdown()
+        // does, as they poll the socket.
+        if result.is_ok()
+            && matches!(
+                SockOptName::try_from(optname),
+                Ok(SockOptName::SO_SNDBUF) | Ok(SockOptName::SO_SNDBUFFORCE)
+            )
+        {
+            let room = {
+                let status = self.inner();
+                if let Status::Connected(endpoint) = &*status {
+                    let grown = endpoint.set_send_buf_size(self.send_buf_size());
+                    grown.then(|| endpoint.clone())
+                } else {
+                    None
+                }
+            };
+            if let Some(endpoint) = room {
+                endpoint.notify_send_room();
+            }
+        }
         if tcp {
             return Ok(());
         }
@@ -665,14 +694,13 @@ impl Stream {
     /// that the socket may have in flight to its peer. This is what getsockopt()
     /// returns for SO_SNDBUF, which is twice the size that was set.
     ///
-    /// The LibOS stores the size, but does not use it to limit the buffer yet. The
-    /// buffer is of `DEFAULT_BUF_SIZE` bytes. To limit it, the ring buffer of the
-    /// connection needs a limit that can change while the socket is in use (also
-    /// for a socket that is connected before it is accepted, which does not have
-    /// the options of its end yet), and the size that is greater than the buffer
-    /// needs a buffer that grows with the data.
+    /// The connection of the socket takes the size as its limit (see
+    /// `Endpoint::set_send_buf_size`) when the program sets it, and when the
+    /// socket connects. The socket that accept() returns has the default size, as
+    /// it has its own options, but for a socket that replaces a TCP socket, which
+    /// takes the size of the listening socket (see `options_of_accepted`).
     pub fn send_buf_size(&self) -> usize {
-        self.options.lock().unwrap().sndbuf as usize
+        self.options.lock().unwrap().send_buf_size()
     }
 
     /// Returns the size of the buffer for receiving (SO_RCVBUF), which is twice
