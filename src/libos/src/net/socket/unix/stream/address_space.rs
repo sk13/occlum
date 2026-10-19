@@ -4,6 +4,7 @@ use super::listener::Listener;
 use super::*;
 use misc::get_random;
 use std::collections::btree_map::BTreeMap;
+use std::time::Duration;
 
 lazy_static! {
     pub(super) static ref ADDRESS_SPACE: AddressSpace = AddressSpace::new();
@@ -146,10 +147,10 @@ impl AddressSpace {
         }
     }
 
-    pub fn pop_incoming(&self, addr: &UnixAddr) -> Result<Endpoint> {
+    pub fn pop_incoming(&self, addr: &UnixAddr, timeout: Option<Duration>) -> Result<Endpoint> {
         self.get_listener_ref(addr)
             .ok_or_else(|| errno!(EINVAL, "the socket is not listening"))?
-            .pop_incoming()
+            .pop_incoming(timeout)
     }
 
     pub fn get_listener_ref(&self, addr: &UnixAddr) -> Option<Arc<Listener>> {

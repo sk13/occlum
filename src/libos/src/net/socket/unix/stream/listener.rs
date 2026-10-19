@@ -156,10 +156,11 @@ impl Listener {
     }
 
     /// Returns the oldest connection. If there is none, a nonblocking socket
-    /// fails with EAGAIN, and a blocking one waits for a connection, or for a
-    /// signal, which fails with EINTR.
-    pub fn pop_incoming(&self) -> Result<Endpoint> {
-        wait_for(&self.acceptors, None, || self.try_pop())
+    /// fails with EAGAIN, and a blocking one waits for a connection, as long as
+    /// the timeout allows, which ends with EAGAIN, too. EINTR if a signal
+    /// interrupts the wait.
+    pub fn pop_incoming(&self, timeout: Option<Duration>) -> Result<Endpoint> {
+        wait_for(&self.acceptors, timeout, || self.try_pop())
     }
 
     fn try_pop(&self) -> Result<Option<Endpoint>> {

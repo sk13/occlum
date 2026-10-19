@@ -275,7 +275,7 @@ impl Stream {
         let status = (*self.inner()).clone();
         match status {
             Status::Listening(addr) => {
-                let endpoint = ADDRESS_SPACE.pop_incoming(&addr)?;
+                let endpoint = ADDRESS_SPACE.pop_incoming(&addr, self.recv_timeout())?;
                 endpoint.set_nonblocking(flags.contains(SocketFlags::SOCK_NONBLOCK));
                 endpoint.set_ancillary(Ancillary::of_current());
                 let notifier = Arc::new(RelayNotifier::new());
