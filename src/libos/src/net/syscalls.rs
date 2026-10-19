@@ -683,8 +683,14 @@ pub fn do_sendmmsg(
         fd, msgvec_ptr, flags_c
     );
 
-    from_user::check_ptr(msgvec_ptr)?;
-    let mut msgvec = unsafe { std::slice::from_raw_parts_mut(msgvec_ptr, vlen as usize) };
+    // Like Linux, no more messages than the longest vector
+    const UIO_MAXIOV: usize = 1024;
+    let vlen = (vlen as usize).min(UIO_MAXIOV);
+    let msgvec = if vlen == 0 {
+        &mut []
+    } else {
+        from_user::make_mut_slice(msgvec_ptr, vlen)?
+    };
 
     let flags = SendFlags::from_bits_truncate(flags_c);
     let file_ref = current!().file(fd as FileDesc)?;
@@ -710,7 +716,24 @@ pub fn do_sendmmsg(
             }
         }
     } else if let Ok(socket) = file_ref.as_unix_socket() {
-        return_errno!(EOPNOTSUPP, "does not support unix socket")
+        for mmsg in msgvec {
+            let result = (|| {
+                let (addr, bufs, control) = extract_msghdr_from_user(&mmsg.msg_hdr)?;
+                let checked_control = check_send_msg(addr.as_ref(), control)?;
+                let control = checked_control.as_deref().or(control);
+                socket.sendmsg(&bufs[..], flags, addr.as_ref(), control)
+            })();
+            match result {
+                Ok(bytes_send) => {
+                    mmsg.msg_len = bytes_send as c_uint;
+                    send_count += 1;
+                }
+                // Like Linux, the error is for the first message only: the call returns the
+                // messages that were sent
+                Err(e) if send_count == 0 => return Err(e),
+                Err(_) => break,
+            }
+        }
     } else if let Ok(uring_socket) = file_ref.as_uring_socket() {
         for mmsg in (msgvec) {
             let (addr, bufs, control) = extract_msghdr_from_user(&mmsg.msg_hdr)?;
@@ -735,6 +758,73 @@ pub fn do_sendmmsg(
     }
 
     Ok(send_count as isize)
+}
+
+/// Receives messages from a unix socket with one call of recvmsg for each. The call stops early
+/// if the timeout is over, which is checked only after a message, like in Linux. With
+/// MSG_WAITFORONE, only the first message waits. If an error comes after some messages, the call
+/// returns their number, and the error is lost.
+pub fn do_recvmmsg(
+    fd: c_int,
+    msgvec_ptr: *mut mmsghdr,
+    vlen: c_uint,
+    flags_c: c_int,
+    timeout_ptr: *mut timespec_t,
+) -> Result<isize> {
+    debug!(
+        "recvmmsg: fd: {}, msg: {:?}, flags: 0x{:x}",
+        fd, msgvec_ptr, flags_c
+    );
+
+    if !current!().file(fd as FileDesc)?.as_unix_socket().is_ok() {
+        return_errno!(ENOSYS, "recvmmsg is supported for unix sockets only");
+    }
+
+    // The flag of recvmmsg that recvmsg does not have
+    const MSG_WAITFORONE: c_int = 0x10000;
+    let vlen = vlen as usize;
+    let msgvec = if vlen == 0 {
+        &mut []
+    } else {
+        from_user::make_mut_slice(msgvec_ptr, vlen)?
+    };
+    // The timeout, and the time at which it is over
+    let mut timeout = if timeout_ptr.is_null() {
+        None
+    } else {
+        let timeout = from_user::make_mut_ref(timeout_ptr)?;
+        timeout.validate()?;
+        let now = time::do_clock_gettime(time::ClockId::CLOCK_MONOTONIC)?.as_duration();
+        let end = now.saturating_add(timeout.as_duration());
+        Some((timeout, end))
+    };
+    let mut flags_c = flags_c;
+
+    let mut recv_count = 0;
+    for mmsg in msgvec {
+        match do_recvmsg(fd, &mut mmsg.msg_hdr, flags_c) {
+            Ok(bytes_recv) => {
+                mmsg.msg_len = bytes_recv as c_uint;
+                recv_count += 1;
+            }
+            Err(e) if recv_count == 0 => return Err(e),
+            Err(_) => break,
+        }
+
+        if flags_c & MSG_WAITFORONE != 0 {
+            flags_c |= RecvFlags::MSG_DONTWAIT.bits();
+        }
+        if let Some((timeout, end)) = timeout.as_mut() {
+            let now = time::do_clock_gettime(time::ClockId::CLOCK_MONOTONIC)?.as_duration();
+            let remain = end.saturating_sub(now);
+            **timeout = timespec_t::from(remain);
+            if remain == Duration::ZERO {
+                break;
+            }
+        }
+    }
+
+    Ok(recv_count as isize)
 }
 
 pub fn do_select(

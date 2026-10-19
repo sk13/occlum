@@ -48,8 +48,9 @@ use crate::misc::{resource_t, rlimit_t, sysinfo_t, utsname_t, RandFlags};
 use crate::net::{
     do_accept, do_accept4, do_bind, do_connect, do_epoll_create, do_epoll_create1, do_epoll_ctl,
     do_epoll_pwait, do_epoll_wait, do_getpeername, do_getsockname, do_getsockopt, do_listen,
-    do_poll, do_ppoll, do_pselect6, do_recvfrom, do_recvmsg, do_select, do_sendmmsg, do_sendmsg,
-    do_sendto, do_setsockopt, do_shutdown, do_socket, do_socketpair, mmsghdr, sigset_argpack,
+    do_poll, do_ppoll, do_pselect6, do_recvfrom, do_recvmmsg, do_recvmsg, do_select, do_sendmmsg,
+    do_sendmsg, do_sendto, do_setsockopt, do_shutdown, do_socket, do_socketpair, mmsghdr,
+    sigset_argpack,
 };
 use crate::process::{
     do_arch_prctl, do_clone, do_execve, do_exit, do_exit_group, do_futex, do_get_robust_list,
@@ -400,7 +401,7 @@ macro_rules! process_syscall_table_with_callback {
             (Pwritev = 296) => do_pwritev(fd: FileDesc, iov: *const iovec_t, count: i32, offset: off_t),
             (RtTgsigqueueinfo = 297) => handle_unsupported(),
             (PerfEventOpen = 298) => handle_unsupported(),
-            (Recvmmsg = 299) => handle_unsupported(),
+            (Recvmmsg = 299) => do_recvmmsg(fd: c_int, msgvec_ptr: *mut mmsghdr, vlen: c_uint, flags_c: c_int, timeout_ptr: *mut timespec_t),
             (FanotifyInit = 300) => handle_unsupported(),
             (FanotifyMark = 301) => handle_unsupported(),
             (Prlimit64 = 302) => do_prlimit(pid: pid_t, resource: u32, new_limit: *const rlimit_t, old_limit: *mut rlimit_t),
