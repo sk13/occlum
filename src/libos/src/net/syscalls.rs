@@ -34,8 +34,16 @@ pub fn do_socket(domain: c_int, socket_type: c_int, protocol: c_int) -> Result<i
     let flags = SocketFlags::from_bits_truncate(socket_type);
 
     let type_bits = socket_type & !flags.bits();
-    let socket_type =
-        SocketType::try_from(type_bits).map_err(|_| errno!(EINVAL, "invalid socket type"))?;
+    let socket_type = SocketType::try_from(type_bits).map_err(|_| {
+        // Like Linux, a type that is not one of the types of sockets (SOCK_MAX of
+        // them) is invalid, while a type that no protocol of the domain has is not
+        // supported
+        if (0..libc::SOCK_PACKET + 1).contains(&type_bits) {
+            errno!(ESOCKTNOSUPPORT, "unsupported socket type")
+        } else {
+            errno!(EINVAL, "invalid socket type")
+        }
+    })?;
 
     debug!(
         "socket domain: {:?}, type: {:?}, protocol: {:?}",
@@ -316,7 +324,7 @@ pub fn do_shutdown(fd: c_int, how: c_int) -> Result<isize> {
     } else if let Ok(uring_socket) = file_ref.as_uring_socket() {
         uring_socket.shutdown(how)?;
     } else {
-        return_errno!(EBADF, "not a host socket")
+        return_errno!(ENOTSOCK, "not a socket")
     }
 
     Ok(0)
@@ -412,9 +420,6 @@ pub fn do_getpeername(
     addr_len: *mut libc::socklen_t,
 ) -> Result<isize> {
     let addr_and_addr_len = get_slice_from_sock_addr_ptr_mut(addr, addr_len)?;
-    if addr_and_addr_len.is_none() {
-        return Ok(0);
-    }
 
     let file_ref = current!().file(fd as FileDesc)?;
     let (src_addr, src_addr_len) = if let Ok(host_socket) = file_ref.as_host_socket() {
@@ -433,9 +438,11 @@ pub fn do_getpeername(
         return_errno!(ENOTSOCK, "not a socket")
     };
 
-    if let Some((addr_mut, addr_len_mut)) = addr_and_addr_len {
-        copy_sock_addr_to_user(src_addr, src_addr_len, addr_mut, addr_len_mut);
-    }
+    // Unlike accept(), which has no use for the length if there is no address,
+    // the address and its length are not optional
+    let (addr_mut, addr_len_mut) =
+        addr_and_addr_len.ok_or_else(|| errno!(EFAULT, "no address is specified"))?;
+    copy_sock_addr_to_user(src_addr, src_addr_len, addr_mut, addr_len_mut);
 
     Ok(0)
 }
@@ -446,9 +453,6 @@ pub fn do_getsockname(
     addr_len: *mut libc::socklen_t,
 ) -> Result<isize> {
     let addr_and_addr_len = get_slice_from_sock_addr_ptr_mut(addr, addr_len)?;
-    if addr_and_addr_len.is_none() {
-        return Ok(0);
-    }
 
     let file_ref = current!().file(fd as FileDesc)?;
     let (src_addr, src_addr_len) = if let Ok(host_socket) = file_ref.as_host_socket() {
@@ -464,9 +468,11 @@ pub fn do_getsockname(
         return_errno!(ENOTSOCK, "not a socket");
     };
 
-    if let Some((addr_mut, addr_len_mut)) = addr_and_addr_len {
-        copy_sock_addr_to_user(src_addr, src_addr_len, addr_mut, addr_len_mut);
-    }
+    // Unlike accept(), which has no use for the length if there is no address,
+    // the address and its length are not optional
+    let (addr_mut, addr_len_mut) =
+        addr_and_addr_len.ok_or_else(|| errno!(EFAULT, "no address is specified"))?;
+    copy_sock_addr_to_user(src_addr, src_addr_len, addr_mut, addr_len_mut);
 
     Ok(0)
 }
@@ -516,7 +522,7 @@ pub fn do_sendto(
             .sendto(&buf, addr, send_flags)
             .map(|bytes_send| bytes_send as isize)
     } else {
-        return_errno!(EBADF, "unsupported file type");
+        return_errno!(ENOTSOCK, "not a socket");
     }
 }
 
@@ -591,7 +597,8 @@ pub fn do_socketpair(
         debug!("socketpair: ({}, {})", sock_pair[0], sock_pair[1]);
         Ok(0)
     } else {
-        return_errno!(EAFNOSUPPORT, "domain not supported")
+        // Like Linux, the domains that it has, but not for socket pairs
+        return_errno!(EOPNOTSUPP, "domain not supported")
     }
 }
 
@@ -1082,7 +1089,7 @@ fn copy_sock_addr_from_user(
     addr_len: usize,
 ) -> Result<libc::sockaddr_storage> {
     // Check the address pointer and length
-    if addr.is_null() || addr_len == 0 {
+    if addr_len == 0 {
         return_errno!(EINVAL, "no address is specified");
     }
     if addr_len > std::mem::size_of::<libc::sockaddr_storage>() {
@@ -1090,6 +1097,9 @@ fn copy_sock_addr_from_user(
             EINVAL,
             "addr len cannot be greater than sockaddr_storage's size"
         );
+    }
+    if addr.is_null() {
+        return_errno!(EFAULT, "the address is null");
     }
     let sockaddr_src_buf = from_user::make_slice(addr as *const u8, addr_len)?;
 
@@ -1112,9 +1122,7 @@ fn get_slice_from_sock_addr_ptr_mut<'a>(
     addr_ptr: *mut libc::sockaddr,
     addr_len_ptr: *mut libc::socklen_t,
 ) -> Result<Option<(&'a mut [u8], &'a mut u32)>> {
-    if addr_ptr.is_null() ^ addr_len_ptr.is_null() {
-        return_errno!(EINVAL, "addr and addr_len should be both null or not null");
-    }
+    // Like Linux, the length is of no use if there is no address
     if addr_ptr.is_null() {
         return Ok(None);
     }

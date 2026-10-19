@@ -98,6 +98,15 @@ impl DirProcINode for LockedProcFdDirINode {
 struct FdSymINode(FileRef);
 
 impl FdSymINode {
+    /// The inode number of the socket, if the file is a socket that has one.
+    fn socket_ino(&self) -> Option<usize> {
+        let metadata = self.0.metadata().ok()?;
+        match metadata.type_ {
+            vfs::FileType::Socket if metadata.inode != 0 => Some(metadata.inode),
+            _ => None,
+        }
+    }
+
     pub fn new(process_ref: &ProcessRef, fd: FileDesc) -> vfs::Result<Arc<dyn INode>> {
         let main_thread = process_ref.main_thread().ok_or(FsError::EntryNotFound)?;
         let file_ref = main_thread.file(fd).map_err(|_| FsError::EntryNotFound)?;
@@ -109,6 +118,8 @@ impl ProcINode for FdSymINode {
     fn generate_data_in_bytes(&self) -> vfs::Result<Vec<u8>> {
         let path = if let Ok(inode_file) = self.0.as_inode_file() {
             inode_file.abs_path().to_owned()
+        } else if let Some(socket_ino) = self.socket_ino() {
+            format!("socket:[{}]", socket_ino)
         } else {
             // TODO: Support other file types
             // For file descriptors for pipes and sockets,

@@ -7,7 +7,7 @@ use fs::IoEvents;
 use fs::{CreationFlags, FileMode};
 use net::socket::{CMessages, CmsgData};
 use std::fmt;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 /// SOCK_STREAM Unix socket. It has three statuses: unconnected, listening and connected.  When a
@@ -16,6 +16,8 @@ use std::sync::Arc;
 /// through a listening socket calling accept. Listening and connected are ultimate statuses. They
 /// will not transfer to other statuses.
 pub struct Stream {
+    // The inode number that fstat() shows, which no other socket has
+    pub(super) ino: usize,
     inner: SgxMutex<Status>,
     // Use the internal notifier of RelayNotifier as the notifier of stream socket. It relays the
     // events of the endpoint, too.
@@ -50,6 +52,7 @@ impl InetView {
 impl Stream {
     pub fn new(flags: SocketFlags) -> Self {
         Self {
+            ino: next_ino(),
             inner: SgxMutex::new(Status::Idle(Info::new(
                 flags.contains(SocketFlags::SOCK_NONBLOCK),
             ))),
@@ -68,6 +71,7 @@ impl Stream {
         notifier_b.observe_endpoint(&end_b);
 
         let socket_a = Self {
+            ino: next_ino(),
             inner: SgxMutex::new(Status::Connected(end_a)),
             notifier: notifier_a,
             inet: SgxMutex::new(None),
@@ -75,6 +79,7 @@ impl Stream {
         };
 
         let socket_b = Self {
+            ino: next_ino(),
             inner: SgxMutex::new(Status::Connected(end_b)),
             notifier: notifier_b,
             inet: SgxMutex::new(None),
@@ -354,6 +359,7 @@ impl Stream {
 
                 Ok((
                     Self {
+                        ino: next_ino(),
                         inner: SgxMutex::new(Status::Connected(endpoint)),
                         notifier: notifier,
                         inet: SgxMutex::new(None),
@@ -506,6 +512,13 @@ impl Stream {
             endpoint.set_ancillary(ancillary)
         }
     }
+}
+
+/// Returns an inode number for a socket, which is not zero, and which no other
+/// socket has.
+fn next_ino() -> usize {
+    static NEXT_INO: AtomicUsize = AtomicUsize::new(1);
+    NEXT_INO.fetch_add(1, Ordering::Relaxed)
 }
 
 impl Debug for Stream {

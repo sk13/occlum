@@ -4,8 +4,12 @@ use super::*;
 use fs::{AccessMode, File, IoEvents, IoNotifier, StatusFlags};
 use rcore_fs::vfs::{FileType, Metadata, Timespec};
 use std::any::Any;
+use std::io::SeekFrom;
 
 use crate::fs::{GetReadBufLen, IoctlCmd, SetNonBlocking};
+
+/// The device that the sockets belong to, which no file system has.
+const SOCKET_DEV: usize = 8;
 
 impl File for Stream {
     fn read(&self, buf: &mut [u8]) -> Result<usize> {
@@ -28,17 +32,23 @@ impl File for Stream {
     }
 
     fn read_at(&self, offset: usize, buf: &mut [u8]) -> Result<usize> {
-        if offset != 0 {
-            return_errno!(ESPIPE, "a nonzero position is not supported");
-        }
-        self.read(buf)
+        return_errno!(ESPIPE, "a socket has no position");
     }
 
     fn write_at(&self, offset: usize, buf: &[u8]) -> Result<usize> {
-        if offset != 0 {
-            return_errno!(ESPIPE, "a nonzero position is not supported");
-        }
-        self.write(buf)
+        return_errno!(ESPIPE, "a socket has no position");
+    }
+
+    fn preadv(&self, bufs: &mut [&mut [u8]], offset: usize) -> Result<usize> {
+        return_errno!(ESPIPE, "a socket has no position");
+    }
+
+    fn pwritev(&self, bufs: &[&[u8]], offset: usize) -> Result<usize> {
+        return_errno!(ESPIPE, "a socket has no position");
+    }
+
+    fn seek(&self, pos: SeekFrom) -> Result<off_t> {
+        return_errno!(ESPIPE, "a socket has no position");
     }
 
     fn readv(&self, bufs: &mut [&mut [u8]]) -> Result<usize> {
@@ -124,8 +134,8 @@ impl File for Stream {
 
     fn metadata(&self) -> Result<Metadata> {
         Ok(Metadata {
-            dev: 0,
-            inode: 0,
+            dev: SOCKET_DEV,
+            inode: self.ino,
             size: 0,
             blk_size: 0,
             blocks: 0,
@@ -133,7 +143,7 @@ impl File for Stream {
             mtime: Timespec { sec: 0, nsec: 0 },
             ctime: Timespec { sec: 0, nsec: 0 },
             type_: FileType::Socket,
-            mode: 0o666,
+            mode: 0o777,
             nlinks: 1,
             uid: 0,
             gid: 0,

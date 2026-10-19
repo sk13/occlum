@@ -88,7 +88,8 @@ impl AnyAddr {
     pub fn to_unix(&self) -> Result<&UnixAddr> {
         match self {
             Self::Unix(unix_addr) => Ok(unix_addr),
-            _ => return_errno!(EAFNOSUPPORT, "not unix address"),
+            // Like Linux, a unix socket takes an address of another family for an invalid one
+            _ => return_errno!(EINVAL, "not unix address"),
         }
     }
 
