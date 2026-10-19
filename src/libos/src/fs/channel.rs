@@ -139,8 +139,8 @@ pub struct IoOpts {
     pub all: bool,
 }
 
-/// What an attempt of a call that moves items has come to.
-enum Attempt<T> {
+/// What an attempt of a call that waits has come to.
+pub(crate) enum Attempt<T> {
     /// The call is over
     Done(T),
     /// The call has to wait for the other end
@@ -153,7 +153,10 @@ enum Attempt<T> {
 /// the queue between the attempts, for the time of the timeout, which is counted over all the
 /// waits. After that time it has one more attempt, and fails with EAGAIN if that is not over. If
 /// an attempt has made progress, the time starts again. EINTR if a signal interrupts the wait.
-fn wait_for<T>(
+///
+/// The calls that wait on a channel and the unix listener, which waits for connections and for room
+/// in its queue, all wait with it, so they count their timeouts alike.
+pub(crate) fn wait_for<T>(
     queue: &WaiterQueue,
     timeout: Option<Duration>,
     mut attempt: impl FnMut() -> Result<Attempt<T>>,

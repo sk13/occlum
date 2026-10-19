@@ -1,6 +1,7 @@
 use super::endpoint::{Endpoint, RelayNotifier};
 use super::*;
-use crate::events::{Waiter, WaiterQueue};
+use crate::events::WaiterQueue;
+use crate::fs::channel::{wait_for, Attempt};
 use fs::IoEvents;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -145,12 +146,9 @@ impl Listener {
         nonblocking: bool,
         timeout: Option<Duration>,
     ) -> Result<Reservation<'_>> {
-        wait_for(&self.connectors, timeout, || {
-            let reservation = self.try_reserve()?;
-            if reservation.is_none() && nonblocking {
-                return_errno!(EAGAIN, "the backlog is full");
-            }
-            Ok(reservation)
+        wait_for(&self.connectors, timeout, || match self.try_reserve()? {
+            Attempt::Wait if nonblocking => return_errno!(EAGAIN, "the backlog is full"),
+            attempt => Ok(attempt),
         })
         .map_err(|e| {
             // An accept() that made room woke up one thread only. If this
@@ -162,16 +160,16 @@ impl Listener {
         })
     }
 
-    fn try_reserve(&self) -> Result<Option<Reservation<'_>>> {
+    fn try_reserve(&self) -> Result<Attempt<Reservation<'_>>> {
         let mut queue = self.queue.lock().unwrap();
         if queue.shut_rd {
             return_errno!(ECONNREFUSED, "the listener is shut down");
         }
         if queue.free_slots() == 0 {
-            return Ok(None);
+            return Ok(Attempt::Wait);
         }
         queue.reserved += 1;
-        Ok(Some(Reservation {
+        Ok(Attempt::Done(Reservation {
             listener: self,
             used: false,
         }))
@@ -187,21 +185,21 @@ impl Listener {
         wait_for(&self.acceptors, timeout, || self.try_pop())
     }
 
-    fn try_pop(&self) -> Result<Option<Endpoint>> {
+    fn try_pop(&self) -> Result<Attempt<Endpoint>> {
         let (endpoint, free_slots) = {
             let mut queue = self.queue.lock().unwrap();
             let endpoint = match queue.incoming.pop_front() {
                 Some(endpoint) => endpoint,
                 None if self.nonblocking() => return_errno!(EAGAIN, "no connection is incoming"),
                 None if queue.shut_rd => return_errno!(EINVAL, "the listener is shut down"),
-                None => return Ok(None),
+                None => return Ok(Attempt::Wait),
             };
             (endpoint, queue.free_slots())
         };
         if free_slots > 0 {
             self.connectors.dequeue_and_wake_one();
         }
-        Ok(Some(endpoint))
+        Ok(Attempt::Done(endpoint))
     }
 
     pub fn nonblocking(&self) -> bool {
@@ -260,42 +258,5 @@ impl Listener {
 
     pub fn poll_new(&self) -> IoEvents {
         self.queue.lock().unwrap().events()
-    }
-}
-
-/// Returns what `attempt` returns once it returns something. The thread waits
-/// for a wake-up of the queue between the attempts, as long as the timeout
-/// allows. Then it has one more attempt, and fails with EAGAIN if it does not
-/// get anything. EINTR if a signal interrupts the wait.
-fn wait_for<T>(
-    queue: &WaiterQueue,
-    mut timeout: Option<Duration>,
-    mut attempt: impl FnMut() -> Result<Option<T>>,
-) -> Result<T> {
-    // Try without creating a waiter
-    if let Some(item) = attempt()? {
-        return Ok(item);
-    }
-
-    let waiter = Waiter::new();
-    // The waiter stays in the queue unless it is woken up, so it is dequeued
-    // whenever the loop is left, like the waits of the channels
-    let _dequeue = queue.dequeue_on_drop(&waiter);
-    let mut timed_out = false;
-    loop {
-        // Before the next attempt, so that no wake-up gets lost between the
-        // attempt and the wait
-        queue.reset_and_enqueue(&waiter);
-        if let Some(item) = attempt()? {
-            return Ok(item);
-        }
-        if timed_out {
-            return_errno!(EAGAIN, "the timeout is over");
-        }
-        match waiter.wait_mut(timeout.as_mut()) {
-            Ok(()) => (),
-            Err(e) if e.errno() == ETIMEDOUT => timed_out = true,
-            Err(e) => return Err(e),
-        }
     }
 }
