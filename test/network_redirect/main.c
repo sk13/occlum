@@ -881,6 +881,133 @@ static int test_accept_timeout() {
     return 0;
 }
 
+// A read or write that may block, which a thread makes so that the test does not hang if the call
+// does not return
+struct blocked_io {
+    int fd;
+    int is_write;
+    atomic_int done;
+    ssize_t ret;
+    int err;
+    long elapsed;
+};
+
+static void *io_in_thread(void *arg) {
+    struct blocked_io *io = arg;
+    static char buf[65536];
+    long start = now_ms();
+    errno = 0;
+    if (io->is_write) {
+        // The writes go on until one of them waits for room: it ends with the bytes that it has
+        // written, or with EAGAIN, when its timeout is over. A buffer takes 208 KiB at most.
+        for (int i = 0; i < 64; i++) {
+            long call_start = now_ms();
+            io->ret = write(io->fd, buf, sizeof(buf));
+            io->err = errno;
+            if (io->ret != (ssize_t)sizeof(buf) || now_ms() - call_start > 100) {
+                break;
+            }
+        }
+    } else {
+        io->ret = read(io->fd, buf, 1);
+        io->err = errno;
+    }
+    io->elapsed = now_ms() - start;
+    atomic_store(&io->done, 1);
+    return NULL;
+}
+
+// Checks that a read or write on the socket gives up by itself when its timeout is over: a read
+// fails with EAGAIN, a write returns the bytes that it has written, or fails with EAGAIN. `peer` is
+// the other end of the connection, which is shut down if the call does not give up, to end it
+static int check_times_out(const char *what, int fd, int peer, int is_write,
+                           long timeout_ms) {
+    struct blocked_io io = { .fd = fd, .is_write = is_write };
+    pthread_t thread;
+    if (pthread_create(&thread, NULL, io_in_thread, &io) != 0) {
+        THROW_ERROR("failed to start the thread that blocks");
+    }
+    int done = wait_for_flag(&io.done, 5000);
+    if (!done) {
+        shutdown(peer, SHUT_RDWR);
+    }
+    pthread_join(thread, NULL);
+    if (!done) {
+        THROW_ERROR("%s is still blocked after 5 s, though its timeout is %ld ms", what,
+                    timeout_ms);
+    }
+    int gave_up;
+    if (is_write) {
+        gave_up = io.ret >= 0 || io.err == EAGAIN;
+    } else {
+        gave_up = io.ret < 0 && io.err == EAGAIN;
+    }
+    if (!gave_up) {
+        errno = io.err;
+        THROW_ERROR("%s with a timeout of %ld ms returned %zd", what, timeout_ms, io.ret);
+    }
+    if (io.elapsed < timeout_ms - 50 || io.elapsed > timeout_ms + 3000) {
+        THROW_ERROR("%s with a timeout of %ld ms gave up after %ld ms", what, timeout_ms,
+                    io.elapsed);
+    }
+    return 0;
+}
+
+// SO_RCVTIMEO and SO_SNDTIMEO of a redirected socket end the waits of read() and write(), not only
+// those of accept() and connect(): the socket that connects after the program has set them on its
+// TCP socket has them, so has the socket that the program sets them on after it was replaced, and
+// the socket that a redirected listener accepts has those of the listener
+static int test_redirected_sockets_time_out() {
+    int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in addr = addr4("127.0.0.1", REDIRECTED_PORT);
+    if (listen_fd < 0 || set_timeout_ms(listen_fd, SO_RCVTIMEO, 300) < 0 ||
+            set_timeout_ms(listen_fd, SO_SNDTIMEO, 300) < 0 ||
+            bind(listen_fd, SA(addr), sizeof(addr)) < 0 || listen(listen_fd, 4) < 0) {
+        THROW_ERROR("listening on the redirected address failed");
+    }
+
+    // The timeouts are those of the TCP socket that connects
+    int client_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (client_fd < 0 || set_timeout_ms(client_fd, SO_RCVTIMEO, 300) < 0 ||
+            set_timeout_ms(client_fd, SO_SNDTIMEO, 300) < 0 ||
+            connect(client_fd, SA(addr), sizeof(addr)) < 0) {
+        THROW_ERROR("connecting to the redirected address failed");
+    }
+    int accepted_fd = accept(listen_fd, NULL, NULL);
+    if (accepted_fd < 0) {
+        THROW_ERROR("accept failed");
+    }
+    if (check_times_out("read() of the socket that connected", client_fd, accepted_fd, 0,
+                        300) < 0 ||
+            check_times_out("read() of the socket that was accepted", accepted_fd, client_fd, 0,
+                            300) < 0 ||
+            check_times_out("write() of the socket that connected", client_fd, accepted_fd, 1,
+                            300) < 0 ||
+            check_times_out("write() of the socket that was accepted", accepted_fd, client_fd, 1,
+                            300) < 0) {
+        return -1;
+    }
+    close_files(2, accepted_fd, client_fd);
+
+    // The program sets the timeouts after the socket was replaced
+    client_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (client_fd < 0 || connect(client_fd, SA(addr), sizeof(addr)) < 0 ||
+            set_timeout_ms(client_fd, SO_RCVTIMEO, 400) < 0 ||
+            set_timeout_ms(client_fd, SO_SNDTIMEO, 400) < 0 ||
+            (accepted_fd = accept(listen_fd, NULL, NULL)) < 0) {
+        THROW_ERROR("the second connection failed");
+    }
+    if (check_times_out("read() of the socket with timeouts set after the redirect",
+                        client_fd,
+                        accepted_fd, 0, 400) < 0 ||
+            check_times_out("write() of the socket with timeouts set after the redirect", client_fd,
+                            accepted_fd, 1, 400) < 0) {
+        return -1;
+    }
+    close_files(3, accepted_fd, client_fd, listen_fd);
+    return 0;
+}
+
 // ============================================================================
 // Test suite main
 // ============================================================================
@@ -898,6 +1025,7 @@ static test_case_t test_cases[] = {
     TEST_CASE(test_connect_waits_for_a_full_backlog),
     TEST_CASE(test_connect_timeout_on_a_full_backlog),
     TEST_CASE(test_accept_timeout),
+    TEST_CASE(test_redirected_sockets_time_out),
 };
 
 int main(int argc, const char *argv[]) {
