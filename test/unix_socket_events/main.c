@@ -1197,6 +1197,80 @@ static int test_epoll_wait_is_woken_by_the_reset(void) {
     return 0;
 }
 
+// A socket that is registered with EPOLLET is told when its peer shuts down reading, as the peer
+// cannot be written to any more: it gets EPOLLOUT again, if there is room, and the other events that
+// are there. If there is no room, it is told nothing.
+static int test_epoll_edge_is_told_of_the_shutdown_of_the_peer(void) {
+    static const struct {
+        int how;
+        const char *name;
+        unsigned events;    // for the end whose peer shut down
+    } hows[] = {
+        { SHUT_RD, "SHUT_RD", POLLOUT },
+        { SHUT_WR, "SHUT_WR", POLLIN | POLLOUT | POLLRDHUP },
+        { SHUT_RDWR, "SHUT_RDWR", POLLIN | POLLOUT | POLLHUP | POLLRDHUP },
+    };
+    for (int kind = 0; kind < NUM_PAIR_KINDS; kind++) {
+        for (size_t i = 0; i < ARRAY_SIZE(hows); i++) {
+            char what[64];
+            snprintf(what, sizeof(what), "%s, %s of the peer", pair_names[kind], hows[i].name);
+            context = what;
+            int a, b;
+            CHECK(make_pair(kind, &a, &b) == 0, "failed to make a connection");
+            int ep = epoll_create1(0);
+            CHECK(ep >= 0 && epoll_add(ep, a, EV_EDGE) == 0, "failed to make an epoll file");
+            // The first edge: the socket is writable
+            CHECK_EPOLL(ep, POLLOUT, "at the registration");
+            CHECK_EPOLL(ep, 0, "again");
+
+            CHECK(shutdown(b, hows[i].how) == 0, "failed to shut down");
+            CHECK_EPOLL(ep, hows[i].events, "after the shutdown");
+            CHECK_EPOLL(ep, 0, "again after the shutdown");
+            close(ep);
+            close(a);
+            close(b);
+        }
+
+        // A socket that has no room is not writable, whatever its peer shuts down
+        context = pair_names[kind];
+        int a, b;
+        CHECK(make_pair(kind, &a, &b) == 0, "failed to make a connection");
+        CHECK(fill(a) == 0, "failed to fill the buffer");
+        int ep = epoll_create1(0);
+        CHECK(ep >= 0 && epoll_add(ep, a, EV_EDGE) == 0, "failed to make an epoll file");
+        CHECK_EPOLL(ep, 0, "without room, at the registration");
+        CHECK(shutdown(b, SHUT_RD) == 0, "failed to shut down");
+        CHECK_EPOLL(ep, 0, "without room, after the shutdown");
+        close(ep);
+        close(a);
+        close(b);
+    }
+    return 0;
+}
+
+// A thread that waits in epoll_wait for an edge triggered socket is woken up by the shutdown of its
+// peer for reading
+static int test_epoll_wait_is_woken_by_shutdown_rd_of_the_peer(void) {
+    for (int kind = 0; kind < NUM_PAIR_KINDS; kind++) {
+        context = pair_names[kind];
+        int a, b;
+        CHECK(make_pair(kind, &a, &b) == 0, "failed to make a connection");
+        int ep = epoll_create1(0);
+        CHECK(ep >= 0 && epoll_add(ep, b, EV_EDGE) == 0, "failed to make an epoll file");
+        CHECK_EPOLL(ep, POLLOUT, "at the registration");
+        op_t op;
+        CHECK(op_start(&op, OP_EPOLL, ep) == 0, "epoll_wait does not wait");
+        CHECK(shutdown(a, SHUT_RD) == 0, "failed to shut down");
+        CHECK(op_finish(&op) == 0, "epoll_wait is not woken");
+        CHECK(op.ret == 1 && op.revents == POLLOUT, "epoll_wait returns %ld, events %s, "
+              "instead of OUT", op.ret, events_str(op.revents));
+        close(ep);
+        close(a);
+        close(b);
+    }
+    return 0;
+}
+
 static test_case_t test_cases[] = {
     TEST_CASE(test_shutdown_changes_the_events_at_once),
     TEST_CASE(test_full_buffer_is_not_writable_after_shutdown),
@@ -1219,6 +1293,8 @@ static test_case_t test_cases[] = {
     TEST_CASE(test_full_buffer_has_room_after_the_peer_closes),
     TEST_CASE(test_epoll_is_told_of_the_reset),
     TEST_CASE(test_epoll_wait_is_woken_by_the_reset),
+    TEST_CASE(test_epoll_edge_is_told_of_the_shutdown_of_the_peer),
+    TEST_CASE(test_epoll_wait_is_woken_by_shutdown_rd_of_the_peer),
 };
 
 int main(int argc, const char *argv[]) {

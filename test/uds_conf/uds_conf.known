@@ -43,7 +43,6 @@ shut.b_full.wr.b_write
 ev.out_threshold.after_reading
 
 # group c12_epoll
-epoll.et.peer_shut_rd
 epoll.dup_stays_registered
 epoll.out.after_1_byte_read
 
