@@ -488,11 +488,10 @@ pub fn do_sendto(
     addr: *const libc::sockaddr,
     addr_len: libc::socklen_t,
 ) -> Result<isize> {
-    if addr.is_null() ^ (addr_len == 0) {
-        return_errno!(EINVAL, "addr and addr_len should be both null and 0 or not");
-    }
+    // Like Linux, an address of length 0 is no address, and the length does not matter if there
+    // is no address
     let addr = {
-        if addr.is_null() {
+        if addr.is_null() || addr_len == 0 {
             None
         } else {
             let addr_storage = copy_sock_addr_from_user(addr, addr_len as _)?;
@@ -623,7 +622,7 @@ pub fn do_sendmsg(fd: c_int, msg_ptr: *const libc::msghdr, flags_c: c_int) -> Re
             .map(|bytes_send| bytes_send as isize)
     } else if let Ok(socket) = file_ref.as_unix_socket() {
         socket
-            .sendmsg(&bufs[..], flags, control)
+            .sendmsg(&bufs[..], flags, addr.as_ref(), control)
             .map(|bytes_sent| bytes_sent as isize)
     } else if let Ok(uring_socket) = file_ref.as_uring_socket() {
         uring_socket
@@ -658,6 +657,9 @@ pub fn do_recvmsg(fd: c_int, msg_mut_ptr: *mut libc::msghdr, flags_c: c_int) -> 
         if let Some(recv_addr) = recv_addr {
             let (c_addr_storage, c_addr_len) = recv_addr.to_c_storage();
             copy_sock_addr_to_user(c_addr_storage, c_addr_len, addr, &mut msg.msg_namelen);
+        } else {
+            // Like Linux, if there is no address, its length is 0
+            msg.msg_namelen = 0;
         }
     }
 

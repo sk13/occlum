@@ -314,16 +314,13 @@ impl Stream {
     }
 
     pub fn sendto(&self, buf: &[u8], flags: SendFlags, addr: Option<&UnixAddr>) -> Result<usize> {
+        self.check_no_addr(addr.is_some())?;
         self.send(&[buf], flags)
     }
 
     pub fn recvfrom(&self, buf: &mut [u8], flags: RecvFlags) -> Result<(usize, Option<UnixAddr>)> {
         let data_len = self.recv(&mut [buf], flags)?;
-        // Like Linux, no address for an unnamed peer, nor for a TCP socket
-        let addr = self
-            .peer_addr()
-            .ok()
-            .filter(|addr| *addr != UnixAddr::Unnamed && self.inet_view().is_none());
+        let addr = self.recv_addr();
 
         debug!("recvfrom {:?}", addr);
 
@@ -334,8 +331,10 @@ impl Stream {
         &self,
         bufs: &[&[u8]],
         flags: SendFlags,
+        addr: Option<&AnyAddr>,
         control: Option<&[u8]>,
     ) -> Result<usize> {
+        self.check_no_addr(addr.is_some())?;
         let data_len = self.send(bufs, flags)?;
         if let Some(msg_control) = control {
             self.send(&[msg_control], flags)?;
@@ -352,7 +351,7 @@ impl Stream {
     ) -> Result<(usize, Option<AnyAddr>, MsgFlags, usize)> {
         let data_len = self.recv(bufs, flags)?;
 
-        // For stream socket, the msg_name is ignored. And other fields are not supported.
+        // The name of the peer is the only other field that is supported
         let mut msg_flags = MsgFlags::empty();
         let control_len = if let Some(msg_control) = control {
             let control_len = self.read(msg_control)?;
@@ -372,7 +371,12 @@ impl Stream {
             0
         };
 
-        Ok((data_len, None, msg_flags, control_len))
+        Ok((
+            data_len,
+            self.recv_addr().map(AnyAddr::Unix),
+            msg_flags,
+            control_len,
+        ))
     }
 
     /// Receives bytes into the buffers, which is what all the calls that read from the socket do.
@@ -416,6 +420,27 @@ impl Stream {
         match &*self.inner() {
             Status::Connected(endpoint) => Ok(endpoint.clone()),
             _ => return_errno!(ENOTCONN, "unconnected socket"),
+        }
+    }
+
+    /// Returns the address that a receive tells: the name of the peer, if it has one. Like in
+    /// Linux, there is no address for an unnamed peer, nor for a TCP socket.
+    fn recv_addr(&self) -> Option<UnixAddr> {
+        self.peer_addr()
+            .ok()
+            .filter(|addr| *addr != UnixAddr::Unnamed && self.inet_view().is_none())
+    }
+
+    /// Fails if a send has an address, as the sockets of a stream have no address to send to,
+    /// like in Linux: EISCONN if the socket is connected, else EOPNOTSUPP. A socket that replaces
+    /// a TCP socket ignores the address, as TCP does.
+    fn check_no_addr(&self, has_addr: bool) -> Result<()> {
+        if !has_addr || self.inet_view().is_some() {
+            return Ok(());
+        }
+        match &*self.inner() {
+            Status::Connected(_) => return_errno!(EISCONN, "the socket is connected"),
+            _ => return_errno!(EOPNOTSUPP, "a stream socket has no address to send to"),
         }
     }
 
