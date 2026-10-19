@@ -579,6 +579,57 @@ static void wake_send(ctx_t *c) {
     }
 }
 
+// A socket pair whose buffer is full, and a send that waits for room until its timeout is over
+static int setup_full_unix_socket_pair(ctx_t *c) {
+    char buf[4096];
+    memset(buf, 'x', sizeof(buf));
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, c->socks) < 0) {
+        return -1;
+    }
+    fcntl(c->socks[0], F_SETFL, O_NONBLOCK);
+    while (write(c->socks[0], buf, sizeof(buf)) > 0)
+        ;
+    while (write(c->socks[0], buf, 1) > 0)
+        ;
+    fcntl(c->socks[0], F_SETFL, 0);
+    return 0;
+}
+
+static long call_send_with_timeout(ctx_t *c, long timeout_us) {
+    struct timeval tv = { timeout_us / 1000000, timeout_us % 1000000 };
+    setsockopt(c->socks[0], SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    return send(c->socks[0], "x", 1, 0);
+}
+
+// A unix listener whose queue is full, and a connect that waits for room until its timeout is over
+static int setup_unix_full_backlog(ctx_t *c) {
+    if (setup_unix_listener(c) < 0 || listen(c->listener, 0) < 0) {
+        return -1;
+    }
+    // A backlog of 0 takes one connection
+    c->socks[0] = socket(AF_UNIX, SOCK_STREAM, 0);
+    return connect(c->socks[0], (struct sockaddr *)&c->listener_addr, c->listener_addr_len);
+}
+
+static void teardown_unix_full_backlog(ctx_t *c) {
+    close_fd(&c->socks[0]);
+    teardown_listener(c);
+}
+
+static long call_connect_with_timeout(ctx_t *c, long timeout_us) {
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) {
+        return -1;
+    }
+    struct timeval tv = { timeout_us / 1000000, timeout_us % 1000000 };
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    long ret = connect(fd, (struct sockaddr *)&c->listener_addr, c->listener_addr_len);
+    int err = errno;
+    close(fd);
+    errno = err;
+    return ret;
+}
+
 // ---- a full pipe ----
 
 static int setup_full_pipe(ctx_t *c) {
@@ -739,6 +790,10 @@ static const blocking_call_t g_blocking_calls[] = {
     { "pipe_write", setup_full_pipe, teardown_pipe, call_pipe_write, wake_pipe_read, SITE_WAITER, 0 },
     { "unix_accept", setup_unix_listener, teardown_listener, call_accept, wake_connect, SITE_WAITER, 0 },
     { "unix_recv", setup_unix_socket_pair, teardown_socket_pair, call_recv, wake_send, SITE_WAITER, 0 },
+    { "unix_recv_with_timeout", setup_unix_socket_pair, teardown_socket_pair, call_recv_with_timeout, NULL, SITE_WAITER, 0 },
+    { "unix_send_with_timeout", setup_full_unix_socket_pair, teardown_socket_pair, call_send_with_timeout, NULL, SITE_WAITER, 0 },
+    { "unix_accept_with_timeout", setup_unix_listener, teardown_listener, call_accept_with_timeout, NULL, SITE_WAITER, 0 },
+    { "unix_connect_with_timeout", setup_unix_full_backlog, teardown_unix_full_backlog, call_connect_with_timeout, NULL, SITE_WAITER, 0 },
     { "semop", setup_semaphore, teardown_semaphore, call_semop, wake_semaphore, SITE_WAITER, 0 },
     { "semtimedop", setup_semaphore, teardown_semaphore, call_semtimedop, NULL, SITE_WAITER, F_CHILD },
     { "flock", setup_flock, teardown_flock, call_flock, wake_flock, SITE_WAITER, 0 },
