@@ -25,6 +25,10 @@ Users could run the unit test manually as well.
 // run the unit tests of the LibOS code that needs no enclave, on the host (so far
 // the queue of the channels of pipes and unix sockets)
 # make test-host
+
+// run a test that is not in the default list, since it drives the kernel heap to its
+// limit and may take the enclave down on a busy machine: run it by itself, on a quiet machine
+# TESTS=unix_socket_memory_exhaust make test
 ```
 
 ## Gvisor Tests
