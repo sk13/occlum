@@ -183,7 +183,6 @@ tmo.recv_waitall
 tmo.recv_waitall_partial
 tmo.write_full
 tmo.send_full
-tmo.accept
 
 # group c15_options
 opt.get.SO_PEEK_OFF.idle

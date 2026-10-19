@@ -1,6 +1,7 @@
-// The listening side of unix stream sockets: the backlog, connect() on a full backlog, and listen()
-// while another thread waits in accept(). The expectations are the behavior of Linux (checked on
-// Linux 7.0): the test passes there, too (gcc -pthread -I../include main.c).
+// The listening side of unix stream sockets: the backlog, connect() on a full backlog, accept()
+// with a timeout, and listen() while another thread waits in accept(). The expectations are the
+// behavior of Linux (checked on Linux 7.0): the test passes there, too (gcc -pthread
+// -I../include main.c).
 //
 // The calls that may block run in threads, so that a call that does not return when it should makes
 // the test case fail after a timeout instead of hanging it. A thread that never returns is left
@@ -999,6 +1000,50 @@ static int test_accept_is_interrupted(void) {
     return 0;
 }
 
+static int test_accept_timeout(void) {
+    unix_addr_t a;
+    int l = listener(&a, 2);
+    CHECK(l >= 0, "failed to listen");
+    CHECK(set_timeout(l, SO_RCVTIMEO, 300) == 0, "failed to set SO_RCVTIMEO");
+
+    op_t acc;
+    CHECK(op_start(&acc, OP_ACCEPT, l) == 0, "failed to start the thread");
+    EXPECT_RETURNS(&acc, -1, EAGAIN, "accept() with a timeout");
+    CHECK(acc.elapsed_ms >= 250 && acc.elapsed_ms < WAKE_MS,
+          "accept() with a timeout of 300 ms returned after %ld ms", acc.elapsed_ms);
+    op_finish(&acc);
+
+    // A negative timeout is over at once
+    struct timeval over = { -1, 0 };
+    CHECK(setsockopt(l, SOL_SOCKET, SO_RCVTIMEO, &over, sizeof(over)) == 0,
+          "failed to set SO_RCVTIMEO");
+    long start = now_ms();
+    CHECK(accept_fails(l, EAGAIN), "accept() with a timeout that is over does not fail");
+    CHECK(now_ms() - start < 200, "accept() with a timeout that is over waits");
+
+    // A connection that arrives meanwhile is accepted
+    CHECK(set_timeout(l, SO_RCVTIMEO, 10000) == 0, "failed to set SO_RCVTIMEO");
+    CHECK(op_start(&acc, OP_ACCEPT, l) == 0, "failed to start the thread");
+    CHECK(op_blocks(&acc), "accept() does not wait");
+    int c = new_socket(0);
+    CHECK(connect_to(c, &a) == 0, "failed to connect");
+    CHECK(op_wait(&acc, WAKE_MS) && acc.ret >= 0,
+          "accept() with a timeout does not get the connection");
+    CHECK(acc.elapsed_ms < 8000, "accept() waited for the timeout");
+    close((int)acc.ret);
+    op_finish(&acc);
+    close(c);
+
+    // The timeout does not make a nonblocking socket wait, and it is not zero
+    set_nonblocking(l, 1);
+    CHECK(set_timeout(l, SO_RCVTIMEO, 300) == 0, "failed to set SO_RCVTIMEO");
+    start = now_ms();
+    CHECK(accept_fails(l, EAGAIN), "nonblocking accept() does not fail");
+    CHECK(now_ms() - start < 200, "nonblocking accept() waits");
+    close(l);
+    return 0;
+}
+
 // The events of a listener: readable if a connection is waiting
 static int test_events_of_a_listener(void) {
     unix_addr_t a;
@@ -1043,6 +1088,7 @@ static test_case_t test_cases[] = {
     TEST_CASE(test_smaller_backlog_keeps_the_connections),
     TEST_CASE(test_greater_backlog_wakes_blocked_connects),
     TEST_CASE(test_accept_is_interrupted),
+    TEST_CASE(test_accept_timeout),
     TEST_CASE(test_events_of_a_listener),
 };
 

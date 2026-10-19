@@ -210,6 +210,32 @@ int test_unix_accept_interrupted() {
     return ret;
 }
 
+// accept() on a listening unix socket without connections, which times out
+static int accept_timeout_call(void *arg) {
+    int *fd = arg;
+    int conn = accept(*fd, NULL, NULL);
+    if (conn >= 0) {
+        close(conn);
+    }
+    return expect_failure(conn, EAGAIN, EAGAIN, "accept");
+}
+
+int test_unix_accept_timeout() {
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    struct sockaddr_un addr = { .sun_family = AF_UNIX };
+    strncpy(addr.sun_path, g_sock_path, sizeof(addr.sun_path) - 1);
+    unlink(g_sock_path);
+    struct timeval timeout = { 0, 1000 };
+    if (fd < 0 || bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0 || listen(fd, 8) < 0 ||
+            setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0) {
+        THROW_ERROR("failed to set up the listening socket");
+    }
+    int ret = check_calls_leak_nothing(accept_timeout_call, &fd, 0);
+    close(fd);
+    unlink(g_sock_path);
+    return ret;
+}
+
 // connect() on a unix socket whose backlog is full: the interrupted one, and the timed out one
 static int connect_full_call(const struct sockaddr_un *addr, long timeout_us,
                              int expected_errno) {
@@ -383,6 +409,7 @@ static test_case_t test_cases[] = {
     TEST_CASE(test_pipe_read_interrupted),
     TEST_CASE(test_pipe_write_interrupted),
     TEST_CASE(test_unix_accept_interrupted),
+    TEST_CASE(test_unix_accept_timeout),
     TEST_CASE(test_unix_connect_full_backlog_interrupted),
     TEST_CASE(test_unix_connect_full_backlog_timeout),
     TEST_CASE(test_epoll_wait_interrupted),
