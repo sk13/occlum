@@ -24,6 +24,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/epoll.h>
+#include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/time.h>
@@ -1080,6 +1081,57 @@ static int test_redirected_sockets_limit_the_send_buffer() {
     return 0;
 }
 
+// The redirected sockets that are not connected have the errors of TCP: a receive and a shutdown
+// fail with ENOTCONN, also if the socket listens, and FIONREAD fails only for a socket that
+// listens. A connection that is closed with bytes that nobody reads is reset, as with TCP.
+static int test_redirected_sockets_have_the_errors_of_tcp(void) {
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in addr = addr4("127.0.0.1", REDIRECTED_PORT);
+    int one = 1, n = -1;
+    char buf[16];
+    if (fd < 0 || setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one)) < 0 ||
+            bind(fd, SA(addr), sizeof(addr)) < 0) {
+        THROW_ERROR("binding to the redirected address failed");
+    }
+    if (recv(fd, buf, sizeof(buf), MSG_DONTWAIT) != -1 || errno != ENOTCONN) {
+        THROW_ERROR("recv on a socket that is not connected should fail with ENOTCONN");
+    }
+    if (ioctl(fd, FIONREAD, &n) < 0 || n != 0) {
+        THROW_ERROR("FIONREAD on a socket that is not connected should return 0");
+    }
+    if (shutdown(fd, SHUT_RD) != -1 || errno != ENOTCONN) {
+        THROW_ERROR("shutdown of a socket that is not connected should fail with ENOTCONN");
+    }
+    if (listen(fd, 4) < 0) {
+        THROW_ERROR("listen failed");
+    }
+    if (recv(fd, buf, sizeof(buf), MSG_DONTWAIT) != -1 || errno != ENOTCONN) {
+        THROW_ERROR("recv on a listening socket should fail with ENOTCONN");
+    }
+    if (ioctl(fd, FIONREAD, &n) != -1 || errno != EINVAL) {
+        THROW_ERROR("FIONREAD on a listening socket should fail with EINVAL");
+    }
+
+    int client_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (client_fd < 0 || connect(client_fd, SA(addr), sizeof(addr)) < 0) {
+        THROW_ERROR("connecting to the redirected address failed");
+    }
+    int accepted_fd = accept(fd, NULL, NULL);
+    if (accepted_fd < 0 || write(client_fd, "unread", 6) != 6) {
+        THROW_ERROR("accept or write failed");
+    }
+    close(accepted_fd);
+    if (recv(client_fd, buf, sizeof(buf), MSG_DONTWAIT) != -1 || errno != ECONNRESET) {
+        THROW_ERROR("recv after the close with unread bytes should fail with ECONNRESET");
+    }
+    if (recv(client_fd, buf, sizeof(buf), MSG_DONTWAIT) != 0) {
+        THROW_ERROR("recv after the reset should return the end of the file");
+    }
+    close(client_fd);
+    close(fd);
+    return 0;
+}
+
 // ============================================================================
 // Test suite main
 // ============================================================================
@@ -1099,6 +1151,7 @@ static test_case_t test_cases[] = {
     TEST_CASE(test_accept_timeout),
     TEST_CASE(test_redirected_sockets_time_out),
     TEST_CASE(test_redirected_sockets_limit_the_send_buffer),
+    TEST_CASE(test_redirected_sockets_have_the_errors_of_tcp),
 };
 
 int main(int argc, const char *argv[]) {
