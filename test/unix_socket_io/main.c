@@ -10,7 +10,7 @@
 //    bytes that came by then. The timeouts belong to the socket, not to the descriptor.
 //  - MSG_DONTWAIT, MSG_PEEK and MSG_WAITALL, the flags that have no effect, and the address of a
 //    send on a connected (EISCONN) or an unconnected (EOPNOTSUPP) socket.
-//  - recvmsg and recvfrom tell the name of the peer.
+//  - recvmsg and recvfrom tell the name of the peer; sendmmsg and recvmmsg work.
 //
 // MSG_OOB is not supported by the LibOS: it takes the byte as plain data (see
 // test_oob_flag_does_not_hang).
@@ -51,6 +51,7 @@
 #define EARLY_MS        20      // time that a timeout may take less than it says
 #define STACK_SIZE      (256 * 1024)
 #define MAX_PIECES      4
+#define MAX_MESSAGES    4
 #define STIM_CLOSE      (-1)
 
 #define CHECK(cond, fmt, ...) do { \
@@ -245,11 +246,12 @@ struct call {
     char *buf;
     size_t len;
     int flags;
-    int pieces;                 // the number of the iovecs of the vectored calls
+    int pieces;                 // the number of the iovecs of the vectored calls, or messages
     struct sockaddr_un name;    // the address of the calls that have one
     socklen_t namelen;          // its length: the length that a receive returns
     int msg_flags;              // the flags that recvmsg returns
     int mask_usr2;              // block SIGUSR2 in the thread, before the call
+    unsigned lens[MAX_MESSAGES];// the lengths that recvmmsg returns
     pthread_t thread;
     int created;
     atomic_int started;
@@ -341,6 +343,43 @@ static long call_sendmsg(call_t *c) {
         msg.msg_namelen = c->namelen;
     }
     return sendmsg(c->fd, &msg, c->flags);
+}
+
+// The message i of sendmmsg and recvmmsg is the bytes [i * len, (i + 1) * len) of the buffer, and
+// `pieces` is the number of the messages. The calls are made without the C library, as musl
+// does not have a sendmmsg system call.
+static long call_sendmmsg(call_t *c) {
+    struct mmsghdr msgs[MAX_MESSAGES];
+    struct iovec iov[MAX_MESSAGES];
+    memset(msgs, 0, sizeof(msgs));
+    for (int i = 0; i < c->pieces; i++) {
+        iov[i].iov_base = c->buf + i * c->len;
+        iov[i].iov_len = c->len;
+        msgs[i].msg_hdr.msg_iov = &iov[i];
+        msgs[i].msg_hdr.msg_iovlen = 1;
+    }
+    long ret = syscall(SYS_sendmmsg, c->fd, msgs, c->pieces, c->flags);
+    for (int i = 0; i < c->pieces; i++) {
+        c->lens[i] = msgs[i].msg_len;
+    }
+    return ret;
+}
+
+static long call_recvmmsg(call_t *c) {
+    struct mmsghdr msgs[MAX_MESSAGES];
+    struct iovec iov[MAX_MESSAGES];
+    memset(msgs, 0, sizeof(msgs));
+    for (int i = 0; i < c->pieces; i++) {
+        iov[i].iov_base = c->buf + i * c->len;
+        iov[i].iov_len = c->len;
+        msgs[i].msg_hdr.msg_iov = &iov[i];
+        msgs[i].msg_hdr.msg_iovlen = 1;
+    }
+    long ret = syscall(SYS_recvmmsg, c->fd, msgs, c->pieces, c->flags, NULL);
+    for (int i = 0; i < c->pieces; i++) {
+        c->lens[i] = msgs[i].msg_len;
+    }
+    return ret;
 }
 
 typedef struct {
@@ -1697,6 +1736,190 @@ static int test_receive_tells_the_name_of_the_peer(void) {
     return 0;
 }
 
+// ---------------------------------------------------------------------------------------------
+// sendmmsg and recvmmsg
+// ---------------------------------------------------------------------------------------------
+
+static int test_sendmmsg(void) {
+    int sv[2];
+    char buf[16];
+    call_t c;
+
+    // Messages are bytes of the stream
+    CHECK(make_pair(sv) == 0, "failed to create a socket pair");
+    CHECK(call_start_n(&c, call_sendmmsg, sv[0], "aabbcc", 2, 0, 3) == 0,
+          "failed to start sendmmsg");
+    EXPECT_NOW(&c, 3, 0, "sendmmsg");
+    CHECK(c.lens[0] == 2 && c.lens[1] == 2 &&
+          c.lens[2] == 2, "sendmmsg sends %u, %u, %u bytes",
+          c.lens[0], c.lens[1], c.lens[2]);
+    call_finish(&c);
+    CHECK(recv(sv[1], buf, sizeof(buf), 0) == 6 && memcmp(buf, "aabbcc", 6) == 0,
+          "the bytes of sendmmsg do not arrive");
+
+    // No message
+    CHECK(call_start_n(&c, call_sendmmsg, sv[0], "aabbcc", 2, 0, 0) == 0,
+          "failed to start sendmmsg");
+    EXPECT_NOW(&c, 0, 0, "sendmmsg of no message");
+    call_finish(&c);
+    close(sv[0]);
+    close(sv[1]);
+
+    // A message that waits for the reader, which gets all the bytes
+    {
+        const size_t total = 2 * MIB;
+        char *data = malloc(total);
+        fill_pattern(data, total, 0);
+        flow_t reader;
+        CHECK(make_pair(sv) == 0, "failed to create a socket pair");
+        CHECK(flow_start(&reader, reader_main, sv[1], total, 65536, 100, 0) == 0,
+              "failed to start the reader");
+        CHECK(call_start_n(&c, call_sendmmsg, sv[0], data, MIB, 0, 2) == 0,
+              "failed to start sendmmsg");
+        EXPECT_CALL(&c, 30000, 2, 0, "sendmmsg");
+        CHECK(c.lens[0] == MIB && c.lens[1] == MIB, "sendmmsg sends %u and %u bytes", c.lens[0],
+              c.lens[1]);
+        call_finish(&c);
+        CHECK(flow_join(&reader, WAKE_MS), "the reader does not get everything");
+        CHECK(reader.bad_pos == total, "a wrong byte at %zu", reader.bad_pos);
+        close(sv[0]);
+        close(sv[1]);
+        free(data);
+    }
+
+    // A peer that is gone: the first message fails
+    CHECK(make_pair(sv) == 0, "failed to create a socket pair");
+    close(sv[1]);
+    CHECK(call_start_n(&c, call_sendmmsg, sv[0], "aabb", 2, MSG_NOSIGNAL, 2) == 0,
+          "failed to start sendmmsg");
+    EXPECT_NOW(&c, -1, EPIPE, "sendmmsg");
+    call_finish(&c);
+    close(sv[0]);
+    return 0;
+}
+
+static int test_recvmmsg(void) {
+    int sv[2];
+    char buf[4 * 4];
+    call_t c;
+    stimulus_t s;
+    CHECK(make_pair(sv) == 0, "failed to create a socket pair");
+
+    // The messages take the bytes in turn
+    CHECK(write(sv[1], "123456789", 9) == 9, "failed to write");
+    memset(buf, 0, sizeof(buf));
+    CHECK(call_start_n(&c, call_recvmmsg, sv[0], buf, 4, MSG_DONTWAIT, 4) == 0,
+          "failed to start recvmmsg");
+    EXPECT_NOW(&c, 3, 0, "recvmmsg");
+    CHECK(c.lens[0] == 4 && c.lens[1] == 4 &&
+          c.lens[2] == 1, "recvmmsg gets %u, %u, %u bytes",
+          c.lens[0], c.lens[1], c.lens[2]);
+    CHECK(memcmp(buf, "1234", 4) == 0 && memcmp(buf + 4, "5678", 4) == 0 && buf[8] == '9',
+          "recvmmsg gets wrong bytes");
+    call_finish(&c);
+
+    // Nothing to get
+    CHECK(call_start_n(&c, call_recvmmsg, sv[0], buf, 4, MSG_DONTWAIT, 2) == 0,
+          "failed to start recvmmsg");
+    EXPECT_NOW(&c, -1, EAGAIN, "recvmmsg");
+    call_finish(&c);
+
+    // No message
+    CHECK(call_start_n(&c, call_recvmmsg, sv[0], buf, 4, MSG_DONTWAIT, 0) == 0,
+          "failed to start recvmmsg");
+    EXPECT_NOW(&c, 0, 0, "recvmmsg of no message");
+    call_finish(&c);
+
+    // MSG_WAITFORONE: the first message waits, the others do not
+    CHECK(write(sv[1], "ab", 2) == 2, "failed to write");
+    CHECK(call_start_n(&c, call_recvmmsg, sv[0], buf, 4, MSG_WAITFORONE, 2) == 0,
+          "failed to start recvmmsg");
+    EXPECT_NOW(&c, 1, 0, "recvmmsg");
+    CHECK(c.lens[0] == 2 && memcmp(buf, "ab", 2) == 0, "recvmmsg gets wrong bytes");
+    call_finish(&c);
+    CHECK(call_start_n(&c, call_recvmmsg, sv[0], buf, 4, MSG_WAITFORONE, 2) == 0,
+          "failed to start recvmmsg");
+    CHECK(call_blocks(&c), "recvmmsg returns on an empty socket");
+    CHECK(stimulus_start(&s, sv[1], 0, "q", 0) == 0, "failed to start");
+    stimulus_join(&s);
+    EXPECT_CALL(&c, WAKE_MS, 1, 0, "recvmmsg");
+    CHECK(c.lens[0] == 1 && buf[0] == 'q', "recvmmsg gets wrong bytes");
+    call_finish(&c);
+
+    // Without MSG_WAITFORONE all the messages wait
+    CHECK(write(sv[1], "cd", 2) == 2, "failed to write");
+    CHECK(call_start_n(&c, call_recvmmsg, sv[0], buf, 4, 0, 2) == 0,
+          "failed to start recvmmsg");
+    CHECK(call_blocks(&c), "recvmmsg returns with one message of two");
+    CHECK(stimulus_start(&s, sv[1], 0, "efgh", 0) == 0, "failed to start");
+    stimulus_join(&s);
+    EXPECT_CALL(&c, WAKE_MS, 2, 0, "recvmmsg");
+    call_finish(&c);
+    close(sv[0]);
+    close(sv[1]);
+    return 0;
+}
+
+// sendmmsg takes at most 1024 messages (UIO_MAXIOV), whatever the length of the vector says, and
+// recvmmsg has no such limit. Both take no message from a vector of length 0, whatever its address
+static int test_mmsg_vector_length(void) {
+    enum { VLEN = 1100, LIMIT = 1024 };
+    int sv[2];
+    char bytes[VLEN];
+    char out[VLEN];
+    flow_t reader;
+    struct mmsghdr *msgs = calloc(VLEN, sizeof(*msgs));
+    struct iovec *iov = calloc(VLEN, sizeof(*iov));
+    CHECK(msgs != NULL && iov != NULL, "failed to allocate the vector");
+    fill_pattern(bytes, sizeof(bytes), 0);
+    CHECK(make_pair(sv) == 0, "failed to create a socket pair");
+
+    // A byte for each message, which a reader takes while they are sent. Only 1024 messages are
+    // sent.
+    for (int i = 0; i < VLEN; i++) {
+        iov[i].iov_base = bytes + i;
+        iov[i].iov_len = 1;
+        msgs[i].msg_hdr.msg_iov = &iov[i];
+        msgs[i].msg_hdr.msg_iovlen = 1;
+    }
+    CHECK(flow_start(&reader, reader_main, sv[1], LIMIT, 4096, 0, 0) == 0,
+          "failed to start the reader");
+    long ret = syscall(SYS_sendmmsg, sv[0], msgs, VLEN, 0);
+    CHECK(ret == LIMIT, "sendmmsg of %d messages sent %ld", VLEN, ret);
+    CHECK(msgs[LIMIT - 1].msg_len == 1 && msgs[LIMIT].msg_len == 0,
+          "sendmmsg wrote the lengths of the wrong messages");
+    CHECK(flow_join(&reader, WAKE_MS), "the reader does not get all the bytes");
+    CHECK(reader.bad_pos == LIMIT, "a wrong byte at %zu", reader.bad_pos);
+    errno = 0;
+    CHECK(recv(sv[1], out, sizeof(out), MSG_DONTWAIT) == -1 && errno == EAGAIN,
+          "more bytes than those of the first %d messages arrive", LIMIT);
+
+    // Of the bytes that are there, all the messages of the vector are received
+    CHECK(write(sv[0], bytes, VLEN) == VLEN, "failed to write");
+    memset(msgs, 0, VLEN * sizeof(*msgs));
+    for (int i = 0; i < VLEN; i++) {
+        iov[i].iov_base = out + i;
+        msgs[i].msg_hdr.msg_iov = &iov[i];
+        msgs[i].msg_hdr.msg_iovlen = 1;
+    }
+    ret = syscall(SYS_recvmmsg, sv[1], msgs, VLEN, MSG_DONTWAIT, NULL);
+    CHECK(ret == VLEN, "recvmmsg of %d messages received %ld", VLEN, ret);
+    CHECK(memcmp(out, bytes, VLEN) == 0, "recvmmsg gets wrong bytes");
+
+    // No message, and a vector that is no memory
+    CHECK(syscall(SYS_sendmmsg, sv[0], NULL, 0, MSG_DONTWAIT) == 0, "sendmmsg of 0 messages");
+    CHECK(syscall(SYS_recvmmsg, sv[1], NULL, 0, MSG_DONTWAIT, NULL) == 0,
+          "recvmmsg of 0 messages");
+    errno = 0;
+    CHECK(syscall(SYS_sendmmsg, sv[0], (void *)1, 1, MSG_DONTWAIT) == -1 && errno == EFAULT,
+          "sendmmsg of a vector that is no memory: errno %d", errno);
+    close(sv[0]);
+    close(sv[1]);
+    free(msgs);
+    free(iov);
+    return 0;
+}
+
 static test_case_t test_cases[] = {
     TEST_CASE(test_blocking_writes_write_everything),
     TEST_CASE(test_concurrent_writes_deliver_everything),
@@ -1719,6 +1942,9 @@ static test_case_t test_cases[] = {
     TEST_CASE(test_oob_flag_does_not_hang),
     TEST_CASE(test_sendto_and_sendmsg_with_an_address),
     TEST_CASE(test_receive_tells_the_name_of_the_peer),
+    TEST_CASE(test_sendmmsg),
+    TEST_CASE(test_recvmmsg),
+    TEST_CASE(test_mmsg_vector_length),
 };
 
 int main(int argc, const char *argv[]) {
