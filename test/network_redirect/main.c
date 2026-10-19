@@ -553,6 +553,68 @@ static int test_program_rules() {
     return 0;
 }
 
+// A socket that replaces a TCP socket takes the options of all levels, and
+// returns the options of SOL_SOCKET that it was given, like a TCP socket. It
+// does not fail for the options that a Unix socket would refuse, e.g., those of
+// the IP levels and SO_REUSEPORT.
+static int test_socket_options() {
+    int listen_fd = listen_redirected();
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in addr = addr4("127.0.0.1", REDIRECTED_PORT);
+    if (listen_fd < 0 || fd < 0 || connect(fd, SA(addr), sizeof(addr)) < 0) {
+        THROW_ERROR("connecting to the redirected address failed");
+    }
+    int accepted_fd = accept(listen_fd, NULL, NULL);
+    if (accepted_fd < 0) {
+        THROW_ERROR("accept failed");
+    }
+
+    int sockets[] = { listen_fd, fd, accepted_fd };
+    for (size_t i = 0; i < ARRAY_SIZE(sockets); i++) {
+        int s = sockets[i];
+        int one = 1;
+        if (setsockopt(s, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one)) < 0 ||
+                setsockopt(s, IPPROTO_TCP, TCP_KEEPIDLE, &one, sizeof(one)) < 0 ||
+                setsockopt(s, IPPROTO_IP, IP_TTL, &one, sizeof(one)) < 0 ||
+                setsockopt(s, IPPROTO_IP, IP_TOS, &one, sizeof(one)) < 0) {
+            THROW_ERROR("an option of an IP level was refused by socket %zu", i);
+        }
+        // A TCP socket may reuse a port
+        if (setsockopt(s, SOL_SOCKET, SO_REUSEPORT, &one, sizeof(one)) < 0 ||
+                get_int_opt(s, SOL_SOCKET, SO_REUSEPORT) != 1) {
+            THROW_ERROR("SO_REUSEPORT of socket %zu failed", i);
+        }
+        if (setsockopt(s, SOL_SOCKET, SO_KEEPALIVE, &one, sizeof(one)) < 0 ||
+                get_int_opt(s, SOL_SOCKET, SO_KEEPALIVE) != 1) {
+            THROW_ERROR("SO_KEEPALIVE of socket %zu failed", i);
+        }
+        int size = 65536;
+        if (setsockopt(s, SOL_SOCKET, SO_SNDBUF, &size, sizeof(size)) < 0 ||
+                get_int_opt(s, SOL_SOCKET, SO_SNDBUF) != 2 * size) {
+            THROW_ERROR("SO_SNDBUF of socket %zu failed", i);
+        }
+        struct timeval tv = { 3, 20000 }, got = { 0, 0 };
+        socklen_t len = sizeof(got);
+        if (setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0 ||
+                getsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &got, &len) < 0 ||
+                len != sizeof(got) || got.tv_sec != 3 || got.tv_usec != 20000) {
+            THROW_ERROR("SO_RCVTIMEO of socket %zu failed", i);
+        }
+        // Options that the LibOS does not know are accepted, too, as the TCP
+        // socket that it replaces may have them
+        if (setsockopt(s, SOL_SOCKET, 9999, &one, sizeof(one)) < 0) {
+            THROW_ERROR("an unknown option was refused by socket %zu", i);
+        }
+        // The socket still looks like a TCP socket
+        if (get_int_opt(s, SOL_SOCKET, SO_DOMAIN) != AF_INET ||
+                get_int_opt(s, SOL_SOCKET, SO_PROTOCOL) != IPPROTO_TCP) {
+            THROW_ERROR("socket %zu does not look like a TCP socket", i);
+        }
+    }
+    close_files(3, accepted_fd, fd, listen_fd);
+    return 0;
+}
+
 // ============================================================================
 // Test suite main
 // ============================================================================
@@ -566,6 +628,7 @@ static test_case_t test_cases[] = {
     TEST_CASE(test_epoll_replace_races),
     TEST_CASE(test_other_sockets_and_addresses),
     TEST_CASE(test_program_rules),
+    TEST_CASE(test_socket_options),
 };
 
 int main(int argc, const char *argv[]) {
