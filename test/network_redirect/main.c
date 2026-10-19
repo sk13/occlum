@@ -26,7 +26,9 @@
 #include <sys/epoll.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <sys/time.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 #include "test.h"
 
@@ -97,6 +99,27 @@ static int get_int_opt(int fd, int level, int optname) {
         return -1;
     }
     return value;
+}
+
+static long now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000L + ts.tv_nsec / 1000000L;
+}
+
+static int set_timeout_ms(int fd, int optname, long ms) {
+    struct timeval tv = { ms / 1000, (ms % 1000) * 1000 };
+    return setsockopt(fd, SOL_SOCKET, optname, &tv, sizeof(tv));
+}
+
+// Returns the timeout that SO_RCVTIMEO or SO_SNDTIMEO of the socket has, in ms, or -1
+static long get_timeout_ms(int fd, int optname) {
+    struct timeval tv = { -1, -1 };
+    socklen_t len = sizeof(tv);
+    if (getsockopt(fd, SOL_SOCKET, optname, &tv, &len) < 0 || len != sizeof(tv)) {
+        return -1;
+    }
+    return tv.tv_sec * 1000L + tv.tv_usec / 1000;
 }
 
 // Sends a message from one socket and receives it with the other
@@ -702,6 +725,162 @@ static int test_connect_waits_for_a_full_backlog() {
     return 0;
 }
 
+// Waits until a thread has set its flag, for up to `ms`
+static int wait_for_flag(atomic_int *done, int ms) {
+    for (int i = 0; i < ms / 10 && !atomic_load(done); i++) {
+        usleep(10 * 1000);
+    }
+    return atomic_load(done);
+}
+
+// SO_SNDTIMEO, which the program set on the TCP socket before connect(), ends the wait of connect() to
+// a redirected address whose backlog is full: it fails with EAGAIN when the time is over (a TCP
+// connect() fails with EINPROGRESS), and the socket connects later, when there is room. The socket
+// that replaces it has the timeouts, and shows them
+static int test_connect_timeout_on_a_full_backlog() {
+    int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in addr = addr4("127.0.0.1", REDIRECTED_PORT);
+    if (listen_fd < 0 || bind(listen_fd, SA(addr), sizeof(addr)) < 0 ||
+            listen(listen_fd, 0) < 0) {
+        THROW_ERROR("listening on the redirected address failed");
+    }
+    // A backlog of 0 takes one connection
+    int first = socket(AF_INET, SOCK_STREAM, 0);
+    if (first < 0 || connect(first, SA(addr), sizeof(addr)) < 0) {
+        THROW_ERROR("the first connection failed");
+    }
+
+    struct connector connector = { .fd = socket(AF_INET, SOCK_STREAM, 0), .addr = addr };
+    if (connector.fd < 0 || set_timeout_ms(connector.fd, SO_SNDTIMEO, 300) < 0 ||
+            set_timeout_ms(connector.fd, SO_RCVTIMEO, 2000) < 0) {
+        THROW_ERROR("setting the timeouts failed");
+    }
+    pthread_t thread;
+    long start = now_ms();
+    if (pthread_create(&thread, NULL, connect_in_thread, &connector) != 0) {
+        THROW_ERROR("failed to start the thread that connects");
+    }
+    int done = wait_for_flag(&connector.done, 5000);
+    if (!done) {
+        // The timeout is lost: let the listener refuse the connection, which ends the wait
+        close(listen_fd);
+    }
+    pthread_join(thread, NULL);
+    long elapsed = now_ms() - start;
+    if (!done) {
+        THROW_ERROR("connect() with SO_SNDTIMEO of 300 ms still waits after %ld ms", elapsed);
+    }
+    if (connector.ret != -1 || (connector.err != EAGAIN && connector.err != EINPROGRESS)) {
+        errno = connector.err;
+        THROW_ERROR("connect() with a timeout on a full backlog returned %d", connector.ret);
+    }
+    if (elapsed < 250) {
+        THROW_ERROR("connect() with SO_SNDTIMEO of 300 ms returned after %ld ms", elapsed);
+    }
+
+    // There is room after an accept, and the socket connects, and has the timeouts
+    int accepted_fd = accept(listen_fd, NULL, NULL);
+    if (accepted_fd < 0) {
+        THROW_ERROR("accept failed");
+    }
+    if (connect(connector.fd, SA(addr), sizeof(addr)) < 0) {
+        THROW_ERROR("connect() fails after the accept made room");
+    }
+    if (get_timeout_ms(connector.fd, SO_SNDTIMEO) != 300 ||
+            get_timeout_ms(connector.fd, SO_RCVTIMEO) != 2000) {
+        THROW_ERROR("the socket has the timeouts %ld and %ld ms, instead of 300 and 2000",
+                    get_timeout_ms(connector.fd, SO_SNDTIMEO),
+                    get_timeout_ms(connector.fd, SO_RCVTIMEO));
+    }
+    int second_fd = accept(listen_fd, NULL, NULL);
+    if (second_fd < 0 || check_peername(connector.fd, "127.0.0.1", REDIRECTED_PORT) < 0 ||
+            exchange(connector.fd, second_fd, "late") < 0) {
+        THROW_ERROR("the connection after the timeout does not work");
+    }
+    close_files(5, second_fd, accepted_fd, connector.fd, first, listen_fd);
+    return 0;
+}
+
+struct acceptor {
+    int fd;
+    atomic_int done;
+    int ret;
+    int err;
+};
+
+static void *accept_in_thread(void *arg) {
+    struct acceptor *acceptor = arg;
+    errno = 0;
+    acceptor->ret = accept(acceptor->fd, NULL, NULL);
+    acceptor->err = errno;
+    atomic_store(&acceptor->done, 1);
+    return NULL;
+}
+
+// SO_RCVTIMEO, which the program set on the TCP socket before bind(), ends the wait of accept() on the
+// redirected listener: it fails with EAGAIN when the time is over. The listener has the timeout, and
+// the sockets that it accepts have it, as the sockets that a TCP socket accepts do
+static int test_accept_timeout() {
+    int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in addr = addr4("127.0.0.1", REDIRECTED_PORT);
+    if (listen_fd < 0 || set_timeout_ms(listen_fd, SO_RCVTIMEO, 300) < 0 ||
+            set_timeout_ms(listen_fd, SO_SNDTIMEO, 1500) < 0 ||
+            bind(listen_fd, SA(addr), sizeof(addr)) < 0 || listen(listen_fd, 4) < 0) {
+        THROW_ERROR("listening on the redirected address failed");
+    }
+
+    struct acceptor acceptor = { .fd = listen_fd };
+    pthread_t thread;
+    long start = now_ms();
+    if (pthread_create(&thread, NULL, accept_in_thread, &acceptor) != 0) {
+        THROW_ERROR("failed to start the thread that accepts");
+    }
+    int done = wait_for_flag(&acceptor.done, 5000);
+    int client_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (!done) {
+        // The timeout is lost: a connection ends the wait
+        connect(client_fd, SA(addr), sizeof(addr));
+    }
+    pthread_join(thread, NULL);
+    long elapsed = now_ms() - start;
+    if (!done) {
+        THROW_ERROR("accept() with SO_RCVTIMEO of 300 ms still waits after %ld ms", elapsed);
+    }
+    if (acceptor.ret != -1 || acceptor.err != EAGAIN) {
+        errno = acceptor.err;
+        THROW_ERROR("accept() with a timeout and no connection returned %d", acceptor.ret);
+    }
+    if (elapsed < 250) {
+        THROW_ERROR("accept() with SO_RCVTIMEO of 300 ms returned after %ld ms", elapsed);
+    }
+    if (get_timeout_ms(listen_fd, SO_RCVTIMEO) != 300 ||
+            get_timeout_ms(listen_fd, SO_SNDTIMEO) != 1500) {
+        THROW_ERROR("the listener has the timeouts %ld and %ld ms, instead of 300 and 1500",
+                    get_timeout_ms(listen_fd, SO_RCVTIMEO),
+                    get_timeout_ms(listen_fd, SO_SNDTIMEO));
+    }
+
+    // A connection that is queued is accepted at once, and the socket has the timeouts
+    int accepted_fd = -1;
+    if (connect(client_fd, SA(addr), sizeof(addr)) < 0 ||
+            (accepted_fd = accept(listen_fd, NULL, NULL)) < 0) {
+        THROW_ERROR("connecting to the listener and accepting failed");
+    }
+    if (get_timeout_ms(accepted_fd, SO_RCVTIMEO) != 300 ||
+            get_timeout_ms(accepted_fd, SO_SNDTIMEO) != 1500) {
+        THROW_ERROR("the accepted socket has the timeouts %ld and %ld ms, instead of 300 and 1500",
+                    get_timeout_ms(accepted_fd, SO_RCVTIMEO),
+                    get_timeout_ms(accepted_fd, SO_SNDTIMEO));
+    }
+    // The socket that connected did not set any
+    long client_timeout = get_timeout_ms(client_fd, SO_RCVTIMEO);
+    if (client_timeout != 0) {
+        THROW_ERROR("the client socket has a timeout of %ld ms", client_timeout);
+    }
+    close_files(3, accepted_fd, client_fd, listen_fd);
+    return 0;
+}
+
 // ============================================================================
 // Test suite main
 // ============================================================================
@@ -717,6 +896,8 @@ static test_case_t test_cases[] = {
     TEST_CASE(test_program_rules),
     TEST_CASE(test_socket_options),
     TEST_CASE(test_connect_waits_for_a_full_backlog),
+    TEST_CASE(test_connect_timeout_on_a_full_backlog),
+    TEST_CASE(test_accept_timeout),
 };
 
 int main(int argc, const char *argv[]) {
