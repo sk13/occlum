@@ -34,8 +34,11 @@ struct Queue {
     // connections that are queued, they stay, but there is no room for more of
     // them until accept() has taken enough.
     backlog: usize,
-    // The socket is closed, which refuses the connections
-    closed: bool,
+    // The socket is shut down for reading, which refuses the connections and
+    // makes accept() fail, or for writing, which does nothing. Closing the
+    // socket shuts it down for both.
+    shut_rd: bool,
+    shut_wr: bool,
 }
 
 impl Queue {
@@ -43,6 +46,24 @@ impl Queue {
     /// Linux, it is one more than the backlog allows.
     fn free_slots(&self) -> usize {
         (self.backlog + 1).saturating_sub(self.incoming.len() + self.reserved)
+    }
+
+    /// Returns the events of a listening socket. It is readable if accept() does
+    /// not block: a connection is queued, or the socket is shut down for
+    /// reading, as accept() fails at once. It has hung up if it is shut down for
+    /// both, like in Linux.
+    fn events(&self) -> IoEvents {
+        let mut events = IoEvents::empty();
+        if !self.incoming.is_empty() {
+            events |= IoEvents::IN;
+        }
+        if self.shut_rd {
+            events |= IoEvents::IN | IoEvents::RDHUP;
+            if self.shut_wr {
+                events |= IoEvents::HUP;
+            }
+        }
+        events
     }
 }
 
@@ -57,7 +78,7 @@ pub struct Reservation<'a> {
 
 impl Reservation<'_> {
     /// Queues the connection, which accept() takes from now on. Fails with
-    /// ECONNREFUSED if the listener has been closed since the room was
+    /// ECONNREFUSED if the listener has been shut down since the room was
     /// reserved.
     pub fn push(mut self, endpoint: Endpoint) -> Result<()> {
         self.used = true;
@@ -65,8 +86,8 @@ impl Reservation<'_> {
         {
             let mut queue = listener.queue.lock().unwrap();
             queue.reserved -= 1;
-            if queue.closed {
-                return_errno!(ECONNREFUSED, "the listener is closed");
+            if queue.shut_rd {
+                return_errno!(ECONNREFUSED, "the listener is shut down");
             }
             queue.incoming.push_back(endpoint);
         }
@@ -92,7 +113,8 @@ impl Listener {
                 incoming: VecDeque::new(),
                 reserved: 0,
                 backlog,
-                closed: false,
+                shut_rd: false,
+                shut_wr: false,
             }),
             acceptors: WaiterQueue::new(),
             connectors: WaiterQueue::new(),
@@ -116,8 +138,8 @@ impl Listener {
     /// make. If the queue is full, a nonblocking socket fails with EAGAIN, and
     /// a blocking one waits for an accept() to make room, as long as the
     /// timeout allows, which ends with EAGAIN, too. EINTR if a signal
-    /// interrupts the wait. ECONNREFUSED if the listener is closed, also while
-    /// the thread waits.
+    /// interrupts the wait. ECONNREFUSED if the listener is shut down, also
+    /// while the thread waits.
     pub fn reserve_incoming(
         &self,
         nonblocking: bool,
@@ -142,8 +164,8 @@ impl Listener {
 
     fn try_reserve(&self) -> Result<Option<Reservation<'_>>> {
         let mut queue = self.queue.lock().unwrap();
-        if queue.closed {
-            return_errno!(ECONNREFUSED, "the listener is closed");
+        if queue.shut_rd {
+            return_errno!(ECONNREFUSED, "the listener is shut down");
         }
         if queue.free_slots() == 0 {
             return Ok(None);
@@ -158,7 +180,9 @@ impl Listener {
     /// Returns the oldest connection. If there is none, a nonblocking socket
     /// fails with EAGAIN, and a blocking one waits for a connection, as long as
     /// the timeout allows, which ends with EAGAIN, too. EINTR if a signal
-    /// interrupts the wait.
+    /// interrupts the wait. If the listener is shut down, a blocking accept()
+    /// fails with EINVAL at once, which is how a thread that accepts is told to
+    /// stop, like in Linux.
     pub fn pop_incoming(&self, timeout: Option<Duration>) -> Result<Endpoint> {
         wait_for(&self.acceptors, timeout, || self.try_pop())
     }
@@ -169,6 +193,7 @@ impl Listener {
             let endpoint = match queue.incoming.pop_front() {
                 Some(endpoint) => endpoint,
                 None if self.nonblocking() => return_errno!(EAGAIN, "no connection is incoming"),
+                None if queue.shut_rd => return_errno!(EINVAL, "the listener is shut down"),
                 None => return Ok(None),
             };
             (endpoint, queue.free_slots())
@@ -192,16 +217,41 @@ impl Listener {
         }
     }
 
+    /// Shuts the listener down for reading and/or writing. Shutting it down
+    /// for reading stops the threads that wait in accept(), and refuses the
+    /// connections, also those that wait in connect(). The connections that
+    /// are queued stay for accept(). The threads that poll the socket are told.
+    pub fn shutdown(&self, how: Shutdown) {
+        let events = {
+            let mut queue = self.queue.lock().unwrap();
+            if how.should_shut_read() {
+                queue.shut_rd = true;
+            }
+            if how.should_shut_write() {
+                queue.shut_wr = true;
+            }
+            queue.events()
+        };
+        if how.should_shut_read() {
+            self.acceptors.dequeue_and_wake_all();
+            self.connectors.dequeue_and_wake_all();
+        }
+        if !events.is_empty() {
+            self.notifier.notifier().broadcast(&events);
+        }
+    }
+
     /// Closes the listener, which refuses the connections from now on, and
     /// drops those that are queued. A thread that is making a connection may
     /// still have the listener.
     pub fn close(&self) {
         let incoming = {
             let mut queue = self.queue.lock().unwrap();
-            queue.closed = true;
+            queue.shut_rd = true;
+            queue.shut_wr = true;
             std::mem::take(&mut queue.incoming)
         };
-        // The threads that wait for room fail now
+        self.acceptors.dequeue_and_wake_all();
         self.connectors.dequeue_and_wake_all();
         // Not with the lock held: the endpoints notify their peers when they are
         // dropped
@@ -209,11 +259,7 @@ impl Listener {
     }
 
     pub fn poll_new(&self) -> IoEvents {
-        let mut events = IoEvents::empty();
-        if !self.queue.lock().unwrap().incoming.is_empty() {
-            events |= IoEvents::IN;
-        }
-        events
+        self.queue.lock().unwrap().events()
     }
 }
 

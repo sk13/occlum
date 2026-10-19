@@ -260,7 +260,7 @@ impl Stream {
                 // Before the listener gets the peer, which may write right away
                 self.notifier.observe_endpoint(&end_self);
 
-                // ECONNREFUSED if the listener was closed after it was found
+                // ECONNREFUSED if the listener was shut down after it was found
                 room.push(end_incoming)?;
 
                 *inner = Status::Connected(end_self);
@@ -425,6 +425,16 @@ impl Stream {
                 // events on it with poll, select or epoll would not notice
                 // the end of the file (or HUP) they are supposed to get.
                 self.notifier.notifier().broadcast(&end.poll());
+                Ok(())
+            }
+            // The way to stop the threads that accept: they fail, and new
+            // connections are refused. The listener notifies the threads that
+            // wait for events.
+            Status::Listening(addr) => {
+                let listener = ADDRESS_SPACE
+                    .get_listener_ref(&addr)
+                    .ok_or_else(|| errno!(EINVAL, "the socket is not listening"))?;
+                listener.shutdown(how);
                 Ok(())
             }
             _ => return_errno!(ENOTCONN, "The socket is not connected."),
