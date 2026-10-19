@@ -472,12 +472,136 @@ static int test_queued_bytes_of_a_connection(void) {
     return 0;
 }
 
+static int connect_to(int fd, const unix_addr_t *a) {
+    return connect(fd, (const struct sockaddr *)&a->sa, a->len);
+}
+
+static const struct {
+    int how;
+    const char *name;
+} all_hows[] = { { SHUT_RD, "SHUT_RD" }, { SHUT_WR, "SHUT_WR" }, { SHUT_RDWR, "SHUT_RDWR" } };
+
+// shutdown() of a socket that is not connected succeeds, and its flags stay: a read fails with
+// EINVAL, a write with ENOTCONN, the socket has hung up and is readable (the end of the file) if
+// its reading was shut down
+static int test_shutdown_of_an_idle_or_bound_socket(void) {
+    for (int kind = SOCK_IDLE; kind <= SOCK_BOUND; kind++) {
+        for (size_t i = 0; i < ARRAY_SIZE(all_hows); i++) {
+            unix_addr_t a;
+            int fd = make_socket(kind, &a);
+            CHECK(fd >= 0, "failed to make a socket");
+            char buf[16];
+            int how = all_hows[i].how;
+            int reads = how != SHUT_WR;
+            unsigned events = POLLOUT | POLLHUP | (reads ? POLLIN | POLLRDHUP : 0);
+            char what[64];
+            snprintf(what, sizeof(what), "%s, %s", sock_names[kind], all_hows[i].name);
+            context = what;
+
+            CHECK_EVENTS(fd, POLLOUT | POLLHUP, "before the shutdown");
+            CHECK_CALL(shutdown(fd, how), 0, "shutdown");
+            CHECK_EVENTS(fd, events, "after the shutdown");
+            CHECK_CALL(read(fd, buf, sizeof(buf)), -EINVAL, "read");
+            CHECK_CALL(recv(fd, buf, sizeof(buf), MSG_DONTWAIT), -EINVAL, "recv");
+            CHECK_CALL(write(fd, "x", 1), -ENOTCONN, "write");
+            CHECK_CALL(send(fd, "x", 1, MSG_NOSIGNAL), -ENOTCONN, "send");
+            // It is not an error to shut down again, or in another way
+            CHECK_CALL(shutdown(fd, how), 0, "shutdown again");
+            CHECK_EVENTS(fd, events, "after the shutdown again");
+            int other = (how + 1) % 3;
+            CHECK_CALL(shutdown(fd, other), 0, "shutdown in another way");
+            int shut_rd = reads || other != SHUT_WR;
+            CHECK_EVENTS(fd, POLLOUT | POLLHUP | (shut_rd ? POLLIN | POLLRDHUP : 0),
+                         "after both");
+            close(fd);
+        }
+    }
+    return 0;
+}
+
+// A socket that was shut down stays so when it is connected: the end of its file is read, or its
+// writes fail, and the peer cannot write to a socket whose reading was shut down
+static int test_shutdown_of_an_idle_socket_stays_after_connect(void) {
+    for (int bound = 0; bound <= 1; bound++) {
+        for (size_t i = 0; i < ARRAY_SIZE(all_hows); i++) {
+            unix_addr_t a;
+            int l = make_socket(SOCK_LISTENING, &a);
+            CHECK(l >= 0, "failed to listen");
+            int c = socket(AF_UNIX, SOCK_STREAM, 0);
+            unix_addr_t own = new_addr();
+            CHECK(c >= 0 && (!bound || bind_to(c, &own) == 0), "failed to make a socket");
+            int how = all_hows[i].how;
+            char what[64];
+            snprintf(what, sizeof(what), "%s, %s", bound ? "bound" : "idle", all_hows[i].name);
+            context = what;
+            char buf[16];
+
+            CHECK_CALL(shutdown(c, how), 0, "shutdown");
+            CHECK_CALL(connect_to(c, &a), 0, "connect");
+            int s = accept(l, NULL, NULL);
+            CHECK(s >= 0, "failed to accept");
+            if (how != SHUT_WR) {
+                // The end of the file, and the peer is not read by its server
+                CHECK_CALL(recv(c, buf, sizeof(buf), MSG_DONTWAIT), 0, "recv");
+                CHECK_EVENTS(c, POLLIN | POLLOUT | POLLRDHUP | (how == SHUT_RDWR ? POLLHUP : 0),
+                             "events of the client");
+                CHECK_CALL(send(s, "x", 1, MSG_NOSIGNAL), -EPIPE, "send by the server");
+            } else {
+                CHECK_EVENTS(c, POLLOUT, "events of the client");
+            }
+            if (how != SHUT_RD) {
+                CHECK_CALL(send(c, "x", 1, MSG_NOSIGNAL), -EPIPE, "send");
+            } else {
+                CHECK_CALL(send(c, "x", 1, MSG_NOSIGNAL), 1, "send");
+            }
+            close(c);
+            close(s);
+            close(l);
+        }
+    }
+    return 0;
+}
+
+// A socket that was shut down listens shut down: if its reading was shut down, connections are
+// refused, and accept() fails at once
+static int test_shutdown_of_a_bound_socket_stays_after_listen(void) {
+    for (size_t i = 0; i < ARRAY_SIZE(all_hows); i++) {
+        unix_addr_t a;
+        int l = make_socket(SOCK_BOUND, &a);
+        CHECK(l >= 0, "failed to make a socket");
+        int how = all_hows[i].how;
+        context = all_hows[i].name;
+        CHECK_CALL(shutdown(l, how), 0, "shutdown");
+        CHECK_CALL(listen(l, 4), 0, "listen");
+        // accept() does not wait, so that it fails if it is not told that the listener is shut down
+        fcntl(l, F_SETFL, fcntl(l, F_GETFL) | O_NONBLOCK);
+        int c = socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0);
+        CHECK(c >= 0, "failed to make a socket");
+        if (how == SHUT_WR) {
+            CHECK_EVENTS(l, 0, "events of the listener");
+            CHECK_CALL(connect_to(c, &a), 0, "connect");
+            CHECK_EVENTS(l, POLLIN, "events of the listener with a connection");
+        } else {
+            unsigned events = POLLIN | POLLRDHUP | (how == SHUT_RDWR ? POLLHUP : 0);
+            CHECK_EVENTS(l, events, "events of the listener");
+            CHECK_CALL(connect_to(c, &a), -ECONNREFUSED, "connect");
+            CHECK_CALL(accept(l, NULL, NULL), -EAGAIN, "accept");
+        }
+        close(c);
+        close(l);
+    }
+    return 0;
+}
+
 static test_case_t test_cases[] = {
     TEST_CASE(test_shutdown_changes_the_events_at_once),
     TEST_CASE(test_full_buffer_is_not_writable_after_shutdown),
     TEST_CASE(test_full_buffer_of_the_peer_of_a_shutdown),
     TEST_CASE(test_calls_on_an_idle_or_listening_socket),
     TEST_CASE(test_queued_bytes_of_a_connection),
+    TEST_CASE(test_shutdown_of_an_idle_or_bound_socket),
+    TEST_CASE(test_shutdown_of_an_idle_socket_stays_after_connect),
+    TEST_CASE(test_shutdown_of_a_bound_socket_stays_after_listen),
 };
 
 int main(int argc, const char *argv[]) {

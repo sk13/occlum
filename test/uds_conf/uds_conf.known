@@ -41,28 +41,6 @@ connect.listener_closed_pending.ev
 connect.listener_closed_pending.read
 
 # group c09_shutdown_matrix
-shut.idle.rd.rc
-shut.idle.rd.a_ev
-shut.idle.rd.again
-shut.idle.rd.other_how
-shut.idle.wr.rc
-shut.idle.wr.again
-shut.idle.wr.other_how
-shut.idle.rdwr.rc
-shut.idle.rdwr.a_ev
-shut.idle.rdwr.again
-shut.idle.rdwr.other_how
-shut.bound.rd.rc
-shut.bound.rd.a_ev
-shut.bound.rd.again
-shut.bound.rd.other_how
-shut.bound.wr.rc
-shut.bound.wr.again
-shut.bound.wr.other_how
-shut.bound.rdwr.rc
-shut.bound.rdwr.a_ev
-shut.bound.rdwr.again
-shut.bound.rdwr.other_how
 shut.b_full.wr.b_write
 
 # group c10_close_matrix
