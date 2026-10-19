@@ -20,10 +20,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/socket.h>
+#include <sys/uio.h>
 #include <sys/un.h>
 #include <time.h>
 #include <unistd.h>
+#include <linux/sockios.h>
 
 #include "test.h"
 
@@ -338,10 +341,143 @@ static int test_full_buffer_of_the_peer_of_a_shutdown(void) {
     return 0;
 }
 
+// ---------------------------------------------------------------------------------------------
+// Sockets that are not connected
+// ---------------------------------------------------------------------------------------------
+
+// The name of an error that a call returned, or its value
+static const char *result_str(long result) {
+    static __thread char bufs[4][32];
+    static __thread int next;
+    char *buf = bufs[next++ % 4];
+    static const struct {
+        int err;
+        const char *name;
+    } names[] = {
+        { EAGAIN, "EAGAIN" }, { ECONNREFUSED, "ECONNREFUSED" }, { ECONNRESET, "ECONNRESET" },
+        { EINVAL, "EINVAL" }, { ENOTCONN, "ENOTCONN" }, { EPIPE, "EPIPE" },
+    };
+    if (result < 0) {
+        for (size_t i = 0; i < ARRAY_SIZE(names); i++) {
+            if (names[i].err == -result) {
+                snprintf(buf, sizeof(bufs[0]), "-%s", names[i].name);
+                return buf;
+            }
+        }
+    }
+    snprintf(buf, sizeof(bufs[0]), "%ld", result);
+    return buf;
+}
+
+// Checks what a call returns: a count, or the negative errno
+#define CHECK_CALL(call, expected, what) do { \
+        errno = 0; \
+        long __ret = (call); \
+        long __got = __ret < 0 ? -(long)errno : __ret; \
+        long __want = (expected); \
+        CHECK(__got == __want, "%s: %s returned %s, instead of %s", what, #call, \
+              result_str(__got), result_str(__want)); \
+    } while (0)
+
+static int bind_to(int fd, const unix_addr_t *a) {
+    return bind(fd, (const struct sockaddr *)&a->sa, a->len);
+}
+
+// A socket that is not connected: just created, or bound, or listening
+enum { SOCK_IDLE, SOCK_BOUND, SOCK_LISTENING, NUM_SOCK_KINDS };
+static const char *sock_names[] = { "idle", "bound", "listening" };
+
+static int make_socket(int kind, unix_addr_t *a) {
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    *a = new_addr();
+    if (fd >= 0 && kind != SOCK_IDLE && bind_to(fd, a) < 0) {
+        close(fd);
+        return -1;
+    }
+    if (fd >= 0 && kind == SOCK_LISTENING && listen(fd, 4) < 0) {
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+// The calls on a socket that is not connected, or that listens, which cannot move bytes: reading
+// fails with EINVAL, but no bytes is no error, and writing fails with ENOTCONN. FIONREAD says that
+// an idle socket has no bytes, and fails for a listening one. SIOCOUTQ and SIOCATMARK work.
+static int test_calls_on_an_idle_or_listening_socket(void) {
+    for (int kind = SOCK_IDLE; kind < NUM_SOCK_KINDS; kind++) {
+        unix_addr_t a;
+        int fd = make_socket(kind, &a);
+        CHECK(fd >= 0, "failed to make a socket");
+        context = sock_names[kind];
+        char buf[16];
+        struct iovec iov = { buf, sizeof(buf) };
+        struct iovec empty = { buf, 0 };
+        struct msghdr msg = { .msg_iov = &iov, .msg_iovlen = 1 };
+
+        CHECK_CALL(read(fd, buf, sizeof(buf)), -EINVAL, "read");
+        CHECK_CALL(readv(fd, &iov, 1), -EINVAL, "readv");
+        CHECK_CALL(recv(fd, buf, sizeof(buf), 0), -EINVAL, "recv");
+        CHECK_CALL(recv(fd, buf, sizeof(buf), MSG_PEEK | MSG_DONTWAIT), -EINVAL, "recv peek");
+        CHECK_CALL(recvfrom(fd, buf, sizeof(buf), 0, NULL, NULL), -EINVAL, "recvfrom");
+        CHECK_CALL(recvmsg(fd, &msg, 0), -EINVAL, "recvmsg");
+        // Reading no bytes returns at once
+        CHECK_CALL(read(fd, buf, 0), 0, "read of no bytes");
+        CHECK_CALL(readv(fd, &empty, 1), 0, "readv of no bytes");
+        CHECK_CALL(write(fd, "x", 1), -ENOTCONN, "write");
+        CHECK_CALL(writev(fd, &iov, 1), -ENOTCONN, "writev");
+        CHECK_CALL(send(fd, "x", 1, MSG_NOSIGNAL), -ENOTCONN, "send");
+        CHECK_CALL(sendmsg(fd, &msg, MSG_NOSIGNAL), -ENOTCONN, "sendmsg");
+
+        int n = -1;
+        CHECK_CALL(ioctl(fd, FIONREAD, &n), kind == SOCK_LISTENING ? -EINVAL : 0, "FIONREAD");
+        CHECK(kind == SOCK_LISTENING || n == 0, "FIONREAD returns %d bytes", n);
+        n = -1;
+        CHECK_CALL(ioctl(fd, SIOCOUTQ, &n), 0, "SIOCOUTQ");
+        CHECK(n == 0, "SIOCOUTQ returns %d bytes", n);
+        n = -1;
+        CHECK_CALL(ioctl(fd, SIOCATMARK, &n), 0, "SIOCATMARK");
+        CHECK(n == 0, "SIOCATMARK returns %d", n);
+        close(fd);
+    }
+    return 0;
+}
+
+// FIONREAD and SIOCOUTQ of a connected socket: the bytes that are not read by the socket, and
+// those of the socket that its peer has not read
+static int test_queued_bytes_of_a_connection(void) {
+    for (int kind = 0; kind < NUM_PAIR_KINDS; kind++) {
+        int a, b;
+        context = pair_names[kind];
+        CHECK(make_pair(kind, &a, &b) == 0, "failed to make a connection");
+        int n = -1;
+        CHECK_CALL(ioctl(a, SIOCOUTQ, &n), 0, "SIOCOUTQ");
+        CHECK(n == 0, "SIOCOUTQ returns %d bytes of an empty socket", n);
+        CHECK_CALL(write(a, "hello", 5), 5, "write");
+        CHECK_CALL(ioctl(b, FIONREAD, &n), 0, "FIONREAD");
+        CHECK(n == 5, "FIONREAD returns %d bytes, instead of 5", n);
+        CHECK_CALL(ioctl(a, SIOCOUTQ, &n), 0, "SIOCOUTQ");
+        CHECK(n > 0, "SIOCOUTQ returns %d bytes while the peer has not read 5", n);
+        CHECK_CALL(ioctl(a, FIONREAD, &n), 0, "FIONREAD of the writer");
+        CHECK(n == 0, "FIONREAD of the writer returns %d bytes", n);
+        char buf[16];
+        CHECK_CALL(read(b, buf, sizeof(buf)), 5, "read");
+        CHECK_CALL(ioctl(a, SIOCOUTQ, &n), 0, "SIOCOUTQ");
+        CHECK(n == 0, "SIOCOUTQ returns %d bytes after the peer has read them", n);
+        CHECK_CALL(ioctl(a, SIOCATMARK, &n), 0, "SIOCATMARK");
+        CHECK(n == 0, "SIOCATMARK returns %d", n);
+        close(a);
+        close(b);
+    }
+    return 0;
+}
+
 static test_case_t test_cases[] = {
     TEST_CASE(test_shutdown_changes_the_events_at_once),
     TEST_CASE(test_full_buffer_is_not_writable_after_shutdown),
     TEST_CASE(test_full_buffer_of_the_peer_of_a_shutdown),
+    TEST_CASE(test_calls_on_an_idle_or_listening_socket),
+    TEST_CASE(test_queued_bytes_of_a_connection),
 };
 
 int main(int argc, const char *argv[]) {

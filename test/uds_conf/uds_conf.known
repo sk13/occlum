@@ -40,48 +40,29 @@ files.chmod_socket_file.stat
 connect.listener_closed_pending.ev
 connect.listener_closed_pending.read
 
-# group c07_io
-io.siocoutq.sender
-io.fionread.idle
-io.fionread.listening
-io.idle.read
-io.idle.recv
-
-# group c08_msgflags
-flags.sockatmark
-
 # group c09_shutdown_matrix
 shut.idle.rd.rc
 shut.idle.rd.a_ev
-shut.idle.rd.a_read
 shut.idle.rd.again
 shut.idle.rd.other_how
 shut.idle.wr.rc
-shut.idle.wr.a_read
 shut.idle.wr.again
 shut.idle.wr.other_how
 shut.idle.rdwr.rc
 shut.idle.rdwr.a_ev
-shut.idle.rdwr.a_read
 shut.idle.rdwr.again
 shut.idle.rdwr.other_how
 shut.bound.rd.rc
 shut.bound.rd.a_ev
-shut.bound.rd.a_read
 shut.bound.rd.again
 shut.bound.rd.other_how
 shut.bound.wr.rc
-shut.bound.wr.a_read
 shut.bound.wr.again
 shut.bound.wr.other_how
 shut.bound.rdwr.rc
 shut.bound.rdwr.a_ev
-shut.bound.rdwr.a_read
 shut.bound.rdwr.again
 shut.bound.rdwr.other_how
-shut.listening.rd.a_read
-shut.listening.wr.a_read
-shut.listening.rdwr.a_read
 shut.b_full.wr.b_write
 
 # group c10_close_matrix
