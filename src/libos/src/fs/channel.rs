@@ -397,17 +397,27 @@ impl<I> Producer<I> {
     }
 
     pub fn shutdown(&self) {
-        {
-            // It is important to hold this lock while updating the state
-            let mut inner = self.inner.lock().unwrap();
-            if self.state.is_producer_shutdown() {
-                return;
-            }
-            self.state.set_producer_shutdown();
-            // Nothing is pushed any more, so the queue need not keep chunks for the producer
-            inner.close();
+        if self.begin_shutdown() {
+            self.finish_shutdown();
         }
+    }
 
+    /// Shuts the producer down, without telling anybody: the pushes that are going on are over
+    /// when it returns, and the ones that follow fail. Returns false if it was shut down already.
+    pub fn begin_shutdown(&self) -> bool {
+        // It is important to hold this lock while updating the state
+        let mut inner = self.inner.lock().unwrap();
+        if self.state.is_producer_shutdown() {
+            return false;
+        }
+        self.state.set_producer_shutdown();
+        // Nothing is pushed any more, so the queue need not keep chunks for the producer
+        inner.close();
+        true
+    }
+
+    /// Tells the others about the shutdown that `begin_shutdown()` has made
+    pub fn finish_shutdown(&self) {
         // The shutdown of the producer triggers hangup events on the consumer
         self.trigger_peer_events(&IoEvents::HUP);
         // Wake all threads that are blocked on pushing to this producer
@@ -608,15 +618,24 @@ impl<I> Consumer<I> {
     }
 
     pub fn shutdown(&self) {
-        {
-            // It is important to hold this lock while updating the state
-            let inner = self.inner.lock().unwrap();
-            if self.state.is_consumer_shutdown() {
-                return;
-            }
-            self.state.set_consumer_shutdown();
+        if self.begin_shutdown() {
+            self.finish_shutdown();
         }
+    }
 
+    /// Shuts the consumer down, without telling anybody. Returns false if it was shut down already.
+    pub fn begin_shutdown(&self) -> bool {
+        // It is important to hold this lock while updating the state
+        let inner = self.inner.lock().unwrap();
+        if self.state.is_consumer_shutdown() {
+            return false;
+        }
+        self.state.set_consumer_shutdown();
+        true
+    }
+
+    /// Tells the others about the shutdown that `begin_shutdown()` has made
+    pub fn finish_shutdown(&self) {
         // The consumer being shutdown triggers error on the producer
         self.trigger_peer_events(&IoEvents::ERR);
         // Wake all threads that are blocked on popping from this consumer

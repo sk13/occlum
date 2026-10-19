@@ -3,6 +3,7 @@ use events::{Event, EventFilter, Notifier, Observer};
 use fs::channel::{Channel, Consumer, IoOpts, Producer};
 use fs::{IoEvents, IoNotifier};
 use std::any::Any;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Arc, Weak};
 
 pub type Endpoint = Arc<Inner>;
@@ -16,6 +17,7 @@ pub fn end_pair(nonblocking: bool) -> Result<(Endpoint, Endpoint)> {
     // does, when the first end is gone
     let name_a = Arc::new(RwLock::new(None));
     let name_b = Arc::new(RwLock::new(None));
+    let flags = Arc::new(AtomicU16::new(0));
 
     let mut end_a = Arc::new(Inner {
         addr: name_a.clone(),
@@ -23,6 +25,8 @@ pub fn end_pair(nonblocking: bool) -> Result<(Endpoint, Endpoint)> {
         reader: con_a,
         writer: pro_b,
         peer: Weak::default(),
+        flags: flags.clone(),
+        flags_shift: 0,
         ancillary: RwLock::new(None),
         peer_ancillary: RwLock::new(None),
     });
@@ -32,6 +36,8 @@ pub fn end_pair(nonblocking: bool) -> Result<(Endpoint, Endpoint)> {
         reader: con_b,
         writer: pro_a,
         peer: Arc::downgrade(&end_a),
+        flags,
+        flags_shift: 8,
         ancillary: RwLock::new(None),
         peer_ancillary: RwLock::new(None),
     });
@@ -46,6 +52,15 @@ pub fn end_pair(nonblocking: bool) -> Result<(Endpoint, Endpoint)> {
     Ok((end_a, end_b))
 }
 
+// The flags of an end of a connection, which are those of the field sk_shutdown of a socket of
+// Linux:
+/// The end reads nothing more: it has shut down reading, or the peer has shut down writing, or
+/// it is closed.
+const RCV_SHUTDOWN: u16 = 1;
+/// The end writes nothing more: it has shut down writing, or the peer has shut down reading, or
+/// it is closed.
+const SND_SHUTDOWN: u16 = 2;
+
 /// One end of the connected unix socket
 pub struct Inner {
     addr: Arc<RwLock<Option<UnixAddr>>>,
@@ -53,6 +68,13 @@ pub struct Inner {
     reader: Consumer<u8>,
     writer: Producer<u8>,
     peer: Weak<Self>,
+    // The flags of the shutdown of both ends, which a poll tells (see `RCV_SHUTDOWN`): each end
+    // has a byte of the word, at `flags_shift`. A shutdown changes the flags of both ends in one
+    // step, so that a poll sees the connection as it was before or after it, never half of it.
+    // The channels have flags of their own for the calls that wait. The shutdown of an end changes
+    // them before these, and the drop of an end after.
+    flags: Arc<AtomicU16>,
+    flags_shift: u16,
     ancillary: RwLock<Option<Ancillary>>,
     // The ancillary data of the peer, which the peer puts here when it sets
     // its own. Unlike a lookup through `peer`, it stays when the peer is closed.
@@ -123,31 +145,62 @@ impl Inner {
     /// Shut down the reading and/or the writing of the endpoint. As in Linux,
     /// this is allowed after the peer has closed, too.
     pub fn shutdown(&self, how: Shutdown) -> Result<()> {
+        // Like Linux, the shutdown of an end is that of the other end, too: after this one has
+        // shut down reading, the peer cannot write, and after it has shut down writing, the peer
+        // reads the end of the file
+        let mut flags = 0;
         if how.should_shut_read() {
-            self.reader.shutdown()
+            flags |= self.own_flags(RCV_SHUTDOWN) | self.peer_flags(SND_SHUTDOWN);
         }
-
         if how.should_shut_write() {
-            self.writer.shutdown()
+            flags |= self.own_flags(SND_SHUTDOWN) | self.peer_flags(RCV_SHUTDOWN);
+        }
+        // The channels are shut down first, which ends the writes that are going on and fails
+        // the ones that follow, so that the bytes that a write reports are queued before the flags
+        // of the poll tell the end of the file. The flags come before the channels notify the
+        // observers, which ask for the events when they are woken up.
+        let read = how.should_shut_read() && self.reader.begin_shutdown();
+        let write = how.should_shut_write() && self.writer.begin_shutdown();
+        self.flags.fetch_or(flags, Ordering::SeqCst);
+        if read {
+            self.reader.finish_shutdown()
+        }
+        if write {
+            self.writer.finish_shutdown()
         }
 
         Ok(())
     }
 
+    /// Returns the events of the endpoint. The flags of the shutdown are read in one step. The
+    /// endpoint is writable if there is room, whether it can write or not, like in Linux.
     pub fn poll(&self) -> IoEvents {
+        let flags = self.flags.load(Ordering::SeqCst) >> self.flags_shift;
         let mut events = IoEvents::empty();
-        let reader_events = self.reader.poll();
-        let writer_events = self.writer.poll();
 
-        if reader_events.contains(IoEvents::HUP) || self.reader.is_self_shutdown() {
-            events |= IoEvents::RDHUP | IoEvents::IN;
-            if writer_events.contains(IoEvents::ERR) || self.writer.is_self_shutdown() {
-                events |= IoEvents::HUP | IoEvents::OUT;
+        if flags & RCV_SHUTDOWN != 0 {
+            events |= IoEvents::IN | IoEvents::RDHUP;
+            if flags & SND_SHUTDOWN != 0 {
+                events |= IoEvents::HUP;
             }
         }
-
-        events |= (reader_events & IoEvents::IN) | (writer_events & IoEvents::OUT);
+        if self.reader.items_to_consume() > 0 {
+            events |= IoEvents::IN;
+        }
+        if self.writer.room() > 0 {
+            events |= IoEvents::OUT;
+        }
         events
+    }
+
+    /// Returns the bits of a flag in the byte of this end of the shared word
+    fn own_flags(&self, flags: u16) -> u16 {
+        flags << self.flags_shift
+    }
+
+    /// Returns the bits of a flag in the byte of the peer of this end
+    fn peer_flags(&self, flags: u16) -> u16 {
+        flags << (8 - self.flags_shift)
     }
 
     pub fn ancillary(&self) -> Option<Ancillary> {
@@ -176,6 +229,17 @@ impl Inner {
             Arc::downgrade(observer) as Weak<dyn Observer<_>>,
             None,
             None,
+        );
+    }
+}
+
+impl Drop for Inner {
+    fn drop(&mut self) {
+        // The peer reads the end of the file, and cannot write any more. Its flags change before
+        // the channels, which notify it of the close as they are dropped.
+        self.flags.fetch_or(
+            self.peer_flags(RCV_SHUTDOWN | SND_SHUTDOWN),
+            Ordering::SeqCst,
         );
     }
 }
