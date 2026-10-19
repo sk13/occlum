@@ -190,6 +190,14 @@ static int test_bind_and_connect() {
         THROW_ERROR("connect without a listener should fail with ECONNREFUSED");
     }
     close(fd);
+
+    // TCP has no files: nothing listens either if the file of the Unix socket is gone
+    unlink(REDIRECTED_PATH);
+    fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (connect(fd, SA(addr), sizeof(addr)) == 0 || errno != ECONNREFUSED) {
+        THROW_ERROR("connect without a socket file should fail with ECONNREFUSED");
+    }
+    close(fd);
     return 0;
 }
 
