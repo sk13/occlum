@@ -22,6 +22,13 @@ pub fn do_kill(filter: ProcessFilter, signum: SigNum) -> Result<()> {
     Ok(())
 }
 
+/// Raise SIGPIPE in the current thread, as a write does to a pipe or a socket that nobody reads.
+pub fn raise_sigpipe() {
+    if let Err(e) = do_tgkill(None, current!().tid(), SIGPIPE) {
+        warn!("failed to raise SIGPIPE: {:?}", e);
+    }
+}
+
 /// Send a signal from the outside the enclave.
 ///
 /// Such a call must be performed very carefully. The obvious reason

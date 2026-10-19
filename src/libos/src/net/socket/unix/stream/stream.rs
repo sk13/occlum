@@ -412,7 +412,14 @@ impl Stream {
             all: true,
             ..Default::default()
         };
-        endpoint.write(bufs, &opts)
+        // Like Linux, SIGPIPE is for the call that finds that the socket cannot send, not for the
+        // call that has waited for room, and then has found it
+        let sigpipe = !flags.contains(SendFlags::MSG_NOSIGNAL) && endpoint.is_write_shutdown();
+        let result = endpoint.write(bufs, &opts);
+        if sigpipe && result.has_errno(EPIPE) {
+            crate::signal::raise_sigpipe();
+        }
+        result
     }
 
     /// Returns the endpoint of a connected socket

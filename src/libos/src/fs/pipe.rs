@@ -126,6 +126,18 @@ impl PipeReader {
     }
 }
 
+impl PipeWriter {
+    /// Writes the bytes. A write of no bytes does nothing, like in Linux, also if no process
+    /// reads the pipe.
+    fn write_bufs(&self, bufs: &[&[u8]]) -> Result<usize> {
+        if bufs.iter().all(|buf| buf.is_empty()) {
+            return Ok(0);
+        }
+
+        self.producer.push_slices(bufs)
+    }
+}
+
 pub struct PipeWriter {
     producer: Producer<u8>,
     status_flags: Atomic<StatusFlags>,
@@ -133,11 +145,11 @@ pub struct PipeWriter {
 
 impl File for PipeWriter {
     fn write(&self, buf: &[u8]) -> Result<usize> {
-        self.producer.push_slice(buf)
+        self.write_bufs(&[buf])
     }
 
     fn writev(&self, bufs: &[&[u8]]) -> Result<usize> {
-        self.producer.push_slices(bufs)
+        self.write_bufs(bufs)
     }
 
     fn seek(&self, pos: SeekFrom) -> Result<off_t> {

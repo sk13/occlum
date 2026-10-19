@@ -98,6 +98,12 @@ impl Inner {
         self.writer.push_slices_with(bufs, opts)
     }
 
+    /// Whether the endpoint cannot write: it has been shut down for writing, or its peer for
+    /// reading (the peer is closed)
+    pub fn is_write_shutdown(&self) -> bool {
+        self.writer.is_self_shutdown() || self.writer.is_peer_shutdown()
+    }
+
     pub fn bytes_to_read(&self) -> usize {
         self.reader.items_to_consume()
     }

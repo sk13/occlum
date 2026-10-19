@@ -392,13 +392,10 @@ impl<I: Copy> Producer<I> {
 
     /// Pushes the items of the slices, and returns their number. A call that has to wait for room
     /// stops at the first push if the options do not say `all`. It fails with EPIPE if an end of
-    /// the channel is shut down, unless it has pushed items already, in which case it returns
-    /// their number.
+    /// the channel is shut down, also if there are no items, unless it has pushed items already,
+    /// in which case it returns their number.
     pub fn push_slices_with(&self, item_slices: &[&[I]], opts: &IoOpts) -> Result<usize> {
         let len: usize = item_slices.iter().map(|slice| slice.len()).sum();
-        if len == 0 {
-            return Ok(0);
-        }
         // The items that were pushed, which the call returns if it stops early
         let mut done = 0;
 
@@ -407,6 +404,10 @@ impl<I: Copy> Producer<I> {
             if self.is_self_shutdown() || self.is_peer_shutdown() {
                 return_errno!(EPIPE, "one or both endpoints have been shutdown");
             }
+            if len == 0 {
+                return Ok(Attempt::Done(0));
+            }
+
             let nonblocking = self.is_nonblocking() || opts.nonblocking;
             let mut pushed = 0;
             let mut no_memory = false;
