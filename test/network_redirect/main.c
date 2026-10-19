@@ -19,6 +19,7 @@
 #include <poll.h>
 #include <pthread.h>
 #include <spawn.h>
+#include <stdatomic.h>
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
@@ -615,6 +616,92 @@ static int test_socket_options() {
     return 0;
 }
 
+struct connector {
+    int fd;
+    struct sockaddr_in addr;
+    atomic_int done;
+    int ret;
+    int err;
+};
+
+static void *connect_in_thread(void *arg) {
+    struct connector *connector = arg;
+    errno = 0;
+    connector->ret = connect(connector->fd, SA(connector->addr), sizeof(connector->addr));
+    connector->err = errno;
+    atomic_store(&connector->done, 1);
+    return NULL;
+}
+
+// connect() to a redirected address whose backlog is full waits for an accept, as a TCP connect()
+// does. The socket is replaced when the connection is made, not before, so that the thread that
+// waits does not keep the other threads from using their file descriptors. A nonblocking socket
+// fails with EAGAIN, as a Unix socket does
+static int test_connect_waits_for_a_full_backlog() {
+    int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in addr = addr4("127.0.0.1", REDIRECTED_PORT);
+    if (listen_fd < 0 || bind(listen_fd, SA(addr), sizeof(addr)) < 0 ||
+            listen(listen_fd, 0) < 0) {
+        THROW_ERROR("listening on the redirected address failed");
+    }
+    // A backlog of 0 takes one connection
+    int first = socket(AF_INET, SOCK_STREAM, 0);
+    if (connect(first, SA(addr), sizeof(addr)) < 0) {
+        THROW_ERROR("the first connection failed");
+    }
+
+    struct connector connector = { .fd = socket(AF_INET, SOCK_STREAM, 0), .addr = addr };
+    pthread_t thread;
+    if (connector.fd < 0 ||
+            pthread_create(&thread, NULL, connect_in_thread, &connector) != 0) {
+        THROW_ERROR("failed to start the thread that connects");
+    }
+    usleep(200 * 1000);
+    if (atomic_load(&connector.done)) {
+        THROW_ERROR("connect() to a full backlog did not wait: %d, errno %d", connector.ret,
+                    connector.err);
+    }
+
+    // The other threads use their file descriptors meanwhile
+    int p[2];
+    int dup_fd = dup(listen_fd);
+    if (pipe(p) < 0 || dup_fd < 0) {
+        THROW_ERROR("the file table is not usable while connect() waits");
+    }
+    close(p[0]);
+    close(p[1]);
+    close(dup_fd);
+    int nonblocking = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
+    if (connect(nonblocking, SA(addr), sizeof(addr)) == 0 || errno != EAGAIN) {
+        THROW_ERROR("nonblocking connect() to a full backlog should fail with EAGAIN");
+    }
+    close(nonblocking);
+
+    int accepted_fd = accept(listen_fd, NULL, NULL);
+    if (accepted_fd < 0) {
+        THROW_ERROR("accept failed");
+    }
+    for (int i = 0; i < 100 && !atomic_load(&connector.done); i++) {
+        usleep(50 * 1000);
+    }
+    if (!atomic_load(&connector.done)) {
+        THROW_ERROR("connect() to a full backlog did not go on after an accept");
+    }
+    pthread_join(thread, NULL);
+    if (connector.ret != 0) {
+        errno = connector.err;
+        THROW_ERROR("connect() to a full backlog failed");
+    }
+    // The socket was replaced: it has the addresses of a connected TCP socket, and works
+    int second_fd = accept(listen_fd, NULL, NULL);
+    if (second_fd < 0 || check_peername(connector.fd, "127.0.0.1", REDIRECTED_PORT) < 0 ||
+            exchange(connector.fd, second_fd, "late") < 0) {
+        THROW_ERROR("the connection that waited does not work");
+    }
+    close_files(5, second_fd, accepted_fd, connector.fd, first, listen_fd);
+    return 0;
+}
+
 // ============================================================================
 // Test suite main
 // ============================================================================
@@ -629,6 +716,7 @@ static test_case_t test_cases[] = {
     TEST_CASE(test_other_sockets_and_addresses),
     TEST_CASE(test_program_rules),
     TEST_CASE(test_socket_options),
+    TEST_CASE(test_connect_waits_for_a_full_backlog),
 };
 
 int main(int argc, const char *argv[]) {

@@ -7,9 +7,8 @@ include ../test_common.mk
 # to differ (uds_conf.known) are tolerated. A new difference fails the test. When a LibOS fix lands,
 # delete the IDs that it fixed from uds_conf.known ("#! now matches Linux" lines tell which).
 #
-# The groups that hang the LibOS (or, when it has such a bug, crash it, which aborts the enclave) are
-# skipped (-s); remove a group from the list when its bug is fixed:
-#   c93_*  listen() while another thread blocks in accept() deadlocks the listener
+# A group that hangs the LibOS or crashes it (which aborts the enclave) can be skipped with -s until
+# its bug is fixed. No group is skipped at the moment.
 #
 # Native Linux:  gcc -pthread -O2 -o uds_conf uds_conf.c && ./uds_conf -d /tmp   (add -e uds_conf.expected -k /dev/null to compare)
 # A long run (a minute or more in Occlum): the groups c13_*, c14_*, c19_*, c22_* wait for timeouts, so
@@ -19,8 +18,7 @@ include ../test_common.mk
 # or part of it in the enclave, with all the results printed: occlum exec /bin/uds_conf -o c02,c04
 EXTRA_C_FLAGS := -Wno-unused-function -Wno-unused-variable -Wno-unused-result -Wno-stringop-overread -Wno-maybe-uninitialized
 EXTRA_LINK_FLAGS := -lpthread
-BIN_ARGS := -d /tmp -t 40 -x /bin/uds_conf -e /etc/uds_conf.expected -k /etc/uds_conf.known \
-	-s c93_relisten_while_accept_blocked
+BIN_ARGS := -d /tmp -t 40 -x /bin/uds_conf -e /etc/uds_conf.expected -k /etc/uds_conf.known
 
 CUSTOM_PRE_BUILD := 1
 

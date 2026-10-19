@@ -40,20 +40,6 @@ files.chmod_socket_file.stat
 connect.listener_closed_pending.ev
 connect.listener_closed_pending.read
 
-# group c06_backlog
-backlog.count.bl1
-backlog.accepted.bl1
-backlog.count.bl2
-backlog.accepted.bl2
-backlog.count.bl5
-backlog.accepted.bl5
-backlog.count.bl0
-backlog.room_after_accept
-backlog.blocking_connect_full
-backlog.shrink.accepted_of_4_waiting
-backlog.shrink.waiting_clients_read
-backlog.grow.count
-
 # group c07_io
 io.siocoutq.sender
 io.fionread.idle
@@ -181,7 +167,6 @@ blk.accept.shut_rdwr
 blk.accept.shut_rdwr.after
 
 # group c13_signals
-sig.connect_full_backlog.no_restart
 sig.read.sa_restart
 sig.accept.sa_restart
 sig.write_full.sa_restart
@@ -199,7 +184,6 @@ tmo.recv_waitall_partial
 tmo.write_full
 tmo.send_full
 tmo.accept
-tmo.connect_full_backlog
 
 # group c15_options
 opt.get.SO_PEEK_OFF.idle
@@ -282,9 +266,6 @@ mem.many_sockets_created
 # group c20_listener_close
 lclose.pending_client.ev
 lclose.pending_client.read
-
-# group c93_relisten_while_accept_blocked
-backlog.relisten_while_accept_blocked
 
 # group c90_anc_rights_over_socketpair, c90_anc_rights_sender_closed_fd, c90_anc_rights_sender_thread_exited
 # (the LibOS drops the control message of a descriptor that it cannot look up at the receiver: MSG_CTRUNC)

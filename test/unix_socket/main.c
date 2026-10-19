@@ -849,7 +849,7 @@ int test_accept_while_writing() {
     if (listen_fd < 0) {
         THROW_ERROR("failed to create a unix socket");
     }
-    // A backlog for all connections, as connect() fails if it is full
+    // A backlog for all connections, so that connect() does not wait for an accept
     if (bind(listen_fd, (struct sockaddr *)&addr, addr_len) < 0 ||
             listen(listen_fd, ACCEPT_WHILE_WRITING_CONNECTIONS) < 0) {
         close(listen_fd);

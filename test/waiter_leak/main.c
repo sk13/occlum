@@ -210,6 +210,58 @@ int test_unix_accept_interrupted() {
     return ret;
 }
 
+// connect() on a unix socket whose backlog is full: the interrupted one, and the timed out one
+static int connect_full_call(const struct sockaddr_un *addr, long timeout_us,
+                             int expected_errno) {
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) {
+        printf("\t\tERROR: failed to create a socket\n");
+        return -1;
+    }
+    if (timeout_us > 0) {
+        struct timeval timeout = { 0, timeout_us };
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+    }
+    int ret = connect(fd, (struct sockaddr *)addr, sizeof(*addr));
+    int err = errno;
+    close(fd);
+    errno = err;
+    return expect_failure(ret, expected_errno, expected_errno, "connect");
+}
+
+static int connect_full_interrupted_call(void *arg) {
+    return connect_full_call(arg, 0, EINTR);
+}
+
+static int connect_full_timeout_call(void *arg) {
+    return connect_full_call(arg, 1000, EAGAIN);
+}
+
+static int test_unix_connect_full_backlog(call_func_t call, int interrupt) {
+    struct sockaddr_un addr = { .sun_family = AF_UNIX };
+    strncpy(addr.sun_path, g_sock_path, sizeof(addr.sun_path) - 1);
+    unlink(g_sock_path);
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    // The backlog 0 takes one connection
+    int first = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0 || first < 0 || bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0 ||
+            listen(fd, 0) < 0 || connect(first, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        THROW_ERROR("failed to fill the backlog of the listening socket");
+    }
+    int ret = check_calls_leak_nothing(call, &addr, interrupt);
+    close_files(2, first, fd);
+    unlink(g_sock_path);
+    return ret;
+}
+
+int test_unix_connect_full_backlog_interrupted() {
+    return test_unix_connect_full_backlog(connect_full_interrupted_call, 1);
+}
+
+int test_unix_connect_full_backlog_timeout() {
+    return test_unix_connect_full_backlog(connect_full_timeout_call, 0);
+}
+
 // epoll_wait() on an epoll file without events
 static int epoll_wait_call(void *arg) {
     int *epfd = arg;
@@ -331,6 +383,8 @@ static test_case_t test_cases[] = {
     TEST_CASE(test_pipe_read_interrupted),
     TEST_CASE(test_pipe_write_interrupted),
     TEST_CASE(test_unix_accept_interrupted),
+    TEST_CASE(test_unix_connect_full_backlog_interrupted),
+    TEST_CASE(test_unix_connect_full_backlog_timeout),
     TEST_CASE(test_epoll_wait_interrupted),
     TEST_CASE(test_semop_interrupted),
     TEST_CASE(test_semtimedop_timeout),
