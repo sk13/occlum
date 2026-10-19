@@ -1,6 +1,6 @@
 use super::endpoint::Endpoint;
 use super::endpoint::RelayNotifier;
-use super::stream::Listener;
+use super::listener::Listener;
 use super::*;
 use misc::get_random;
 use std::collections::btree_map::BTreeMap;
