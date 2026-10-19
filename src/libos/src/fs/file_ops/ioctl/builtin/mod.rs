@@ -207,17 +207,21 @@ macro_rules! impl_ioctl_cmd {
 
 use super::*;
 
+pub use self::get_atmark::GetAtMark;
 pub use self::get_ifconf::{GetIfConf, IfConf};
 pub use self::get_ifreq::{GetIfReq, GetIfReqWithRawCmd, IfReq};
 pub use self::get_readbuflen::GetReadBufLen;
+pub use self::get_writebuflen::GetWriteBufLen;
 pub use self::set_close_on_exec::*;
 pub use self::set_nonblocking::SetNonBlocking;
 pub use self::termios::*;
 pub use self::winsize::*;
 
+mod get_atmark;
 mod get_ifconf;
 mod get_ifreq;
 mod get_readbuflen;
+mod get_writebuflen;
 mod set_close_on_exec;
 mod set_nonblocking;
 mod termios;

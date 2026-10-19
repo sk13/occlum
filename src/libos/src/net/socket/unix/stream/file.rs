@@ -6,7 +6,7 @@ use rcore_fs::vfs::{FileType, Metadata, Timespec};
 use std::any::Any;
 use std::io::SeekFrom;
 
-use crate::fs::{GetReadBufLen, IoctlCmd, SetNonBlocking};
+use crate::fs::{GetAtMark, GetReadBufLen, GetWriteBufLen, IoctlCmd, SetNonBlocking};
 
 /// The device that the sockets belong to, which no file system has.
 const SOCKET_DEV: usize = 8;
@@ -51,13 +51,26 @@ impl File for Stream {
     fn ioctl(&self, cmd: &mut dyn IoctlCmd) -> Result<()> {
         match_ioctl_cmd_auto_error!(cmd, {
             cmd : GetReadBufLen => {
-                match &*self.inner() {
-                    Status::Connected(endpoint) => {
-                        let bytes_to_read = endpoint.bytes_to_read().min(i32::MAX as usize) as i32;
-                        cmd.set_output(bytes_to_read as _);
-                    }
-                    _ => return_errno!(ENOTCONN, "unconnected socket"),
+                let bytes_to_read = match &*self.inner() {
+                    Status::Connected(endpoint) => endpoint.bytes_to_read(),
+                    // Like in Linux, nothing is to be read before the socket is connected, and
+                    // the socket that listens has no bytes at all
+                    Status::Idle(_) => 0,
+                    Status::Listening(_) => return_errno!(EINVAL, "a listening socket"),
                 };
+                cmd.set_output(bytes_to_read.min(i32::MAX as usize) as i32);
+            },
+            cmd : GetWriteBufLen => {
+                let bytes_to_write = match &*self.inner() {
+                    Status::Connected(endpoint) => endpoint.bytes_in_flight(),
+                    _ => 0,
+                };
+                cmd.set_output(bytes_to_write.min(i32::MAX as usize) as i32);
+            },
+            cmd : GetAtMark => {
+                // The bytes that a message sends out of band are plain bytes of the stream, so no
+                // read is at the mark of out-of-band data
+                cmd.set_output(0);
             },
             cmd : SetNonBlocking => {
                 let nonblocking = cmd.input();

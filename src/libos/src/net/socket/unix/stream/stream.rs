@@ -390,7 +390,7 @@ impl Stream {
     /// waits until the buffers are full, but a peek returns the bytes that are queued, like in
     /// Linux.
     pub(super) fn recv(&self, bufs: &mut [&mut [u8]], flags: RecvFlags) -> Result<usize> {
-        let endpoint = self.connected_endpoint()?;
+        let endpoint = self.recv_endpoint()?;
         let opts = IoOpts {
             nonblocking: flags.contains(RecvFlags::MSG_DONTWAIT),
             timeout: self.recv_timeout(),
@@ -447,6 +447,18 @@ impl Stream {
         match &*self.inner() {
             Status::Connected(endpoint) => Ok(endpoint.clone()),
             _ => return_errno!(ENOTCONN, "unconnected socket"),
+        }
+    }
+
+    /// Returns the endpoint that a receive reads from. A socket that is not connected has none,
+    /// which makes the receive fail with EINVAL, as in Linux (a send fails with ENOTCONN). A socket
+    /// that replaces a TCP socket fails with ENOTCONN, as TCP does.
+    fn recv_endpoint(&self) -> Result<Endpoint> {
+        match self.connected_endpoint() {
+            Err(_) if self.inet_view().is_none() => {
+                return_errno!(EINVAL, "the socket is not connected")
+            }
+            endpoint => endpoint,
         }
     }
 

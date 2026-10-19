@@ -8,8 +8,8 @@ use super::*;
 
 use self::builtin::*;
 pub use self::builtin::{
-    GetIfConf, GetIfReqWithRawCmd, GetReadBufLen, GetWinSize, IfConf, IoctlCmd, SetNonBlocking,
-    SetWinSize, TcGets, TcSets,
+    GetAtMark, GetIfConf, GetIfReqWithRawCmd, GetReadBufLen, GetWinSize, GetWriteBufLen, IfConf,
+    IoctlCmd, SetNonBlocking, SetWinSize, TcGets, TcSets,
 };
 pub use self::non_builtin::{NonBuiltinIoctlCmd, StructuredIoctlArgType, StructuredIoctlNum};
 use crate::util::mem_util::from_user;
@@ -45,12 +45,17 @@ impl_ioctl_nums_and_cmds! {
     // the foreground process group and all processes in the current session lose their controlling
     // terminal
     TIOCNOTTY => (0x5422, ()),
+    // Get the number of bytes in the output buffer, i.e., those of a socket that its peer has not
+    // read
+    TIOCOUTQ => (0x5411, mut i32),
     // Get the number of bytes in the input buffer
     FIONREAD => (0x541B, mut i32),
     // Don't close on exec
     FIONCLEX => (0x5450, ()),
     // Set close on exec
     FIOCLEX => (0x5451, ()),
+    // Tell whether the socket is at the mark of out-of-band data
+    SIOCATMARK => (0x8905, mut i32),
     // Low-level access to Linux network devices on man7/netdevice.7
     // Only non-privileged operations are supported for now
     SIOCGIFNAME => (0x8910, mut IfReq),
@@ -93,6 +98,8 @@ impl<'a> IoctlRawCmd<'a> {
             }
             IoctlRawCmd::FIONBIO(non_blocking) => Box::new(SetNonBlocking::new(**non_blocking)),
             IoctlRawCmd::FIONREAD(_) => Box::new(GetReadBufLen::new(())),
+            IoctlRawCmd::TIOCOUTQ(_) => Box::new(GetWriteBufLen::new(())),
+            IoctlRawCmd::SIOCATMARK(_) => Box::new(GetAtMark::new(())),
             IoctlRawCmd::FIONCLEX(_) => Box::new(SetCloseOnExec::new(false)),
             IoctlRawCmd::FIOCLEX(_) => Box::new(SetCloseOnExec::new(true)),
             IoctlRawCmd::SIOCGIFCONF(ifconf_mut) => {
@@ -137,6 +144,14 @@ impl<'a> IoctlRawCmd<'a> {
             IoctlRawCmd::FIONREAD(len_mut) => {
                 let cmd = cmd.downcast_ref::<GetReadBufLen>().unwrap();
                 **len_mut = *cmd.output().unwrap();
+            }
+            IoctlRawCmd::TIOCOUTQ(len_mut) => {
+                let cmd = cmd.downcast_ref::<GetWriteBufLen>().unwrap();
+                **len_mut = *cmd.output().unwrap();
+            }
+            IoctlRawCmd::SIOCATMARK(mark_mut) => {
+                let cmd = cmd.downcast_ref::<GetAtMark>().unwrap();
+                **mark_mut = *cmd.output().unwrap();
             }
             IoctlRawCmd::SIOCGIFCONF(ifconf_mut) => {
                 let cmd = cmd.downcast_ref::<GetIfConf>().unwrap();

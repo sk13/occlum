@@ -142,6 +142,12 @@ impl Inner {
         self.reader.items_to_consume()
     }
 
+    /// The number of bytes that the endpoint has written, which its peer has not read. There are
+    /// none once the peer is closed, as the bytes that it did not read are dropped.
+    pub fn bytes_in_flight(&self) -> usize {
+        self.peer.upgrade().map_or(0, |peer| peer.bytes_to_read())
+    }
+
     /// Shut down the reading and/or the writing of the endpoint. As in Linux,
     /// this is allowed after the peer has closed, too.
     pub fn shutdown(&self, how: Shutdown) -> Result<()> {
