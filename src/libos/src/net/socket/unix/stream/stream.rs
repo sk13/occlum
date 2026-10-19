@@ -4,7 +4,7 @@ use super::options::{AtomicTimeouts, SockOptions};
 use super::*;
 use events::{Event, EventFilter, Notifier, Observer};
 use fs::channel::IoOpts;
-use fs::{CreationFlags, FileMode};
+use fs::{CreationFlags, FileMode, IoEvents};
 use net::socket::{CMessages, CmsgData};
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -214,6 +214,12 @@ impl Stream {
                         info.nonblocking(),
                         self.notifier.clone(),
                     )?;
+                    // A socket that was shut down listens shut down, like in Linux
+                    if let (Some(how), Some(listener)) =
+                        (info.shut_down_for(), ADDRESS_SPACE.get_listener_ref(addr))
+                    {
+                        listener.shutdown(how);
+                    }
                     *inner = Status::Listening(addr.clone());
                 } else {
                     return_errno!(EINVAL, "the socket is not bound");
@@ -259,6 +265,10 @@ impl Stream {
                 // The socket may have set the size of its send buffer before it connects. It is
                 // read with the status locked, see `setsockopt`.
                 end_self.set_send_buf_size(self.send_buf_size());
+                // A socket that was shut down stays so, like in Linux
+                if let Some(how) = info.shut_down_for() {
+                    end_self.shutdown(how)?;
+                }
                 // The name of the listener is the one that it bound, whatever
                 // the name that this socket used, which may have changed
                 // meanwhile, e.g., by renaming the socket file
@@ -525,6 +535,22 @@ impl Stream {
 
     /// perform shutdown on the socket.
     pub fn shutdown(&self, how: Shutdown) -> Result<()> {
+        // A socket that is not connected remembers it, like in Linux, where it has the flags of
+        // the shutdown, too. It is ENOTCONN for a TCP socket, which this socket may replace.
+        let inet = self.inet_view().is_some();
+        let events = match &mut *self.inner() {
+            Status::Idle(_) if inet => return_errno!(ENOTCONN, "The socket is not connected."),
+            Status::Idle(info) => {
+                info.shutdown(how);
+                Some(info.events())
+            }
+            _ => None,
+        };
+        if let Some(events) = events {
+            self.notifier.notifier().broadcast(&events);
+            return Ok(());
+        }
+
         // Release the lock before waking up threads, like the other operations
         let status = (*self.inner()).clone();
         match status {
@@ -652,6 +678,10 @@ pub enum Status {
 pub struct Info {
     addr: Option<UnixAddr>,
     nonblocking: bool,
+    // The socket has been shut down for reading or writing, which it stays after it is
+    // connected or listens, like in Linux
+    shut_rd: bool,
+    shut_wr: bool,
 }
 
 impl Info {
@@ -659,6 +689,8 @@ impl Info {
         Self {
             addr: None,
             nonblocking: nonblocking,
+            shut_rd: false,
+            shut_wr: false,
         }
     }
 
@@ -676,5 +708,31 @@ impl Info {
 
     pub fn set_nonblocking(&mut self, nonblocking: bool) {
         self.nonblocking = nonblocking;
+    }
+
+    pub fn shutdown(&mut self, how: Shutdown) {
+        self.shut_rd |= how.should_shut_read();
+        self.shut_wr |= how.should_shut_write();
+    }
+
+    /// Returns what the socket has been shut down for, if it has
+    pub fn shut_down_for(&self) -> Option<Shutdown> {
+        match (self.shut_rd, self.shut_wr) {
+            (true, true) => Some(Shutdown::Both),
+            (true, false) => Some(Shutdown::Read),
+            (false, true) => Some(Shutdown::Write),
+            (false, false) => None,
+        }
+    }
+
+    /// Returns the events of a socket that is not connected: it can always write (the write
+    /// fails), and it has hung up, like in Linux, where it is closed. A socket that has been shut
+    /// down for reading is readable, as a read fails at once.
+    pub fn events(&self) -> IoEvents {
+        let mut events = IoEvents::OUT | IoEvents::HUP;
+        if self.shut_rd {
+            events |= IoEvents::IN | IoEvents::RDHUP;
+        }
+        events
     }
 }

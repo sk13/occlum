@@ -106,7 +106,7 @@ impl File for Stream {
     fn poll_new(&self) -> IoEvents {
         match &*self.inner() {
             // linux return value
-            Status::Idle(info) => IoEvents::OUT | IoEvents::HUP,
+            Status::Idle(info) => info.events(),
             Status::Connected(endpoint) => endpoint.poll(),
             Status::Listening(addr) => {
                 if let Some(listener) = ADDRESS_SPACE.get_listener_ref(addr) {
