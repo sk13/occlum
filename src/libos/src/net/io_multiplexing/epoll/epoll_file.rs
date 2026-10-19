@@ -383,6 +383,10 @@ impl EpollFile {
 
     fn push_ready_iter<I: Iterator<Item = Arc<EpollEntry>>>(&self, ep_entries: I) {
         let mut has_pushed_any = false;
+        // The entries that are not pushed are dropped after the critical section. An entry may
+        // hold the last reference to its file, e.g., a socket that has been closed, and dropping
+        // that file triggers events, which push_ready() handles with the lock of the ready list.
+        let mut skipped_entries = Vec::new();
 
         // A critical section protected by self.ready.lock()
         {
@@ -391,6 +395,7 @@ impl EpollFile {
                 if ep_entry.is_ready.load(Ordering::Relaxed)
                     || ep_entry.is_deleted.load(Ordering::Acquire)
                 {
+                    skipped_entries.push(ep_entry);
                     continue;
                 }
 
@@ -400,6 +405,7 @@ impl EpollFile {
                 has_pushed_any = true;
             }
         }
+        drop(skipped_entries);
 
         if has_pushed_any {
             self.mark_ready();
