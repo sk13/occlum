@@ -2089,6 +2089,124 @@ static int test_recvmmsg(void) {
     return 0;
 }
 
+// sendmmsg returns the number of the messages that it has sent if a later message fails: the
+// error is for the first message only
+static int test_sendmmsg_stops_at_a_failing_message(void) {
+    int sv[2];
+    char buf[16];
+    struct mmsghdr msgs[3];
+    struct iovec iov[3];
+    CHECK(make_pair(sv) == 0, "failed to create a socket pair");
+
+    // The second message is no memory
+    memset(msgs, 0, sizeof(msgs));
+    iov[0] = (struct iovec) { "aa", 2 };
+    iov[1] = (struct iovec) { (void *)1, 2 };
+    iov[2] = (struct iovec) { "cc", 2 };
+    for (int i = 0; i < 3; i++) {
+        msgs[i].msg_hdr.msg_iov = &iov[i];
+        msgs[i].msg_hdr.msg_iovlen = 1;
+    }
+    errno = 0;
+    long ret = syscall(SYS_sendmmsg, sv[0], msgs, 3, 0);
+    CHECK(ret == 1, "sendmmsg of a message and one in no memory returned %ld (errno %d)", ret,
+          errno);
+    CHECK(msgs[0].msg_len == 2, "sendmmsg sent %u bytes of the first message",
+          msgs[0].msg_len);
+    CHECK(recv(sv[1], buf, sizeof(buf), MSG_DONTWAIT) == 2 && memcmp(buf, "aa", 2) == 0,
+          "the bytes of the messages that were sent do not arrive");
+
+    // The first message is no memory: the call fails
+    errno = 0;
+    ret = syscall(SYS_sendmmsg, sv[0], &msgs[1], 2, 0);
+    CHECK(ret == -1 &&
+          errno == EFAULT, "sendmmsg of a message in no memory returned %ld (errno %d)",
+          ret, errno);
+    CHECK(drain(sv[1]) == 0, "bytes arrive from a message that failed");
+
+    // The last message finds no room: the one before has written the bytes that fit
+    size_t big_len = 4 * MIB;
+    char *big = calloc(1, big_len);
+    iov[0] = (struct iovec) { "a", 1 };
+    iov[1] = (struct iovec) { big, big_len };
+    iov[2] = (struct iovec) { "c", 1 };
+    memset(msgs, 0, sizeof(msgs));
+    for (int i = 0; i < 3; i++) {
+        msgs[i].msg_hdr.msg_iov = &iov[i];
+        msgs[i].msg_hdr.msg_iovlen = 1;
+    }
+    errno = 0;
+    ret = syscall(SYS_sendmmsg, sv[0], msgs, 3, MSG_DONTWAIT);
+    CHECK(ret == 2,
+          "sendmmsg that finds no room for its last message returned %ld (errno %d)", ret,
+          errno);
+    CHECK(msgs[0].msg_len == 1 && msgs[1].msg_len > 0 && msgs[1].msg_len < big_len,
+          "sendmmsg sent %u and %u bytes of its first messages", msgs[0].msg_len, msgs[1].msg_len);
+    CHECK(drain(sv[1]) == (long)(1 + msgs[1].msg_len),
+          "not all the bytes of the messages arrive");
+    close(sv[0]);
+    close(sv[1]);
+    free(big);
+    return 0;
+}
+
+// recvmmsg checks its timeout after each message, not while it waits for one: it stops when the
+// time is over, and tells the time that is left, which is zero then. Linux does the same.
+static int test_recvmmsg_timeout(void) {
+    enum { VLEN = 16 };
+    int sv[2];
+    char bytes[VLEN];
+    struct mmsghdr msgs[VLEN];
+    struct iovec iov[VLEN];
+    CHECK(make_pair(sv) == 0, "failed to create a socket pair");
+
+    // Three bytes are there for the messages of a byte, and the fourth message finds none. The call
+    // returns, and the timeout is what is left of the five seconds.
+    CHECK(write(sv[1], "abc", 3) == 3, "failed to write");
+    memset(msgs, 0, sizeof(msgs));
+    for (int i = 0; i < 4; i++) {
+        iov[i] = (struct iovec) { bytes + i, 1 };
+        msgs[i].msg_hdr.msg_iov = &iov[i];
+        msgs[i].msg_hdr.msg_iovlen = 1;
+    }
+    struct timespec timeout = { 5, 0 };
+    long ret = syscall(SYS_recvmmsg, sv[0], msgs, 4, MSG_WAITFORONE, &timeout);
+    CHECK(ret == 3, "recvmmsg returned %ld (errno %d)", ret, errno);
+    CHECK(memcmp(bytes, "abc", 3) == 0, "recvmmsg gets wrong bytes");
+    long left_ns = timeout.tv_sec * 1000000000L + timeout.tv_nsec;
+    CHECK(left_ns < 5000000000L && left_ns > 3000000000L,
+          "the timeout of recvmmsg is %ld ns after the call, instead of the time that is left",
+          left_ns);
+
+    // A byte arrives every 30 ms, and a timeout of 100 ms is over after the fourth. Without the
+    // check after each message, the call would wait for all 16 messages (480 ms).
+    flow_t sender;
+    CHECK(flow_start(&sender, writer_main, sv[1], 20, 1, 0, 30) == 0,
+          "failed to start the writer");
+    memset(msgs, 0, sizeof(msgs));
+    for (int i = 0; i < VLEN; i++) {
+        iov[i] = (struct iovec) { bytes + i, 1 };
+        msgs[i].msg_hdr.msg_iov = &iov[i];
+        msgs[i].msg_hdr.msg_iovlen = 1;
+    }
+    timeout = (struct timespec) { 0, 100 * 1000000L };
+    long start = now_ms();
+    ret = syscall(SYS_recvmmsg, sv[0], msgs, VLEN, 0, &timeout);
+    long elapsed = now_ms() - start;
+    CHECK(ret >= 1 &&
+          ret < VLEN, "recvmmsg with a timeout of 100 ms returned %ld messages", ret);
+    CHECK(elapsed >= 100 - EARLY_MS && elapsed < 100 + SLACK_MS,
+          "recvmmsg with a timeout of 100 ms took %ld ms", elapsed);
+    CHECK(timeout.tv_sec == 0 && timeout.tv_nsec == 0,
+          "the timeout of recvmmsg is %ld s and %ld ns after the time is over",
+          (long)timeout.tv_sec,
+          (long)timeout.tv_nsec);
+    CHECK(flow_join(&sender, WAKE_MS), "the writer does not write its bytes");
+    close(sv[0]);
+    close(sv[1]);
+    return 0;
+}
+
 // ---------------------------------------------------------------------------------------------
 // The size of the send buffer
 // ---------------------------------------------------------------------------------------------
@@ -2261,6 +2379,8 @@ static test_case_t test_cases[] = {
     TEST_CASE(test_receive_tells_the_name_of_the_peer),
     TEST_CASE(test_sendmmsg),
     TEST_CASE(test_recvmmsg),
+    TEST_CASE(test_sendmmsg_stops_at_a_failing_message),
+    TEST_CASE(test_recvmmsg_timeout),
     TEST_CASE(test_mmsg_vector_length),
     TEST_CASE(test_sndbuf_limits_the_bytes_in_flight),
     TEST_CASE(test_sndbuf_before_connect),
