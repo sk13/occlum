@@ -1,11 +1,12 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Weak;
 
-use ringbuf::{Consumer as RbConsumer, Producer as RbProducer, RingBuffer};
-
+use self::ring::{NoMemory, PushError, Ring, RingConsumer, RingProducer};
 use super::{IoEvents, IoNotifier};
 use crate::events::{Event, EventFilter, Notifier, Observer, Waiter, WaiterQueueObserver};
 use crate::prelude::*;
+
+mod ring;
 
 /// A unidirectional communication channel, intended to implement IPC, e.g., pipe,
 /// unix domain sockets, etc.
@@ -19,10 +20,10 @@ impl<I> Channel<I> {
     pub fn new(capacity: usize) -> Result<Self> {
         let state = Arc::new(State::new());
 
-        let rb = RingBuffer::new(capacity);
-        let (rb_producer, rb_consumer) = rb.split();
-        let mut producer = Producer::new(rb_producer, state.clone());
-        let mut consumer = Consumer::new(rb_consumer, state.clone());
+        // The queue allocates its memory when items are pushed, not here
+        let (ring_producer, ring_consumer) = Ring::new(capacity).split();
+        let mut producer = Producer::new(ring_producer, state.clone());
+        let mut consumer = Consumer::new(ring_consumer, state.clone());
 
         // The events on an endpoint is not triggered by itself, but its peer.
         // For example, a producer becomes writable (IoEvents::OUT) only if
@@ -217,7 +218,7 @@ macro_rules! waiter_loop {
 impl_end_point_type! {
     /// Producer is the writable endpoint of a channel.
     pub struct Producer<I> {
-        inner: RbProducer<I>,
+        inner: RingProducer<I>,
     }
 }
 
@@ -236,7 +237,10 @@ impl<I> Producer<I> {
                         self.trigger_peer_events(&IoEvents::IN);
                         return Ok(());
                     }
-                    Err(item) => item,
+                    Err(PushError::Full(item)) => item,
+                    Err(PushError::NoMemory(_)) => {
+                        return_errno!(ENOMEM, "no memory for the item");
+                    }
                 };
 
                 if self.is_nonblocking() {
@@ -268,11 +272,13 @@ impl<I> Producer<I> {
     pub fn shutdown(&self) {
         {
             // It is important to hold this lock while updating the state
-            let inner = self.inner.lock().unwrap();
+            let mut inner = self.inner.lock().unwrap();
             if self.state.is_producer_shutdown() {
                 return;
             }
             self.state.set_producer_shutdown();
+            // Nothing is pushed any more, so the queue need not keep chunks for the producer
+            inner.close();
         }
 
         // The shutdown of the producer triggers hangup events on the consumer
@@ -287,6 +293,12 @@ impl<I> Producer<I> {
 
     pub fn is_peer_shutdown(&self) -> bool {
         self.state.is_consumer_shutdown()
+    }
+
+    /// Returns the number of items that were pushed since the channel was
+    /// created.
+    pub fn total_pushed(&self) -> usize {
+        self.inner.lock().unwrap().total_pushed()
     }
 }
 
@@ -310,7 +322,12 @@ impl<I: Copy> Producer<I> {
 
                 let mut total_count = 0;
                 for items in item_slices {
-                    let count = rb_producer.push_slice(items);
+                    let count = match rb_producer.push_slice(items) {
+                        Ok(count) => count,
+                        // Report what was pushed before the memory ran out, if anything
+                        Err(NoMemory) if total_count > 0 => break,
+                        Err(NoMemory) => return_errno!(ENOMEM, "no memory for the items"),
+                    };
                     total_count += count;
                     if count < items.len() {
                         break;
@@ -343,7 +360,7 @@ impl<I> Drop for Producer<I> {
 impl_end_point_type! {
     /// Consumer is the readable endpoint of a channel.
     pub struct Consumer<I> {
-        inner: RbConsumer<I>,
+        inner: RingConsumer<I>,
     }
 }
 
@@ -432,6 +449,12 @@ impl<I> Consumer<I> {
     pub fn ready_len(&self) -> usize {
         let rb_consumer = self.inner.lock().unwrap();
         rb_consumer.len()
+    }
+
+    /// Returns the number of items that were popped since the channel was
+    /// created.
+    pub fn total_popped(&self) -> usize {
+        self.inner.lock().unwrap().total_popped()
     }
 }
 
