@@ -3,7 +3,6 @@ use super::endpoint::{end_pair, Ancillary, Endpoint, RelayNotifier};
 use super::options::SockOptions;
 use super::*;
 use events::{Event, EventFilter, Notifier, Observer};
-use fs::IoEvents;
 use fs::{CreationFlags, FileMode};
 use net::socket::{CMessages, CmsgData};
 use std::fmt;
@@ -195,7 +194,7 @@ impl Stream {
         if backlog < 0 {
             return_errno!(EINVAL, "negative backlog is not supported");
         }
-        let capacity = backlog as usize;
+        let backlog = backlog as usize;
 
         let mut inner = self.inner();
         match &*inner {
@@ -204,7 +203,7 @@ impl Stream {
                     warn!("addr = {:?}", addr);
                     ADDRESS_SPACE.add_listener(
                         addr,
-                        capacity,
+                        backlog,
                         info.nonblocking(),
                         self.notifier.clone(),
                     )?;
@@ -217,15 +216,18 @@ impl Stream {
             // bound one, and does not change it
             Status::Connected(_) if self.accepted => (),
             Status::Connected(_) => return_errno!(EINVAL, "the socket is already connected"),
-            // Modify the capacity of the channel holding incoming sockets
-            Status::Listening(addr) => ADDRESS_SPACE.resize_listener(&addr, capacity)?,
+            // Modify the backlog of the queue holding incoming sockets
+            Status::Listening(addr) => ADDRESS_SPACE.set_backlog(&addr, backlog)?,
         }
 
         Ok(())
     }
 
-    /// The establishment of the connection is very fast and can be done immediately.
-    /// Therefore, the connect function in our implementation will never block.
+    /// The establishment of the connection is very fast and can be done immediately,
+    /// unless the backlog of the listener is full. Then, like in Linux, a blocking
+    /// socket waits for an accept (as long as its SO_SNDTIMEO says, which ends with
+    /// EAGAIN), and a nonblocking socket fails with EAGAIN. No lock is held
+    /// meanwhile.
     pub fn connect(&self, addr: &UnixAddr) -> Result<()> {
         debug!("connect to {:?}", addr);
 
@@ -233,11 +235,18 @@ impl Stream {
             return_errno!(EINVAL, "the address has no name");
         }
 
+        let nonblocking = match &*self.inner() {
+            Status::Idle(info) => info.nonblocking(),
+            Status::Connected(endpoint) => return_errno!(EISCONN, "already connected"),
+            Status::Listening(addr) => return_errno!(EINVAL, "invalid socket for connect"),
+        };
+        let (listener, listener_addr) = ADDRESS_SPACE.find_listener(addr)?;
+        let room = listener.reserve_incoming(nonblocking, self.send_timeout())?;
+
+        // Another thread may have changed the socket while this one waited
         let mut inner = self.inner();
         match &*inner {
             Status::Idle(info) => {
-                let (listener, listener_addr) = ADDRESS_SPACE.find_listener(addr)?;
-
                 let self_addr_opt = info.addr();
                 let (end_self, end_incoming) = end_pair(info.nonblocking())?;
                 // The name of the listener is the one that it bound, whatever
@@ -251,17 +260,8 @@ impl Stream {
                 // Before the listener gets the peer, which may write right away
                 self.notifier.observe_endpoint(&end_self);
 
-                listener
-                    .push_incoming(end_incoming)
-                    .map_err(|e| match e.errno() {
-                        EAGAIN => errno!(ECONNREFUSED, "the backlog is full"),
-                        // The listener was closed after it was found
-                        EPIPE => errno!(ECONNREFUSED, "the listener is closed"),
-                        _ => e,
-                    })?;
-
-                // Notify listener for this event
-                listener.notifier.notifier().broadcast(&IoEvents::IN);
+                // ECONNREFUSED if the listener was closed after it was found
+                room.push(end_incoming)?;
 
                 *inner = Status::Connected(end_self);
                 Ok(())
@@ -505,8 +505,8 @@ impl Drop for Stream {
                 let listener = ADDRESS_SPACE.get_listener_ref(&addr).unwrap();
                 ADDRESS_SPACE.remove_addr(&addr);
                 // handle the blocking of other sockets holding the reference to the listener,
-                // e.g., pushing to a listener full of incoming sockets
-                listener.shutdown();
+                // e.g., waiting for room in a listener full of incoming sockets
+                listener.close();
             }
             // The address that the socket bound, before or after it connected
             Status::Connected(endpoint) if !self.accepted => {

@@ -103,7 +103,7 @@ impl AddressSpace {
     pub(super) fn add_listener(
         &self,
         addr: &UnixAddr,
-        capacity: usize,
+        backlog: usize,
         nonblocking: bool,
         notifier: Arc<RelayNotifier>,
     ) -> Result<()> {
@@ -112,7 +112,7 @@ impl AddressSpace {
 
         if let Some(binding) = space.get_mut(&key) {
             if binding.listener.is_none() {
-                binding.listener = Some(Arc::new(Listener::new(capacity, nonblocking, notifier)?));
+                binding.listener = Some(Arc::new(Listener::new(backlog, nonblocking, notifier)));
                 Ok(())
             } else {
                 return_errno!(EINVAL, "the socket is already listened");
@@ -122,20 +122,11 @@ impl AddressSpace {
         }
     }
 
-    pub fn resize_listener(&self, addr: &UnixAddr, capacity: usize) -> Result<()> {
-        let key = Self::get_key(addr).map_err(|_| errno!(EINVAL, "the socket is not bound"))?;
-        let mut space = self.get_space(addr)?;
-
-        if let Some(binding) = space.get(&key) {
-            if let Some(listener) = &binding.listener {
-                listener.resize(capacity);
-            } else {
-                return_errno!(EINVAL, "the socket is not listening");
-            }
-            Ok(())
-        } else {
-            return_errno!(EINVAL, "the socket is not bound");
-        }
+    pub fn set_backlog(&self, addr: &UnixAddr, backlog: usize) -> Result<()> {
+        self.get_listener_ref(addr)
+            .ok_or_else(|| errno!(EINVAL, "the socket is not listening"))?
+            .set_backlog(backlog);
+        Ok(())
     }
 
     /// Returns the listener that connecting to the address reaches, and the
