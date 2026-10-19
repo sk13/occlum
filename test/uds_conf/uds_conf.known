@@ -66,6 +66,7 @@ addr.recvmsg_named_peer
 addr.sendmsg_with_name_on_connected
 addr.sendto_unconnected_with_addr
 addr.sendto_addr_len_mismatch
+# musl emulates sendmmsg() with sendmsg(), so that it matches Linux there
 msg.sendmmsg
 msg.recvmmsg
 
@@ -153,10 +154,6 @@ sig.write_full.sa_restart
 sig.connect_full_backlog.sa_restart
 
 # group c14_timeouts
-tmo.get_rcvtimeo
-tmo.get_sndtimeo
-tmo.set_usec_too_big
-tmo.set_short_optlen
 tmo.read
 tmo.recv
 tmo.recv_waitall
@@ -165,47 +162,9 @@ tmo.write_full
 tmo.send_full
 
 # group c15_options
-opt.get.SO_PEEK_OFF.idle
-opt.get.SO_INCOMING_CPU.idle
-opt.get.SO_PEERPIDFD.idle
-opt.get.SO_PEERCRED.sp
 opt.get.SO_PEERPIDFD.sp
 opt.get.SO_PEERSEC.sp
-opt.get.SO_PEERGROUPS.sp
-opt.set.SO_KEEPALIVE
-opt.set.SO_REUSEADDR
-opt.set.SO_REUSEPORT
-opt.set.SO_PASSCRED
-opt.set.SO_OOBINLINE
-opt.set.SO_BROADCAST
-opt.set.SO_PRIORITY
-opt.set.SO_RCVLOWAT
-opt.set.SO_SNDLOWAT
-opt.set.SO_TIMESTAMP
-opt.set.SO_DONTROUTE
-opt.set.SO_DEBUG
-opt.set.SO_MARK
-opt.set.SO_PASSSEC
-opt.set.SO_SNDBUF
-opt.set.SO_RCVBUF
-opt.set.SO_ERROR
-opt.set.SO_TYPE
-opt.set.SO_ACCEPTCONN
-opt.set.SO_DOMAIN
-opt.set.SO_SNDBUF.tiny
-opt.set.SO_RCVBUF.tiny
-opt.set.SO_SNDBUF.huge
-opt.set.SO_LINGER.get
 opt.sndbuf_effect.fill_after_set_4096
-opt.set.TCP_NODELAY
-opt.set.IP_TTL
-opt.set.IPV6_V6ONLY
-opt.set.SOL_UNIX_level_0
-opt.set.level_bogus
-opt.set.optname_bogus
-opt.set.optlen_short
-opt.set.optlen_zero
-opt.get.optval_null_len0
 
 # group c16_sigpipe
 pipe.write_after_peer_close
