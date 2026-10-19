@@ -15,7 +15,9 @@
 #include <string.h>
 #include <errno.h>
 #include <stdarg.h>
+#include <stdatomic.h>
 #include <pthread.h>
+#include <time.h>
 #include "test.h"
 #include "kernel_heap.h"
 
@@ -825,6 +827,115 @@ int test_epoll_wait_two_waiters() {
 }
 
 // ============================================================================
+// Test cases: closing a socket while another thread waits on the epoll file
+// ============================================================================
+
+// A thread that calls epoll_wait() takes the entries out of the ready list, polls the files, and
+// puts the entries of the files that are still ready (the level-triggered ones) back. If a thread
+// closes a file while epoll_wait() holds its entry, epoll_wait() owns the last reference to the
+// file and drops it when it puts the entries back. That used to happen with the lock of the ready
+// list held. Closing a socket shuts its peer down, which makes events for the peer, and the peer
+// is in the same epoll file when it is the other end of the pair. These events lock the ready list
+// again, so the thread blocked forever, and with it the exit of the process.
+//
+// The socket that is closed is always ready, as it is writable. Its peer is not ready, as it has
+// nothing to read, so the events that the closing makes for the peer are the first for a while and
+// do lock the list.
+#define CLOSE_ROUNDS 3000
+// The waiting thread gets this long to make progress after a close
+#define CLOSE_PROGRESS_MS 5000
+// The process that closes the sockets gets this long to end
+#define CLOSE_PROCESS_MS 30000
+
+static atomic_int g_close_stop;
+static atomic_long g_close_waits;
+
+static long now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000L + ts.tv_nsec / 1000000L;
+}
+
+static void *hot_epoll_thread(void *arg) {
+    int epfd = *(int *) arg;
+    struct epoll_event events[4];
+    while (!atomic_load(&g_close_stop)) {
+        epoll_wait(epfd, events, 4, 0);
+        atomic_fetch_add(&g_close_waits, 1);
+    }
+    return NULL;
+}
+
+// Returns 0 if the sockets were closed in all rounds and the waiting thread ended, 1 if the
+// waiting thread does not make progress any more, and 2 if something else failed. The process
+// that runs this cannot end if the waiting thread is stuck, so the test runs it in a child.
+static int closer_main(void) {
+    int epfd = epoll_create1(0);
+    if (epfd < 0) {
+        return 2;
+    }
+    pthread_t waiter;
+    if (pthread_create(&waiter, NULL, hot_epoll_thread, &epfd) != 0) {
+        return 2;
+    }
+    for (int round = 0; round < CLOSE_ROUNDS; round++) {
+        int sockets[2];
+        if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0, sockets) < 0) {
+            return 2;
+        }
+        struct epoll_event idle = { .events = EPOLLIN, .data.fd = sockets[0] };
+        struct epoll_event busy = { .events = EPOLLOUT, .data.fd = sockets[1] };
+        if (epoll_ctl(epfd, EPOLL_CTL_ADD, sockets[0], &idle) < 0 ||
+                epoll_ctl(epfd, EPOLL_CTL_ADD, sockets[1], &busy) < 0) {
+            return 2;
+        }
+        close(sockets[1]);
+
+        // The waiting thread comes back from epoll_wait() twice, or is stuck
+        long waits = atomic_load(&g_close_waits);
+        long deadline = now_ms() + CLOSE_PROGRESS_MS;
+        while (atomic_load(&g_close_waits) < waits + 2) {
+            if (now_ms() > deadline) {
+                printf("\t\tERROR: epoll_wait() is stuck after closing a socket in round %d\n",
+                       round);
+                return 1;
+            }
+            usleep(50);
+        }
+        close(sockets[0]);
+    }
+    atomic_store(&g_close_stop, 1);
+    pthread_join(waiter, NULL);
+    close(epfd);
+    return 0;
+}
+
+int test_epoll_close_busy_socket_while_waiting() {
+    char *argv[] = { (char *)g_self_path, "--closer", NULL };
+    pid_t closer;
+    int spawned = posix_spawn(&closer, g_self_path, NULL, NULL, argv, NULL);
+    if (spawned != 0) {
+        THROW_ERROR("failed to spawn the process that closes the sockets");
+    }
+    for (long waited = 0; waited < CLOSE_PROCESS_MS; waited += 10) {
+        int status = 0;
+        pid_t ended = waitpid(closer, &status, WNOHANG);
+        if (ended == closer) {
+            if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+                THROW_ERROR("the process that closes the sockets failed (status 0x%x)", status);
+            }
+            return 0;
+        }
+        if (ended < 0) {
+            THROW_ERROR("failed to wait for the process that closes the sockets");
+        }
+        usleep(10 * 1000);
+    }
+    kill(closer, SIGKILL);
+    THROW_ERROR("the process that closes the sockets does not end");
+}
+
+// ============================================================================
 // Test suite main
 // ============================================================================
 
@@ -846,6 +957,7 @@ static test_case_t test_cases[] = {
     TEST_CASE(test_epoll_wait_timeout_no_leak),
     TEST_CASE(test_epoll_wait_ping_pong),
     TEST_CASE(test_epoll_wait_two_waiters),
+    TEST_CASE(test_epoll_close_busy_socket_while_waiting),
 };
 
 int main(int argc, const char *argv[]) {
@@ -857,6 +969,9 @@ int main(int argc, const char *argv[]) {
     }
     if (argc > 2 && strcmp(argv[1], "--holder") == 0) {
         return holder_main(atoi(argv[2]));
+    }
+    if (argc > 1 && strcmp(argv[1], "--closer") == 0) {
+        return closer_main();
     }
     return test_suite_run(test_cases, ARRAY_SIZE(test_cases));
 }
