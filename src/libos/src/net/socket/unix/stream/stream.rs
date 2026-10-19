@@ -422,32 +422,66 @@ impl Stream {
         let data_len = self.readv(bufs)?;
 
         // For stream socket, the msg_name is ignored. And other fields are not supported.
+        let mut msg_flags = MsgFlags::empty();
         let control_len = if let Some(msg_control) = control {
             let control_len = self.read(msg_control)?;
 
             // For each control message that contains file descriptors (SOL_SOCKET and SCM_RIGHTS),
-            // reassign each fd in the message in receive end.
-            for cmsg in CMessages::from_bytes(msg_control) {
-                if let CmsgData::ScmRights(mut scm_rights) = cmsg {
-                    let send_tid = self.peer_ancillary().unwrap().tid();
-                    scm_rights.iter_and_reassign_fds(|send_fd| {
-                        let ipc_file = process::table::get_thread(send_tid)
-                            .unwrap()
-                            .files()
-                            .lock()
-                            .get(send_fd)
-                            .unwrap();
-                        current!().add_file(ipc_file.clone(), false)
-                    })
+            // reassign each fd in the message in receive end. If that is not possible, the
+            // control data is dropped.
+            match self.reassign_fds(&mut msg_control[..control_len]) {
+                Ok(()) => control_len,
+                Err(e) => {
+                    warn!("drop the control data: {:?}", e);
+                    msg_flags |= MsgFlags::MSG_CTRUNC;
+                    0
                 }
-                // Unix credentials need not to be handled here
             }
-            control_len
         } else {
             0
         };
 
-        Ok((data_len, None, MsgFlags::empty(), control_len))
+        Ok((data_len, None, msg_flags, control_len))
+    }
+
+    /// Replaces the file descriptors in the control messages, which are those
+    /// of the sender, by descriptors of the current process for the same files.
+    /// Either all of them are replaced, or the current process has none of
+    /// the files.
+    fn reassign_fds(&self, msg_control: &mut [u8]) -> Result<()> {
+        let mut received_fds = Vec::new();
+        let result = (|| {
+            for cmsg in CMessages::from_bytes(msg_control) {
+                if let CmsgData::ScmRights(mut scm_rights) = cmsg {
+                    scm_rights.iter_and_reassign_fds(|send_fd| {
+                        let ipc_file = self.sender_file(send_fd)?;
+                        let fd = current!().add_file(ipc_file, false);
+                        received_fds.push(fd);
+                        Ok(fd)
+                    })?;
+                }
+                // Unix credentials need not to be handled here
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            for fd in received_fds {
+                let _ = current!().close_file(fd);
+            }
+        }
+        result
+    }
+
+    /// Returns the file of a file descriptor of the sender, which is the
+    /// thread that connected or accepted. As this is looked up when the
+    /// message is received, the thread may have exited, or closed the
+    /// descriptor, meanwhile. A socket pair does not know its sender.
+    fn sender_file(&self, fd: FileDesc) -> Result<FileRef> {
+        let send_tid = self
+            .peer_ancillary()
+            .ok_or_else(|| errno!(ESRCH, "the sender is unknown"))?
+            .tid();
+        process::table::get_thread(send_tid)?.file(fd)
     }
 
     /// perform shutdown on the socket.

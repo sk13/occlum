@@ -26,6 +26,16 @@ impl<'a> Iterator for CMessages<'a> {
             cmsg.as_ref()?
         };
 
+        // The length is that of the peer, as the control messages travel
+        // within the data of the stream. A message must be at least as long as
+        // its header and must not go beyond the buffer.
+        let offset = cmsg as *const _ as usize - self.buffer.as_ptr() as usize;
+        let cmsg_len = cmsg.cmsg_len as usize;
+        if cmsg_len < unsafe { libc::CMSG_LEN(0) } as usize || cmsg_len > self.buffer.len() - offset
+        {
+            return None;
+        }
+
         self.current = Some(cmsg);
         CmsgData::try_from_cmsghdr(cmsg)
     }
@@ -96,15 +106,17 @@ pub struct ScmRights<'a> {
 
 impl<'a> ScmRights<'a> {
     /// Iterate and reassign each fd in data buffer, given a reassignment function.
-    pub fn iter_and_reassign_fds<F>(&mut self, reassign_fd_fn: F)
+    /// Stops with the error of the function.
+    pub fn iter_and_reassign_fds<F>(&mut self, mut reassign_fd_fn: F) -> Result<()>
     where
-        F: Fn(FileDesc) -> FileDesc,
+        F: FnMut(FileDesc) -> Result<FileDesc>,
     {
         for fd_bytes in self.data.chunks_exact_mut(core::mem::size_of::<FileDesc>()) {
             let old_fd = FileDesc::from_ne_bytes(fd_bytes.try_into().unwrap());
-            let reassigned_fd = reassign_fd_fn(old_fd);
+            let reassigned_fd = reassign_fd_fn(old_fd)?;
             fd_bytes.copy_from_slice(&reassigned_fd.to_ne_bytes());
         }
+        Ok(())
     }
 
     pub fn iter_fds(&self) -> impl Iterator<Item = FileDesc> + '_ {
