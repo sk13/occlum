@@ -29,6 +29,10 @@
 //! - The producer and the consumer never access the same item at the same time, since the
 //!   consumer only reads published items and the producer only writes after the published ones.
 //!
+//! The ends hold a lock of the channel while they copy items, so another thread that asks how many
+//! items are queued, e.g., to tell the events of a channel, would wait for the copy. It asks a
+//! `RingStatus`, which reads the two counters and takes no lock.
+//!
 //! # Spare chunks
 //!
 //! If the consumer freed every chunk that it has read and the producer allocated the next one, a
@@ -158,6 +162,13 @@ impl<T> Ring<T> {
         }
     }
 
+    /// Returns a view of how many items the queue holds.
+    pub fn status(&self) -> RingStatus<T> {
+        RingStatus {
+            shared: self.shared.clone(),
+        }
+    }
+
     /// Splits the queue into its producer and its consumer.
     pub fn split(self) -> (RingProducer<T>, RingConsumer<T>) {
         let producer = RingProducer {
@@ -173,6 +184,47 @@ impl<T> Ring<T> {
             },
         };
         (producer, consumer)
+    }
+}
+
+/// A view of how many items a queue holds, for the threads that only want to know that, e.g., to
+/// poll a channel. It takes no lock of the ends, which are held while the items are copied.
+pub struct RingStatus<T> {
+    shared: Arc<Shared<T>>,
+}
+
+impl<T> Clone for RingStatus<T> {
+    fn clone(&self) -> Self {
+        Self {
+            shared: self.shared.clone(),
+        }
+    }
+}
+
+impl<T> RingStatus<T> {
+    /// Returns the number of items in the queue. If the ends go on while it reads the counters,
+    /// it may be more than the queue holds at any time, but it is never below zero, and it is
+    /// zero only if the queue was empty when the call ended.
+    pub fn len(&self) -> usize {
+        // The number of the popped items is read first: it is never above the number of the
+        // pushed items, which grows, so the difference cannot be negative.
+        let popped = self.shared.popped.load(Ordering::Acquire);
+        let pushed = self.shared.pushed.load(Ordering::Acquire);
+        pushed.wrapping_sub(popped)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Returns the largest number of items that the queue holds.
+    pub fn capacity(&self) -> usize {
+        self.shared.capacity.load(Ordering::Acquire)
+    }
+
+    /// Returns the number of items that the queue has room for.
+    pub fn remaining(&self) -> usize {
+        self.capacity().saturating_sub(self.len())
     }
 }
 

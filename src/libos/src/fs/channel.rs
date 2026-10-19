@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Weak;
 use std::time::Duration;
 
-use self::ring::{NoMemory, PushError, Ring, RingConsumer, RingProducer};
+use self::ring::{NoMemory, PushError, Ring, RingConsumer, RingProducer, RingStatus};
 use super::{IoEvents, IoNotifier};
 use crate::events::{
     Event, EventFilter, Notifier, Observer, Waiter, WaiterQueue, WaiterQueueObserver,
@@ -24,9 +24,11 @@ impl<I> Channel<I> {
         let state = Arc::new(State::new());
 
         // The queue allocates its memory when items are pushed, not here
-        let (ring_producer, ring_consumer) = Ring::new(capacity).split();
-        let mut producer = Producer::new(ring_producer, state.clone());
-        let mut consumer = Consumer::new(ring_consumer, state.clone());
+        let ring = Ring::new(capacity);
+        let status = ring.status();
+        let (ring_producer, ring_consumer) = ring.split();
+        let mut producer = Producer::new(ring_producer, state.clone(), status.clone());
+        let mut consumer = Consumer::new(ring_consumer, state.clone(), status);
 
         // The events on an endpoint is not triggered by itself, but its peer.
         // For example, a producer becomes writable (IoEvents::OUT) only if
@@ -209,6 +211,10 @@ macro_rules! impl_end_point_type {
         /// An endpoint is either the producer or consumer of a channel.
         $(#[$attr])* $vis struct $end_point<$i> {
             inner: SgxMutex<$inner<$i>>,
+            // How many items the queue holds, which the calls that count them read without the
+            // lock of the end: the lock is held while items are copied, and the events of the
+            // other end, which every push and pop triggers, poll the channel.
+            status: RingStatus<$i>,
             state: Arc<State>,
             observer: Arc<WaiterQueueObserver<IoEvents>>,
             notifier: Arc<IoNotifier>,
@@ -217,7 +223,7 @@ macro_rules! impl_end_point_type {
         }
 
         impl<$i> $end_point<$i> {
-            fn new(inner: $inner<$i>, state: Arc<State>) -> Self {
+            fn new(inner: $inner<$i>, state: Arc<State>, status: RingStatus<$i>) -> Self {
                 let inner = SgxMutex::new(inner);
                 let observer = WaiterQueueObserver::new();
                 let notifier = Arc::new(IoNotifier::new());
@@ -225,6 +231,7 @@ macro_rules! impl_end_point_type {
                 let is_nonblocking = AtomicBool::new(false);
                 Self {
                     inner,
+                    status,
                     state,
                     observer,
                     notifier,
@@ -337,10 +344,7 @@ impl<I> Producer<I> {
     pub fn poll(&self) -> IoEvents {
         let mut events = IoEvents::empty();
 
-        let writable = {
-            let mut rb_producer = self.inner.lock().unwrap();
-            !rb_producer.is_full() || self.is_self_shutdown()
-        };
+        let writable = self.status.remaining() > 0 || self.is_self_shutdown();
         if writable {
             events |= IoEvents::OUT;
         }
@@ -386,7 +390,7 @@ impl<I> Producer<I> {
 
     /// Returns the number of items that the channel has room for.
     pub fn room(&self) -> usize {
-        self.inner.lock().unwrap().remaining()
+        self.status.remaining()
     }
 
     /// Changes the number of items that the channel holds. A channel that holds more items than
@@ -543,10 +547,7 @@ impl<I> Consumer<I> {
     pub fn poll(&self) -> IoEvents {
         let mut events = IoEvents::empty();
 
-        let readable = {
-            let mut rb_consumer = self.inner.lock().unwrap();
-            !rb_consumer.is_empty() || self.is_self_shutdown()
-        };
+        let readable = !self.status.is_empty() || self.is_self_shutdown();
         if readable {
             events |= IoEvents::IN;
         }
@@ -583,18 +584,16 @@ impl<I> Consumer<I> {
     }
 
     pub fn items_to_consume(&self) -> usize {
-        self.inner.lock().unwrap().len()
+        self.status.len()
     }
 
     pub fn capacity(&self) -> usize {
-        let rb_consumer = self.inner.lock().unwrap();
-        rb_consumer.capacity()
+        self.status.capacity()
     }
 
     // Get the length of data stored in the buffer
     pub fn ready_len(&self) -> usize {
-        let rb_consumer = self.inner.lock().unwrap();
-        rb_consumer.len()
+        self.status.len()
     }
 
     /// Returns the number of items that were popped since the channel was
