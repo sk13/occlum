@@ -1,0 +1,1619 @@
+create.stream: 0
+create.stream.getfl: nonblock=0 acc=2
+create.stream.getfd: cloexec=0
+create.stream.fstat: SOCK mode=0777 nlink=1 size=0
+create.stream.lseek: -ESPIPE
+create.stream.pread: -ESPIPE
+create.stream.pwrite: -ESPIPE
+create.stream.fionbio: 0
+create.stream.fionbio.state: nonblock=1
+create.stream.fioclex: 0
+create.stream.fioclex.state: cloexec=1
+create.stream.fionclex: 0
+create.stream.fionclex.state: cloexec=0
+create.stream.tcgets: -ENOTTY
+create.stream.isatty: 0
+create.stream.fstat.ino_nonzero: 1 dev_nonzero=1
+create.stream.proc_fd_link: prefix_socket=1
+create.flags: 0 nonblock=1 cloexec=1
+create.flags.clear_nonblock: nonblock=0
+create.flags.setfl_append: 0
+create.flags.setfl_async: 0
+create.flags.getfl_after: nonblock=0
+create.dgram: 0
+create.seqpacket: 0
+create.raw: 0
+create.stream_proto1: 0
+create.stream_proto_unix: 0
+create.type_0: -ESOCKTNOSUPPORT
+create.type_bad: -EINVAL
+create.domain_local: 0
+create.socketpair: 0
+create.socketpair.fstat: SOCK mode=0777 nlink=1 size=0
+create.socketpair.flags: 0
+create.socketpair.flags.state: nonblock=1,1 cloexec=1,1
+create.socketpair.dgram: 0
+create.socketpair.seqpacket: 0
+create.socketpair.inet: -EOPNOTSUPP
+create.socketpair.proto1: 0
+create.socketpair.efault: -EFAULT
+dup.nonblock_shared: orig=1 dup=1
+dup.write_via_dup: 2
+dup.read_peer: 2:hi
+dup.close_orig_dup_alive: 2
+dup.close_orig_peer_ev: IN|OUT
+dup.close_orig_peer_read: 2:yo
+dup.close_orig_peer_read2: -EAGAIN
+dup.shutdown_via_dup_peer_read: 0
+dup.close_all_peer_read: 0
+dup.dupfd_cloexec: ge100=1 cloexec=1
+dup.dup3: 150 cloexec=1
+dup.shutdown_visible_via_dup: write=-EPIPE
+nonsock.bind: -ENOTSOCK
+nonsock.listen: -ENOTSOCK
+nonsock.accept: -ENOTSOCK
+nonsock.connect: -ENOTSOCK
+nonsock.shutdown: -ENOTSOCK
+nonsock.getsockname: -ENOTSOCK
+nonsock.getpeername: -ENOTSOCK
+nonsock.getsockopt: -ENOTSOCK
+nonsock.setsockopt: -ENOTSOCK
+nonsock.send: -ENOTSOCK
+nonsock.recv: -ENOTSOCK
+nonsock.sendmsg: -ENOTSOCK
+nonsock.recvmsg: -ENOTSOCK
+badfd.bind: -EBADF
+badfd.listen: -EBADF
+badfd.accept: -EBADF
+badfd.connect: -EBADF
+badfd.shutdown: -EBADF
+badfd.getsockname: -EBADF
+badfd.getsockopt: -EBADF
+badfd.send: -EBADF
+badfd.recv: -EBADF
+bind.path.len_sockaddr_un: 0
+bind.path.len_exact_nul: 0
+bind.path.len_sun_len_no_nul: 0
+bind.path.len_one_past_nul: 0
+bind.path.len_sun_len_no_nul.getsockname: bind=0 len=35(exact+1=1) same=1
+bind.path.107_chars.len_full: 0
+bind.path.107_chars.len_sun_len: 0
+bind.path.108_chars_no_nul: 0
+bind.path.108_chars.getsockname: bind=0 gsn=0 len=111
+bind.len_gt_sockaddr_un: -EINVAL
+bind.len_gt_sockaddr_un_64: -EINVAL
+bind.len_0: -EINVAL
+bind.len_1: -EINVAL
+bind.len_2.autobind: 0
+bind.len_3.path_first_byte: -EADDRINUSE
+bind.null_addr: -EINVAL
+bind.null_addr_len: -EFAULT
+bind.family_inet: -EINVAL
+bind.family_unspec: -EINVAL
+bind.family_local: 0
+bind.abstract.single_nul: 0
+bind.abstract.single_nul.again: -EADDRINUSE
+bind.abstract.a_b: 0
+bind.abstract.a_b.again: -EADDRINUSE
+bind.abstract.a_c: 0
+bind.abstract.a_c.again: -EADDRINUSE
+bind.abstract.ab: 0
+bind.abstract.ab.again: -EADDRINUSE
+bind.abstract.abc: 0
+bind.abstract.abc.again: -EADDRINUSE
+bind.abstract.ab_nul: 0
+bind.abstract.ab_nul.again: -EADDRINUSE
+bind.abstract.ab_nul_nul: 0
+bind.abstract.ab_nul_nul.again: -EADDRINUSE
+bind.abstract.max_len: 0
+bind.abstract.first: 0
+bind.abstract.after_close: 0
+bind.path.first: 0
+bind.path.second_socket: -EADDRINUSE
+bind.path.twice_same_socket: -EADDRINUSE
+bind.path.rebind_other_name_same_socket: -EINVAL
+bind.path.file_exists: SOCK mode=0755 nlink=1 size=0
+bind.path.after_close_stat: SOCK mode=0755 nlink=1 size=0
+bind.path.after_close_rebind_no_unlink: -EADDRINUSE
+bind.path.after_close_unlink: 0
+bind.path.after_unlink_rebind: 0
+bind.path.bound_stat: SOCK mode=0755 nlink=1 size=0
+bind.path.listener: 1
+bind.path.listener_closed_stat: SOCK mode=0755 nlink=1 size=0
+bind.path.listener_closed_rebind: -EADDRINUSE
+bind.path.listener_closed_connect: -ECONNREFUSED
+bind.path.existing_regular_file: -EADDRINUSE
+bind.path.existing_regular_file.still_regular: REG mode=0644 nlink=1 size=0
+connect.path.regular_file: -ECONNREFUSED
+bind.path.existing_dir: -EADDRINUSE
+connect.path.dir: -ECONNREFUSED
+bind.path.in_new_dir: 0
+bind.path.dir_dotdot_dir_itself: -EADDRINUSE
+bind.path.missing_dir: -ENOENT
+connect.path.missing_dir: -ENOENT
+bind.path.parent_is_file: -ENOTDIR
+connect.path.parent_is_file: -ENOTDIR
+bind.path.symlink_dangling: -EADDRINUSE
+bind.path.spell.first: 0
+bind.path.spell.dot: -EADDRINUSE
+bind.path.spell.connect_dot_before_listen: -ECONNREFUSED
+bind.path.spell.connect_dot: 0
+bind.path.mode_umask022: SOCK mode=0755 nlink=1 size=0
+bind.path.mode_umask077: SOCK mode=0700 nlink=1 size=0
+bind.on_socketpair_end: 0
+bind.on_connected_client: 0
+bind.on_accepted: -EADDRINUSE
+bind.on_listening: -EINVAL
+bind.rel.chdir: 0
+bind.rel.bind: 0
+bind.rel.connect_abs: 0
+bind.rel.connect_rel: 0
+bind.rel.getsockname: len_ok=1 is_rel=1
+bind.rel.peername_of_client: is_rel=1
+bind.rel.connect_rel_other_cwd: -ENOENT
+files.unlink.ok: 0
+files.unlink.new_connect: -ENOENT
+files.unlink.pending_accepted: 0
+files.unlink.pending_works: 2
+files.unlink.pending_read: 2:hi
+files.unlink.getsockname: fam=1 len=31 kind=path same_as_expected=1
+files.unlink.getpeername: fam=1 len=31 kind=path same_as_expected=1
+files.unlink.rebind_other_socket: bind=0 connect=0 accepted_by_new=1 accepted_by_old=0
+files.rename.ok: 0
+files.rename.connect_new_name: 0
+files.rename.connect_old_name: -ENOENT
+files.rename.getsockname: fam=1 len=31 kind=path same_as_expected=1
+files.rename.peername_of_client: fam=1 len=31 kind=path same_as_expected=0
+files.rename.accepted: 0
+files.symlink.connect: 0
+files.symlink.stat_follow: SOCK mode=0755 nlink=1 size=0
+files.symlink.lstat: LNK mode=0777 nlink=1 size=28
+files.hardlink.link: 0
+files.hardlink.connect: 0
+files.hardlink.stat: SOCK mode=0755 nlink=2 size=0
+files.open_socket_file: -ENXIO
+files.open_socket_file_wronly: -ENXIO
+files.truncate_socket_file: -EINVAL
+files.chmod_socket_file: 0
+files.chmod_socket_file.stat: SOCK mode=0600 nlink=2 size=0
+files.after_close.connect_via_symlink: -ECONNREFUSED
+files.after_close.connect_via_hardlink: -ECONNREFUSED
+files.unlink_connected.read: 2:ab
+files.unlink_connected.read_after_listener_close: 2:cd
+files.unlink_connected.ev: OUT
+files.name_reuse_after_unlink_reaches_new_listener: 20/20
+gsn.unbound: fam=1 len=2 kind=unnamed same_as_expected=-1
+gpn.unbound: -ENOTCONN
+gsn.bound_path: fam=1 len=31 kind=path same_as_expected=1
+gpn.bound_path: -ENOTCONN
+gsn.listening_path: fam=1 len=31 kind=path same_as_expected=1
+gpn.listening_path: -ENOTCONN
+gsn.bound_abstract: fam=1 len=26 kind=abstract same_as_expected=1
+gpn.bound_abstract: -ENOTCONN
+gsn.truncated_buf4: 0 len=26 fam=1 next=0x75
+gsn.buf0: 0 len=26
+gsn.buf1: 0 len=26
+gsn.null_null: -EFAULT
+gsn.addr_nulllen: -EFAULT
+autobind.bind: 0
+autobind.getsockname: 0 len=8 first_nul=1 hex5=1
+autobind.listen: 0
+gsn.client_unbound: fam=1 len=2 kind=unnamed same_as_expected=-1
+gpn.client: fam=1 len=29 kind=path same_as_expected=1
+accept.addr_unbound_client: fam=1 len=2 kind=unnamed same_as_expected=-1
+gsn.accepted: fam=1 len=29 kind=path same_as_expected=1
+gpn.accepted_unbound_client: fam=1 len=2 kind=unnamed same_as_expected=-1
+accept.addr_bound_client: fam=1 len=26 kind=abstract same_as_expected=1
+gpn.accepted_bound_client: fam=1 len=26 kind=abstract same_as_expected=1
+gsn.client_bound: fam=1 len=26 kind=abstract same_as_expected=1
+gpn.client_bound: fam=1 len=24 kind=abstract same_as_expected=1
+accept.addr_truncated: 0 len=27
+accept.null_addr_with_len: 0
+gsn.socketpair: fam=1 len=2 kind=unnamed same_as_expected=-1
+gpn.socketpair: fam=1 len=2 kind=unnamed same_as_expected=-1
+connect.path_missing: -ENOENT
+connect.abstract_missing: -ECONNREFUSED
+connect.abstract_missing.state_after: gpn=-ENOTCONN
+connect.path_bound_not_listening: -ECONNREFUSED
+connect.abstract_bound_not_listening: -ECONNREFUSED
+connect.path_stale_file: -ECONNREFUSED
+connect.ok: 0
+connect.twice_same_listener: -EISCONN
+connect.twice_other_listener: -EISCONN
+connect.after_connect_getpeername: fam=1 len=29 kind=path same_as_expected=1
+connect.on_socketpair_end: -EISCONN
+connect.listener_to_itself: -EINVAL
+connect.listening_socket_to_itself: -EINVAL
+connect.bound_socket_to_itself: -ECONNREFUSED
+connect.len_sun_len_no_nul: 0
+connect.len_sockaddr_un: 0
+connect.len_0: -EINVAL
+connect.len_1: -EINVAL
+connect.len_2: -EINVAL
+connect.len_gt_max: -EINVAL
+connect.null_addr: -EINVAL
+connect.null_addr_len: -EFAULT
+connect.family_inet: -EINVAL
+connect.family_unspec: -EINVAL
+connect.after_errors_ok: 0
+connect.listener_closed_pending.ev: IN|OUT|ERR|HUP|RDHUP
+connect.listener_closed_pending.read: -ECONNRESET
+connect.listener_closed_pending.read2: 0
+connect.listener_closed_pending.write: -EPIPE
+connect.listener_closed_pending.so_error: 0(len=4)
+connect.after_listener_closed: -ECONNREFUSED
+connect.relisten_same_abstract_name: 1
+connect.write_close_before_accept.accept: 0
+connect.write_close_before_accept.read1: 5:early
+connect.write_close_before_accept.read2: 0
+connect.write_close_before_accept.ev: IN|OUT|HUP|RDHUP
+connect.write_close_before_accept.write: -EPIPE
+connect.cycles40: 40
+listen.unbound: -EINVAL
+listen.unbound.accept: -EINVAL
+listen.unbound.acceptconn: 0(len=4)
+listen.acceptconn_before: 0(len=4)
+listen.accept_bound_not_listening: -EINVAL
+listen.first: 0
+listen.acceptconn_after: 1(len=4)
+listen.again: 0
+listen.again_backlog0: 0
+listen.again_negative: 0
+listen.again_huge: 0
+listen.backlog_-2: 0
+listen.backlog_0: 0
+listen.backlog_2: 0
+listen.backlog_int_max: 0
+listen.on_client: -EINVAL
+listen.on_accepted: 0
+listen.on_socketpair: -EINVAL
+accept.on_socketpair: -EINVAL
+accept.empty_nonblocking: -EAGAIN
+accept.invalid_flags: -EINVAL
+accept4.nonblock_cloexec: 0 nonblock=1 cloexec=1
+accept4.nonblock.read: -EAGAIN
+accept4.no_flags: 0 nonblock=0 cloexec=0
+accept.listener_nonblock_not_inherited: accepted_nonblock=0
+accept.client_nonblock: 0
+accept.fifo_order: 123
+accept.independent.s1: 3:one
+accept.independent.s2: 3:two
+accept.independent.after_close_s1.s2_write: 2
+accept.independent.after_close_s1.c2_read: 2:ok
+backlog.count.bl1: n=2 err=EAGAIN
+backlog.accepted.bl1: 2
+backlog.count.bl2: n=3 err=EAGAIN
+backlog.accepted.bl2: 3
+backlog.count.bl5: n=6 err=EAGAIN
+backlog.accepted.bl5: 6
+backlog.count.bl-1: n=24(cap) err=none
+backlog.accepted.bl-1: 24
+backlog.count.bl0: n=1 err=EAGAIN
+backlog.room_after_accept: full_at=3 accept=0 connect=0
+backlog.blocking_connect_full: 0 elapsed=waited_for_accept
+backlog.shrink.listen: 0
+backlog.shrink.accepted_of_4_waiting: 4
+backlog.shrink.waiting_clients_read: -EAGAIN -EAGAIN -EAGAIN -EAGAIN
+backlog.grow.listen: 0
+backlog.grow.count: n=11 err=EAGAIN
+io.write_read: 5
+io.read_partial: 2:he
+io.read_rest: 3:llo
+io.read_empty_nb: -EAGAIN
+io.read_zero_len_empty: 0
+io.read_zero_len_data: 0
+io.write_zero_len: 0
+io.write_zero_len_send: 0
+io.write_null_zero: 0
+io.write_efault: -EFAULT
+io.read_efault: -EFAULT
+io.read_after_efault: 3:xyz
+io.send_efault: -EFAULT
+io.read_after_send_efault: -EAGAIN
+io.writev: 6
+io.readv: 6
+io.readv.data: abc|def
+io.writev_zero_iov: 0
+io.writev_all_empty: 0
+io.readv_zero_iov: 0
+io.fionread.after_write: 0 n=7
+io.fionread.after_read3: 0 n=4
+io.fionread.sender_side: 0 n=0
+io.siocoutq.sender: 0
+io.fionread.empty: 0 n=0
+io.fionread.idle: 0 n=0
+io.fionread.listening: -EINVAL n=-1
+io.fionread.after_self_shut_rd: 0 n=0
+io.blocking_write_1MB_with_reader: full
+io.nonblocking_write_1MB.partial: partial
+io.nonblocking_write_then_more: -EAGAIN
+io.nonblocking_write_1MB.drained_equals_written: 1
+io.nonblocking_write_after_drain: 10
+io.bulk_8MB.received: all bad=0
+io.small_messages_stream: total=400 first=000, last=099,
+io.sendfile_to_socket: 50 off=10
+io.sendfile_to_socket.read: 50:KLMNOPQR
+io.idle.read: -EINVAL
+io.idle.write: -ENOTCONN
+io.idle.recv: -EINVAL
+io.idle.send: -ENOTCONN
+io.idle.read_zero: 0
+io.idle.write_zero: -ENOTCONN
+flags.recv_dontwait_empty_blocking_socket: -EAGAIN
+flags.send_dontwait_full_blocking_socket: -EAGAIN
+flags.recv_peek: 3:abc
+flags.recv_after_peek: 6:abcdef
+flags.recv_peek_empty: -EAGAIN
+flags.peek_does_not_consume_fionread: 0 n=6
+flags.recv_peek_larger_than_data: 6:abcdef
+flags.recv_waitall: 10 waited
+flags.recv_waitall_eof_in_middle: 2
+flags.send_oob: 1
+flags.recv_oob: 1
+flags.recv_normal_after_oob: -EAGAIN
+flags.sockatmark: 0 mark=0
+flags.recv_flags_msg_trunc: 1
+flags.recv_flags_cmsg_cloexec: 1
+flags.recv_flags_errqueue: -EAGAIN
+flags.send_flags_more: 1
+flags.send_flags_confirm: 1
+flags.send_flags_bogus_bit: 1
+addr.sendto_with_addr_on_connected: -EISCONN
+addr.sendto_with_addr_on_connected.same_addr_as_peer: -EISCONN
+addr.recvfrom_named_peer: 1 addrlen=35
+addr.recvfrom_unnamed_peer_listener: 1 addrlen=24
+addr.recvmsg_named_peer: 1 namelen=35 flags=0x0
+addr.sendmsg_with_name_on_connected: -EISCONN
+addr.sendto_unconnected_with_addr: -EOPNOTSUPP
+addr.sendto_unconnected_no_addr: -ENOTCONN
+addr.sendto_addr_len_mismatch: -ENOTCONN
+msg.sendmsg_2iov: 5
+msg.recvmsg_2iov: 5 flags=0x1234 controllen=0
+msg.recvmsg_empty_nb: -EAGAIN
+msg.recvmsg_buffer_smaller_than_data: 3 flags=0x0
+msg.recvmsg_rest: 3:def
+msg.sendmsg_no_iov: 0
+msg.sendmsg_efault_iov: -EFAULT
+msg.recvmsg_efault_iov: -EFAULT
+msg.sendmmsg: 1
+msg.recvmmsg: 1
+shut.idle.pre.a_ev: OUT|HUP
+shut.bound.pre.a_ev: OUT|HUP
+shut.listening.pre.a_ev: 0
+shut.sp.pre.a_ev: OUT
+shut.sp.pre.b_ev: OUT
+shut.client.pre.a_ev: OUT
+shut.client.pre.b_ev: OUT
+shut.accepted.pre.a_ev: OUT
+shut.accepted.pre.b_ev: OUT
+shut.peer_closed.pre.a_ev: IN|OUT|HUP|RDHUP
+shut.peer_shut_wr.pre.a_ev: IN|OUT|RDHUP
+shut.peer_shut_wr.pre.b_ev: OUT
+shut.peer_shut_rd.pre.a_ev: OUT
+shut.peer_shut_rd.pre.b_ev: IN|OUT|RDHUP
+shut.self_shut_wr.pre.a_ev: OUT
+shut.self_shut_wr.pre.b_ev: IN|OUT|RDHUP
+shut.self_shut_rd.pre.a_ev: IN|OUT|RDHUP
+shut.self_shut_rd.pre.b_ev: OUT
+shut.pending.pre.a_ev: OUT
+shut.data_at_a.pre.a_ev: IN|OUT
+shut.data_at_a.pre.b_ev: OUT
+shut.data_at_b.pre.a_ev: OUT
+shut.data_at_b.pre.b_ev: IN|OUT
+shut.a_full.pre.a_ev: 0
+shut.a_full.pre.b_ev: IN|OUT
+shut.b_full.pre.a_ev: IN|OUT
+shut.b_full.pre.b_ev: 0
+shut.peer_closed_data.pre.a_ev: IN|OUT|HUP|RDHUP
+shut.idle.rd.rc: 0
+shut.idle.rd.a_ev: IN|OUT|HUP|RDHUP
+shut.idle.rd.a_read: -EINVAL
+shut.idle.rd.a_write: -ENOTCONN
+shut.idle.rd.again: 0
+shut.idle.rd.other_how: 0
+shut.idle.wr.rc: 0
+shut.idle.wr.a_ev: OUT|HUP
+shut.idle.wr.a_read: -EINVAL
+shut.idle.wr.a_write: -ENOTCONN
+shut.idle.wr.again: 0
+shut.idle.wr.other_how: 0
+shut.idle.rdwr.rc: 0
+shut.idle.rdwr.a_ev: IN|OUT|HUP|RDHUP
+shut.idle.rdwr.a_read: -EINVAL
+shut.idle.rdwr.a_write: -ENOTCONN
+shut.idle.rdwr.again: 0
+shut.idle.rdwr.other_how: 0
+shut.bound.rd.rc: 0
+shut.bound.rd.a_ev: IN|OUT|HUP|RDHUP
+shut.bound.rd.a_read: -EINVAL
+shut.bound.rd.a_write: -ENOTCONN
+shut.bound.rd.again: 0
+shut.bound.rd.other_how: 0
+shut.bound.wr.rc: 0
+shut.bound.wr.a_ev: OUT|HUP
+shut.bound.wr.a_read: -EINVAL
+shut.bound.wr.a_write: -ENOTCONN
+shut.bound.wr.again: 0
+shut.bound.wr.other_how: 0
+shut.bound.rdwr.rc: 0
+shut.bound.rdwr.a_ev: IN|OUT|HUP|RDHUP
+shut.bound.rdwr.a_read: -EINVAL
+shut.bound.rdwr.a_write: -ENOTCONN
+shut.bound.rdwr.again: 0
+shut.bound.rdwr.other_how: 0
+shut.listening.rd.rc: 0
+shut.listening.rd.a_ev: IN|RDHUP
+shut.listening.rd.a_read: -EINVAL
+shut.listening.rd.a_write: -ENOTCONN
+shut.listening.rd.new_connect: -ECONNREFUSED
+shut.listening.rd.accept: -EAGAIN
+shut.listening.rd.again: 0
+shut.listening.rd.other_how: 0
+shut.listening.wr.rc: 0
+shut.listening.wr.a_ev: 0
+shut.listening.wr.a_read: -EINVAL
+shut.listening.wr.a_write: -ENOTCONN
+shut.listening.wr.new_connect: 0
+shut.listening.wr.accept: 0
+shut.listening.wr.again: 0
+shut.listening.wr.other_how: 0
+shut.listening.rdwr.rc: 0
+shut.listening.rdwr.a_ev: IN|HUP|RDHUP
+shut.listening.rdwr.a_read: -EINVAL
+shut.listening.rdwr.a_write: -ENOTCONN
+shut.listening.rdwr.new_connect: -ECONNREFUSED
+shut.listening.rdwr.accept: -EAGAIN
+shut.listening.rdwr.again: 0
+shut.listening.rdwr.other_how: 0
+shut.sp.rd.rc: 0
+shut.sp.rd.a_ev: IN|OUT|RDHUP
+shut.sp.rd.b_ev: OUT
+shut.sp.rd.a_read: 0
+shut.sp.rd.a_write: 1
+shut.sp.rd.b_read: 1:w
+shut.sp.rd.b_write: -EPIPE
+shut.sp.rd.a_read2: 0
+shut.sp.rd.again: 0
+shut.sp.rd.other_how: 0
+shut.sp.wr.rc: 0
+shut.sp.wr.a_ev: OUT
+shut.sp.wr.b_ev: IN|OUT|RDHUP
+shut.sp.wr.a_read: -EAGAIN
+shut.sp.wr.a_write: -EPIPE
+shut.sp.wr.b_read: 0
+shut.sp.wr.b_write: 1
+shut.sp.wr.a_read2: 1:v
+shut.sp.wr.again: 0
+shut.sp.wr.other_how: 0
+shut.sp.rdwr.rc: 0
+shut.sp.rdwr.a_ev: IN|OUT|HUP|RDHUP
+shut.sp.rdwr.b_ev: IN|OUT|HUP|RDHUP
+shut.sp.rdwr.a_read: 0
+shut.sp.rdwr.a_write: -EPIPE
+shut.sp.rdwr.b_read: 0
+shut.sp.rdwr.b_write: -EPIPE
+shut.sp.rdwr.a_read2: 0
+shut.sp.rdwr.again: 0
+shut.sp.rdwr.other_how: 0
+shut.client.rd.rc: 0
+shut.client.rd.a_ev: IN|OUT|RDHUP
+shut.client.rd.b_ev: OUT
+shut.client.rd.a_read: 0
+shut.client.rd.a_write: 1
+shut.client.rd.b_read: 1:w
+shut.client.rd.b_write: -EPIPE
+shut.client.rd.a_read2: 0
+shut.client.rd.again: 0
+shut.client.rd.other_how: 0
+shut.client.wr.rc: 0
+shut.client.wr.a_ev: OUT
+shut.client.wr.b_ev: IN|OUT|RDHUP
+shut.client.wr.a_read: -EAGAIN
+shut.client.wr.a_write: -EPIPE
+shut.client.wr.b_read: 0
+shut.client.wr.b_write: 1
+shut.client.wr.a_read2: 1:v
+shut.client.wr.again: 0
+shut.client.wr.other_how: 0
+shut.client.rdwr.rc: 0
+shut.client.rdwr.a_ev: IN|OUT|HUP|RDHUP
+shut.client.rdwr.b_ev: IN|OUT|HUP|RDHUP
+shut.client.rdwr.a_read: 0
+shut.client.rdwr.a_write: -EPIPE
+shut.client.rdwr.b_read: 0
+shut.client.rdwr.b_write: -EPIPE
+shut.client.rdwr.a_read2: 0
+shut.client.rdwr.again: 0
+shut.client.rdwr.other_how: 0
+shut.accepted.rd.rc: 0
+shut.accepted.rd.a_ev: IN|OUT|RDHUP
+shut.accepted.rd.b_ev: OUT
+shut.accepted.rd.a_read: 0
+shut.accepted.rd.a_write: 1
+shut.accepted.rd.b_read: 1:w
+shut.accepted.rd.b_write: -EPIPE
+shut.accepted.rd.a_read2: 0
+shut.accepted.rd.again: 0
+shut.accepted.rd.other_how: 0
+shut.accepted.wr.rc: 0
+shut.accepted.wr.a_ev: OUT
+shut.accepted.wr.b_ev: IN|OUT|RDHUP
+shut.accepted.wr.a_read: -EAGAIN
+shut.accepted.wr.a_write: -EPIPE
+shut.accepted.wr.b_read: 0
+shut.accepted.wr.b_write: 1
+shut.accepted.wr.a_read2: 1:v
+shut.accepted.wr.again: 0
+shut.accepted.wr.other_how: 0
+shut.accepted.rdwr.rc: 0
+shut.accepted.rdwr.a_ev: IN|OUT|HUP|RDHUP
+shut.accepted.rdwr.b_ev: IN|OUT|HUP|RDHUP
+shut.accepted.rdwr.a_read: 0
+shut.accepted.rdwr.a_write: -EPIPE
+shut.accepted.rdwr.b_read: 0
+shut.accepted.rdwr.b_write: -EPIPE
+shut.accepted.rdwr.a_read2: 0
+shut.accepted.rdwr.again: 0
+shut.accepted.rdwr.other_how: 0
+shut.peer_closed.rd.rc: 0
+shut.peer_closed.rd.a_ev: IN|OUT|HUP|RDHUP
+shut.peer_closed.rd.a_read: 0
+shut.peer_closed.rd.a_write: -EPIPE
+shut.peer_closed.rd.again: 0
+shut.peer_closed.rd.other_how: 0
+shut.peer_closed.wr.rc: 0
+shut.peer_closed.wr.a_ev: IN|OUT|HUP|RDHUP
+shut.peer_closed.wr.a_read: 0
+shut.peer_closed.wr.a_write: -EPIPE
+shut.peer_closed.wr.again: 0
+shut.peer_closed.wr.other_how: 0
+shut.peer_closed.rdwr.rc: 0
+shut.peer_closed.rdwr.a_ev: IN|OUT|HUP|RDHUP
+shut.peer_closed.rdwr.a_read: 0
+shut.peer_closed.rdwr.a_write: -EPIPE
+shut.peer_closed.rdwr.again: 0
+shut.peer_closed.rdwr.other_how: 0
+shut.peer_shut_wr.rd.rc: 0
+shut.peer_shut_wr.rd.a_ev: IN|OUT|RDHUP
+shut.peer_shut_wr.rd.b_ev: OUT
+shut.peer_shut_wr.rd.a_read: 0
+shut.peer_shut_wr.rd.a_write: 1
+shut.peer_shut_wr.rd.b_read: 1:w
+shut.peer_shut_wr.rd.b_write: -EPIPE
+shut.peer_shut_wr.rd.a_read2: 0
+shut.peer_shut_wr.rd.again: 0
+shut.peer_shut_wr.rd.other_how: 0
+shut.peer_shut_wr.wr.rc: 0
+shut.peer_shut_wr.wr.a_ev: IN|OUT|HUP|RDHUP
+shut.peer_shut_wr.wr.b_ev: IN|OUT|HUP|RDHUP
+shut.peer_shut_wr.wr.a_read: 0
+shut.peer_shut_wr.wr.a_write: -EPIPE
+shut.peer_shut_wr.wr.b_read: 0
+shut.peer_shut_wr.wr.b_write: -EPIPE
+shut.peer_shut_wr.wr.a_read2: 0
+shut.peer_shut_wr.wr.again: 0
+shut.peer_shut_wr.wr.other_how: 0
+shut.peer_shut_wr.rdwr.rc: 0
+shut.peer_shut_wr.rdwr.a_ev: IN|OUT|HUP|RDHUP
+shut.peer_shut_wr.rdwr.b_ev: IN|OUT|HUP|RDHUP
+shut.peer_shut_wr.rdwr.a_read: 0
+shut.peer_shut_wr.rdwr.a_write: -EPIPE
+shut.peer_shut_wr.rdwr.b_read: 0
+shut.peer_shut_wr.rdwr.b_write: -EPIPE
+shut.peer_shut_wr.rdwr.a_read2: 0
+shut.peer_shut_wr.rdwr.again: 0
+shut.peer_shut_wr.rdwr.other_how: 0
+shut.peer_shut_rd.rd.rc: 0
+shut.peer_shut_rd.rd.a_ev: IN|OUT|HUP|RDHUP
+shut.peer_shut_rd.rd.b_ev: IN|OUT|HUP|RDHUP
+shut.peer_shut_rd.rd.a_read: 0
+shut.peer_shut_rd.rd.a_write: -EPIPE
+shut.peer_shut_rd.rd.b_read: 0
+shut.peer_shut_rd.rd.b_write: -EPIPE
+shut.peer_shut_rd.rd.a_read2: 0
+shut.peer_shut_rd.rd.again: 0
+shut.peer_shut_rd.rd.other_how: 0
+shut.peer_shut_rd.wr.rc: 0
+shut.peer_shut_rd.wr.a_ev: OUT
+shut.peer_shut_rd.wr.b_ev: IN|OUT|RDHUP
+shut.peer_shut_rd.wr.a_read: -EAGAIN
+shut.peer_shut_rd.wr.a_write: -EPIPE
+shut.peer_shut_rd.wr.b_read: 0
+shut.peer_shut_rd.wr.b_write: 1
+shut.peer_shut_rd.wr.a_read2: 1:v
+shut.peer_shut_rd.wr.again: 0
+shut.peer_shut_rd.wr.other_how: 0
+shut.peer_shut_rd.rdwr.rc: 0
+shut.peer_shut_rd.rdwr.a_ev: IN|OUT|HUP|RDHUP
+shut.peer_shut_rd.rdwr.b_ev: IN|OUT|HUP|RDHUP
+shut.peer_shut_rd.rdwr.a_read: 0
+shut.peer_shut_rd.rdwr.a_write: -EPIPE
+shut.peer_shut_rd.rdwr.b_read: 0
+shut.peer_shut_rd.rdwr.b_write: -EPIPE
+shut.peer_shut_rd.rdwr.a_read2: 0
+shut.peer_shut_rd.rdwr.again: 0
+shut.peer_shut_rd.rdwr.other_how: 0
+shut.self_shut_wr.rd.rc: 0
+shut.self_shut_wr.rd.a_ev: IN|OUT|HUP|RDHUP
+shut.self_shut_wr.rd.b_ev: IN|OUT|HUP|RDHUP
+shut.self_shut_wr.rd.a_read: 0
+shut.self_shut_wr.rd.a_write: -EPIPE
+shut.self_shut_wr.rd.b_read: 0
+shut.self_shut_wr.rd.b_write: -EPIPE
+shut.self_shut_wr.rd.a_read2: 0
+shut.self_shut_wr.rd.again: 0
+shut.self_shut_wr.rd.other_how: 0
+shut.self_shut_wr.wr.rc: 0
+shut.self_shut_wr.wr.a_ev: OUT
+shut.self_shut_wr.wr.b_ev: IN|OUT|RDHUP
+shut.self_shut_wr.wr.a_read: -EAGAIN
+shut.self_shut_wr.wr.a_write: -EPIPE
+shut.self_shut_wr.wr.b_read: 0
+shut.self_shut_wr.wr.b_write: 1
+shut.self_shut_wr.wr.a_read2: 1:v
+shut.self_shut_wr.wr.again: 0
+shut.self_shut_wr.wr.other_how: 0
+shut.self_shut_wr.rdwr.rc: 0
+shut.self_shut_wr.rdwr.a_ev: IN|OUT|HUP|RDHUP
+shut.self_shut_wr.rdwr.b_ev: IN|OUT|HUP|RDHUP
+shut.self_shut_wr.rdwr.a_read: 0
+shut.self_shut_wr.rdwr.a_write: -EPIPE
+shut.self_shut_wr.rdwr.b_read: 0
+shut.self_shut_wr.rdwr.b_write: -EPIPE
+shut.self_shut_wr.rdwr.a_read2: 0
+shut.self_shut_wr.rdwr.again: 0
+shut.self_shut_wr.rdwr.other_how: 0
+shut.self_shut_rd.rd.rc: 0
+shut.self_shut_rd.rd.a_ev: IN|OUT|RDHUP
+shut.self_shut_rd.rd.b_ev: OUT
+shut.self_shut_rd.rd.a_read: 0
+shut.self_shut_rd.rd.a_write: 1
+shut.self_shut_rd.rd.b_read: 1:w
+shut.self_shut_rd.rd.b_write: -EPIPE
+shut.self_shut_rd.rd.a_read2: 0
+shut.self_shut_rd.rd.again: 0
+shut.self_shut_rd.rd.other_how: 0
+shut.self_shut_rd.wr.rc: 0
+shut.self_shut_rd.wr.a_ev: IN|OUT|HUP|RDHUP
+shut.self_shut_rd.wr.b_ev: IN|OUT|HUP|RDHUP
+shut.self_shut_rd.wr.a_read: 0
+shut.self_shut_rd.wr.a_write: -EPIPE
+shut.self_shut_rd.wr.b_read: 0
+shut.self_shut_rd.wr.b_write: -EPIPE
+shut.self_shut_rd.wr.a_read2: 0
+shut.self_shut_rd.wr.again: 0
+shut.self_shut_rd.wr.other_how: 0
+shut.self_shut_rd.rdwr.rc: 0
+shut.self_shut_rd.rdwr.a_ev: IN|OUT|HUP|RDHUP
+shut.self_shut_rd.rdwr.b_ev: IN|OUT|HUP|RDHUP
+shut.self_shut_rd.rdwr.a_read: 0
+shut.self_shut_rd.rdwr.a_write: -EPIPE
+shut.self_shut_rd.rdwr.b_read: 0
+shut.self_shut_rd.rdwr.b_write: -EPIPE
+shut.self_shut_rd.rdwr.a_read2: 0
+shut.self_shut_rd.rdwr.again: 0
+shut.self_shut_rd.rdwr.other_how: 0
+shut.pending.rd.rc: 0
+shut.pending.rd.a_ev: IN|OUT|RDHUP
+shut.pending.rd.a_read: 0
+shut.pending.rd.a_write: 1
+shut.pending.rd.again: 0
+shut.pending.rd.other_how: 0
+shut.pending.wr.rc: 0
+shut.pending.wr.a_ev: OUT
+shut.pending.wr.a_read: -EAGAIN
+shut.pending.wr.a_write: -EPIPE
+shut.pending.wr.again: 0
+shut.pending.wr.other_how: 0
+shut.pending.rdwr.rc: 0
+shut.pending.rdwr.a_ev: IN|OUT|HUP|RDHUP
+shut.pending.rdwr.a_read: 0
+shut.pending.rdwr.a_write: -EPIPE
+shut.pending.rdwr.again: 0
+shut.pending.rdwr.other_how: 0
+shut.data_at_a.rd.rc: 0
+shut.data_at_a.rd.a_ev: IN|OUT|RDHUP
+shut.data_at_a.rd.b_ev: OUT
+shut.data_at_a.rd.a_read: 1:x
+shut.data_at_a.rd.a_write: 1
+shut.data_at_a.rd.b_read: 1:w
+shut.data_at_a.rd.b_write: -EPIPE
+shut.data_at_a.rd.a_read2: 0
+shut.data_at_a.rd.again: 0
+shut.data_at_a.rd.other_how: 0
+shut.data_at_a.wr.rc: 0
+shut.data_at_a.wr.a_ev: IN|OUT
+shut.data_at_a.wr.b_ev: IN|OUT|RDHUP
+shut.data_at_a.wr.a_read: 1:x
+shut.data_at_a.wr.a_write: -EPIPE
+shut.data_at_a.wr.b_read: 0
+shut.data_at_a.wr.b_write: 1
+shut.data_at_a.wr.a_read2: 1:v
+shut.data_at_a.wr.again: 0
+shut.data_at_a.wr.other_how: 0
+shut.data_at_a.rdwr.rc: 0
+shut.data_at_a.rdwr.a_ev: IN|OUT|HUP|RDHUP
+shut.data_at_a.rdwr.b_ev: IN|OUT|HUP|RDHUP
+shut.data_at_a.rdwr.a_read: 1:x
+shut.data_at_a.rdwr.a_write: -EPIPE
+shut.data_at_a.rdwr.b_read: 0
+shut.data_at_a.rdwr.b_write: -EPIPE
+shut.data_at_a.rdwr.a_read2: 0
+shut.data_at_a.rdwr.again: 0
+shut.data_at_a.rdwr.other_how: 0
+shut.data_at_b.rd.rc: 0
+shut.data_at_b.rd.a_ev: IN|OUT|RDHUP
+shut.data_at_b.rd.b_ev: IN|OUT
+shut.data_at_b.rd.a_read: 0
+shut.data_at_b.rd.a_write: 1
+shut.data_at_b.rd.b_read: 2:xw
+shut.data_at_b.rd.b_write: -EPIPE
+shut.data_at_b.rd.a_read2: 0
+shut.data_at_b.rd.again: 0
+shut.data_at_b.rd.other_how: 0
+shut.data_at_b.wr.rc: 0
+shut.data_at_b.wr.a_ev: OUT
+shut.data_at_b.wr.b_ev: IN|OUT|RDHUP
+shut.data_at_b.wr.a_read: -EAGAIN
+shut.data_at_b.wr.a_write: -EPIPE
+shut.data_at_b.wr.b_read: 1:x
+shut.data_at_b.wr.b_write: 1
+shut.data_at_b.wr.a_read2: 1:v
+shut.data_at_b.wr.again: 0
+shut.data_at_b.wr.other_how: 0
+shut.data_at_b.rdwr.rc: 0
+shut.data_at_b.rdwr.a_ev: IN|OUT|HUP|RDHUP
+shut.data_at_b.rdwr.b_ev: IN|OUT|HUP|RDHUP
+shut.data_at_b.rdwr.a_read: 0
+shut.data_at_b.rdwr.a_write: -EPIPE
+shut.data_at_b.rdwr.b_read: 1:x
+shut.data_at_b.rdwr.b_write: -EPIPE
+shut.data_at_b.rdwr.a_read2: 0
+shut.data_at_b.rdwr.again: 0
+shut.data_at_b.rdwr.other_how: 0
+shut.a_full.rd.rc: 0
+shut.a_full.rd.a_ev: IN|RDHUP
+shut.a_full.rd.b_ev: IN|OUT
+shut.a_full.rd.a_read: 0
+shut.a_full.rd.a_write: -EAGAIN
+shut.a_full.rd.b_read: 4:ffff
+shut.a_full.rd.b_write: -EPIPE
+shut.a_full.rd.a_read2: 0
+shut.a_full.rd.again: 0
+shut.a_full.rd.other_how: 0
+shut.a_full.wr.rc: 0
+shut.a_full.wr.a_ev: 0
+shut.a_full.wr.b_ev: IN|OUT|RDHUP
+shut.a_full.wr.a_read: -EAGAIN
+shut.a_full.wr.a_write: -EPIPE
+shut.a_full.wr.b_read: 4:ffff
+shut.a_full.wr.b_write: 1
+shut.a_full.wr.a_read2: 1:v
+shut.a_full.wr.again: 0
+shut.a_full.wr.other_how: 0
+shut.a_full.rdwr.rc: 0
+shut.a_full.rdwr.a_ev: IN|HUP|RDHUP
+shut.a_full.rdwr.b_ev: IN|OUT|HUP|RDHUP
+shut.a_full.rdwr.a_read: 0
+shut.a_full.rdwr.a_write: -EPIPE
+shut.a_full.rdwr.b_read: 4:ffff
+shut.a_full.rdwr.b_write: -EPIPE
+shut.a_full.rdwr.a_read2: 0
+shut.a_full.rdwr.again: 0
+shut.a_full.rdwr.other_how: 0
+shut.b_full.rd.rc: 0
+shut.b_full.rd.a_ev: IN|OUT|RDHUP
+shut.b_full.rd.b_ev: 0
+shut.b_full.rd.a_read: 4:ffff
+shut.b_full.rd.a_write: 1
+shut.b_full.rd.b_read: 1:w
+shut.b_full.rd.b_write: -EPIPE
+shut.b_full.rd.a_read2: 4:ffff
+shut.b_full.rd.again: 0
+shut.b_full.rd.other_how: 0
+shut.b_full.wr.rc: 0
+shut.b_full.wr.a_ev: IN|OUT
+shut.b_full.wr.b_ev: IN|RDHUP
+shut.b_full.wr.a_read: 4:ffff
+shut.b_full.wr.a_write: -EPIPE
+shut.b_full.wr.b_read: 0
+shut.b_full.wr.b_write: -EAGAIN
+shut.b_full.wr.a_read2: 4:ffff
+shut.b_full.wr.again: 0
+shut.b_full.wr.other_how: 0
+shut.b_full.rdwr.rc: 0
+shut.b_full.rdwr.a_ev: IN|OUT|HUP|RDHUP
+shut.b_full.rdwr.b_ev: IN|HUP|RDHUP
+shut.b_full.rdwr.a_read: 4:ffff
+shut.b_full.rdwr.a_write: -EPIPE
+shut.b_full.rdwr.b_read: 0
+shut.b_full.rdwr.b_write: -EPIPE
+shut.b_full.rdwr.a_read2: 4:ffff
+shut.b_full.rdwr.again: 0
+shut.b_full.rdwr.other_how: 0
+shut.peer_closed_data.rd.rc: 0
+shut.peer_closed_data.rd.a_ev: IN|OUT|HUP|RDHUP
+shut.peer_closed_data.rd.a_read: 1:d
+shut.peer_closed_data.rd.a_write: -EPIPE
+shut.peer_closed_data.rd.again: 0
+shut.peer_closed_data.rd.other_how: 0
+shut.peer_closed_data.wr.rc: 0
+shut.peer_closed_data.wr.a_ev: IN|OUT|HUP|RDHUP
+shut.peer_closed_data.wr.a_read: 1:d
+shut.peer_closed_data.wr.a_write: -EPIPE
+shut.peer_closed_data.wr.again: 0
+shut.peer_closed_data.wr.other_how: 0
+shut.peer_closed_data.rdwr.rc: 0
+shut.peer_closed_data.rdwr.a_ev: IN|OUT|HUP|RDHUP
+shut.peer_closed_data.rdwr.a_read: 1:d
+shut.peer_closed_data.rdwr.a_write: -EPIPE
+shut.peer_closed_data.rdwr.again: 0
+shut.peer_closed_data.rdwr.other_how: 0
+shut.invalid_how_3: -EINVAL
+shut.invalid_how_neg: -EINVAL
+shut.invalid_how_on_idle: -EINVAL
+shut.rd.data_before_is_readable: 6:before
+shut.rd.write_by_peer_after: -EPIPE
+shut.rd.read_after: 0
+shut.wr.peer_read1: 4:tail
+shut.wr.peer_read2: 0
+shut.wr.peer_read3: 0
+shut.wr.peer_ev: IN|OUT|RDHUP
+shut.wr.peer_can_still_write: 4
+shut.wr.self_read_back: 4:back
+shut.rdwr.poll_never_sees_half_state: ok
+close.sp.plain.b_ev: IN|OUT|HUP|RDHUP
+close.sp.plain.b_so_error: 0(len=4)
+close.sp.plain.b_read1: 0
+close.sp.plain.b_read2: 0
+close.sp.plain.b_ev_after: IN|OUT|HUP|RDHUP
+close.sp.plain.b_write1: -EPIPE
+close.sp.plain.b_write2: -EPIPE
+close.sp.plain.b_shutdown: 0
+close.sp.plain.b_getpeername: fam=1 len=2 kind=unnamed same_as_expected=-1
+close.client.plain.b_ev: IN|OUT|HUP|RDHUP
+close.client.plain.b_so_error: 0(len=4)
+close.client.plain.b_read1: 0
+close.client.plain.b_read2: 0
+close.client.plain.b_ev_after: IN|OUT|HUP|RDHUP
+close.client.plain.b_write1: -EPIPE
+close.client.plain.b_write2: -EPIPE
+close.client.plain.b_shutdown: 0
+close.client.plain.b_getpeername: fam=1 len=2 kind=unnamed same_as_expected=-1
+close.accepted.plain.b_ev: IN|OUT|HUP|RDHUP
+close.accepted.plain.b_so_error: 0(len=4)
+close.accepted.plain.b_read1: 0
+close.accepted.plain.b_read2: 0
+close.accepted.plain.b_ev_after: IN|OUT|HUP|RDHUP
+close.accepted.plain.b_write1: -EPIPE
+close.accepted.plain.b_write2: -EPIPE
+close.accepted.plain.b_shutdown: 0
+close.accepted.plain.b_getpeername: fam=1 len=24 kind=abstract same_as_expected=-1
+close.sp.unread_at_a.b_ev: IN|OUT|ERR|HUP|RDHUP
+close.sp.unread_at_a.b_read1_first: -ECONNRESET
+close.sp.unread_at_a.b_so_error_after_read: 0(len=4)
+close.sp.unread_at_a.b_read1: 0
+close.sp.unread_at_a.b_read2: 0
+close.sp.unread_at_a.b_ev_after: IN|OUT|HUP|RDHUP
+close.sp.unread_at_a.b_write1: -EPIPE
+close.sp.unread_at_a.b_write2: -EPIPE
+close.sp.unread_at_a.b_shutdown: 0
+close.sp.unread_at_a.b_getpeername: fam=1 len=2 kind=unnamed same_as_expected=-1
+close.client.unread_at_a.b_ev: IN|OUT|ERR|HUP|RDHUP
+close.client.unread_at_a.b_read1_first: -ECONNRESET
+close.client.unread_at_a.b_so_error_after_read: 0(len=4)
+close.client.unread_at_a.b_read1: 0
+close.client.unread_at_a.b_read2: 0
+close.client.unread_at_a.b_ev_after: IN|OUT|HUP|RDHUP
+close.client.unread_at_a.b_write1: -EPIPE
+close.client.unread_at_a.b_write2: -EPIPE
+close.client.unread_at_a.b_shutdown: 0
+close.client.unread_at_a.b_getpeername: fam=1 len=2 kind=unnamed same_as_expected=-1
+close.accepted.unread_at_a.b_ev: IN|OUT|ERR|HUP|RDHUP
+close.accepted.unread_at_a.b_read1_first: -ECONNRESET
+close.accepted.unread_at_a.b_so_error_after_read: 0(len=4)
+close.accepted.unread_at_a.b_read1: 0
+close.accepted.unread_at_a.b_read2: 0
+close.accepted.unread_at_a.b_ev_after: IN|OUT|HUP|RDHUP
+close.accepted.unread_at_a.b_write1: -EPIPE
+close.accepted.unread_at_a.b_write2: -EPIPE
+close.accepted.unread_at_a.b_shutdown: 0
+close.accepted.unread_at_a.b_getpeername: fam=1 len=24 kind=abstract same_as_expected=-1
+close.sp.unread_at_b.b_ev: IN|OUT|HUP|RDHUP
+close.sp.unread_at_b.b_so_error: 0(len=4)
+close.sp.unread_at_b.b_read1: 1:u
+close.sp.unread_at_b.b_read2: 0
+close.sp.unread_at_b.b_ev_after: IN|OUT|HUP|RDHUP
+close.sp.unread_at_b.b_write1: -EPIPE
+close.sp.unread_at_b.b_write2: -EPIPE
+close.sp.unread_at_b.b_shutdown: 0
+close.sp.unread_at_b.b_getpeername: fam=1 len=2 kind=unnamed same_as_expected=-1
+close.client.unread_at_b.b_ev: IN|OUT|HUP|RDHUP
+close.client.unread_at_b.b_so_error: 0(len=4)
+close.client.unread_at_b.b_read1: 1:u
+close.client.unread_at_b.b_read2: 0
+close.client.unread_at_b.b_ev_after: IN|OUT|HUP|RDHUP
+close.client.unread_at_b.b_write1: -EPIPE
+close.client.unread_at_b.b_write2: -EPIPE
+close.client.unread_at_b.b_shutdown: 0
+close.client.unread_at_b.b_getpeername: fam=1 len=2 kind=unnamed same_as_expected=-1
+close.accepted.unread_at_b.b_ev: IN|OUT|HUP|RDHUP
+close.accepted.unread_at_b.b_so_error: 0(len=4)
+close.accepted.unread_at_b.b_read1: 1:u
+close.accepted.unread_at_b.b_read2: 0
+close.accepted.unread_at_b.b_ev_after: IN|OUT|HUP|RDHUP
+close.accepted.unread_at_b.b_write1: -EPIPE
+close.accepted.unread_at_b.b_write2: -EPIPE
+close.accepted.unread_at_b.b_shutdown: 0
+close.accepted.unread_at_b.b_getpeername: fam=1 len=24 kind=abstract same_as_expected=-1
+close.sp.a_full.b_ev: IN|OUT|HUP|RDHUP
+close.sp.a_full.b_so_error: 0(len=4)
+close.sp.a_full.b_read1: 4:ffff
+close.sp.a_full.b_read2: 4:ffff
+close.sp.a_full.b_ev_after: IN|OUT|HUP|RDHUP
+close.sp.a_full.b_write1: -EPIPE
+close.sp.a_full.b_write2: -EPIPE
+close.sp.a_full.b_shutdown: 0
+close.sp.a_full.b_getpeername: fam=1 len=2 kind=unnamed same_as_expected=-1
+close.client.a_full.b_ev: IN|OUT|HUP|RDHUP
+close.client.a_full.b_so_error: 0(len=4)
+close.client.a_full.b_read1: 4:ffff
+close.client.a_full.b_read2: 4:ffff
+close.client.a_full.b_ev_after: IN|OUT|HUP|RDHUP
+close.client.a_full.b_write1: -EPIPE
+close.client.a_full.b_write2: -EPIPE
+close.client.a_full.b_shutdown: 0
+close.client.a_full.b_getpeername: fam=1 len=2 kind=unnamed same_as_expected=-1
+close.accepted.a_full.b_ev: IN|OUT|HUP|RDHUP
+close.accepted.a_full.b_so_error: 0(len=4)
+close.accepted.a_full.b_read1: 4:ffff
+close.accepted.a_full.b_read2: 4:ffff
+close.accepted.a_full.b_ev_after: IN|OUT|HUP|RDHUP
+close.accepted.a_full.b_write1: -EPIPE
+close.accepted.a_full.b_write2: -EPIPE
+close.accepted.a_full.b_shutdown: 0
+close.accepted.a_full.b_getpeername: fam=1 len=24 kind=abstract same_as_expected=-1
+close.sp.b_shut_wr.b_ev: IN|OUT|HUP|RDHUP
+close.sp.b_shut_wr.b_so_error: 0(len=4)
+close.sp.b_shut_wr.b_read1: 0
+close.sp.b_shut_wr.b_read2: 0
+close.sp.b_shut_wr.b_ev_after: IN|OUT|HUP|RDHUP
+close.sp.b_shut_wr.b_write1: -EPIPE
+close.sp.b_shut_wr.b_write2: -EPIPE
+close.sp.b_shut_wr.b_shutdown: 0
+close.sp.b_shut_wr.b_getpeername: fam=1 len=2 kind=unnamed same_as_expected=-1
+close.client.b_shut_wr.b_ev: IN|OUT|HUP|RDHUP
+close.client.b_shut_wr.b_so_error: 0(len=4)
+close.client.b_shut_wr.b_read1: 0
+close.client.b_shut_wr.b_read2: 0
+close.client.b_shut_wr.b_ev_after: IN|OUT|HUP|RDHUP
+close.client.b_shut_wr.b_write1: -EPIPE
+close.client.b_shut_wr.b_write2: -EPIPE
+close.client.b_shut_wr.b_shutdown: 0
+close.client.b_shut_wr.b_getpeername: fam=1 len=2 kind=unnamed same_as_expected=-1
+close.accepted.b_shut_wr.b_ev: IN|OUT|HUP|RDHUP
+close.accepted.b_shut_wr.b_so_error: 0(len=4)
+close.accepted.b_shut_wr.b_read1: 0
+close.accepted.b_shut_wr.b_read2: 0
+close.accepted.b_shut_wr.b_ev_after: IN|OUT|HUP|RDHUP
+close.accepted.b_shut_wr.b_write1: -EPIPE
+close.accepted.b_shut_wr.b_write2: -EPIPE
+close.accepted.b_shut_wr.b_shutdown: 0
+close.accepted.b_shut_wr.b_getpeername: fam=1 len=24 kind=abstract same_as_expected=-1
+close.sp.b_shut_rd.b_ev: IN|OUT|HUP|RDHUP
+close.sp.b_shut_rd.b_so_error: 0(len=4)
+close.sp.b_shut_rd.b_read1: 0
+close.sp.b_shut_rd.b_read2: 0
+close.sp.b_shut_rd.b_ev_after: IN|OUT|HUP|RDHUP
+close.sp.b_shut_rd.b_write1: -EPIPE
+close.sp.b_shut_rd.b_write2: -EPIPE
+close.sp.b_shut_rd.b_shutdown: 0
+close.sp.b_shut_rd.b_getpeername: fam=1 len=2 kind=unnamed same_as_expected=-1
+close.client.b_shut_rd.b_ev: IN|OUT|HUP|RDHUP
+close.client.b_shut_rd.b_so_error: 0(len=4)
+close.client.b_shut_rd.b_read1: 0
+close.client.b_shut_rd.b_read2: 0
+close.client.b_shut_rd.b_ev_after: IN|OUT|HUP|RDHUP
+close.client.b_shut_rd.b_write1: -EPIPE
+close.client.b_shut_rd.b_write2: -EPIPE
+close.client.b_shut_rd.b_shutdown: 0
+close.client.b_shut_rd.b_getpeername: fam=1 len=2 kind=unnamed same_as_expected=-1
+close.accepted.b_shut_rd.b_ev: IN|OUT|HUP|RDHUP
+close.accepted.b_shut_rd.b_so_error: 0(len=4)
+close.accepted.b_shut_rd.b_read1: 0
+close.accepted.b_shut_rd.b_read2: 0
+close.accepted.b_shut_rd.b_ev_after: IN|OUT|HUP|RDHUP
+close.accepted.b_shut_rd.b_write1: -EPIPE
+close.accepted.b_shut_rd.b_write2: -EPIPE
+close.accepted.b_shut_rd.b_shutdown: 0
+close.accepted.b_shut_rd.b_getpeername: fam=1 len=24 kind=abstract same_as_expected=-1
+close.sp.a_shut_wr.b_ev: IN|OUT|HUP|RDHUP
+close.sp.a_shut_wr.b_so_error: 0(len=4)
+close.sp.a_shut_wr.b_read1: 0
+close.sp.a_shut_wr.b_read2: 0
+close.sp.a_shut_wr.b_ev_after: IN|OUT|HUP|RDHUP
+close.sp.a_shut_wr.b_write1: -EPIPE
+close.sp.a_shut_wr.b_write2: -EPIPE
+close.sp.a_shut_wr.b_shutdown: 0
+close.sp.a_shut_wr.b_getpeername: fam=1 len=2 kind=unnamed same_as_expected=-1
+close.client.a_shut_wr.b_ev: IN|OUT|HUP|RDHUP
+close.client.a_shut_wr.b_so_error: 0(len=4)
+close.client.a_shut_wr.b_read1: 0
+close.client.a_shut_wr.b_read2: 0
+close.client.a_shut_wr.b_ev_after: IN|OUT|HUP|RDHUP
+close.client.a_shut_wr.b_write1: -EPIPE
+close.client.a_shut_wr.b_write2: -EPIPE
+close.client.a_shut_wr.b_shutdown: 0
+close.client.a_shut_wr.b_getpeername: fam=1 len=2 kind=unnamed same_as_expected=-1
+close.accepted.a_shut_wr.b_ev: IN|OUT|HUP|RDHUP
+close.accepted.a_shut_wr.b_so_error: 0(len=4)
+close.accepted.a_shut_wr.b_read1: 0
+close.accepted.a_shut_wr.b_read2: 0
+close.accepted.a_shut_wr.b_ev_after: IN|OUT|HUP|RDHUP
+close.accepted.a_shut_wr.b_write1: -EPIPE
+close.accepted.a_shut_wr.b_write2: -EPIPE
+close.accepted.a_shut_wr.b_shutdown: 0
+close.accepted.a_shut_wr.b_getpeername: fam=1 len=24 kind=abstract same_as_expected=-1
+close.sp.a_shut_rd.b_ev: IN|OUT|HUP|RDHUP
+close.sp.a_shut_rd.b_so_error: 0(len=4)
+close.sp.a_shut_rd.b_read1: 0
+close.sp.a_shut_rd.b_read2: 0
+close.sp.a_shut_rd.b_ev_after: IN|OUT|HUP|RDHUP
+close.sp.a_shut_rd.b_write1: -EPIPE
+close.sp.a_shut_rd.b_write2: -EPIPE
+close.sp.a_shut_rd.b_shutdown: 0
+close.sp.a_shut_rd.b_getpeername: fam=1 len=2 kind=unnamed same_as_expected=-1
+close.client.a_shut_rd.b_ev: IN|OUT|HUP|RDHUP
+close.client.a_shut_rd.b_so_error: 0(len=4)
+close.client.a_shut_rd.b_read1: 0
+close.client.a_shut_rd.b_read2: 0
+close.client.a_shut_rd.b_ev_after: IN|OUT|HUP|RDHUP
+close.client.a_shut_rd.b_write1: -EPIPE
+close.client.a_shut_rd.b_write2: -EPIPE
+close.client.a_shut_rd.b_shutdown: 0
+close.client.a_shut_rd.b_getpeername: fam=1 len=2 kind=unnamed same_as_expected=-1
+close.accepted.a_shut_rd.b_ev: IN|OUT|HUP|RDHUP
+close.accepted.a_shut_rd.b_so_error: 0(len=4)
+close.accepted.a_shut_rd.b_read1: 0
+close.accepted.a_shut_rd.b_read2: 0
+close.accepted.a_shut_rd.b_ev_after: IN|OUT|HUP|RDHUP
+close.accepted.a_shut_rd.b_write1: -EPIPE
+close.accepted.a_shut_rd.b_write2: -EPIPE
+close.accepted.a_shut_rd.b_shutdown: 0
+close.accepted.a_shut_rd.b_getpeername: fam=1 len=24 kind=abstract same_as_expected=-1
+close.sp.both_data.b_ev: IN|OUT|ERR|HUP|RDHUP
+close.sp.both_data.b_read1_first: 1:1
+close.sp.both_data.b_so_error_after_read: 104(len=4)
+close.sp.both_data.b_read1: 0
+close.sp.both_data.b_read2: 0
+close.sp.both_data.b_ev_after: IN|OUT|HUP|RDHUP
+close.sp.both_data.b_write1: -EPIPE
+close.sp.both_data.b_write2: -EPIPE
+close.sp.both_data.b_shutdown: 0
+close.sp.both_data.b_getpeername: fam=1 len=2 kind=unnamed same_as_expected=-1
+close.client.both_data.b_ev: IN|OUT|ERR|HUP|RDHUP
+close.client.both_data.b_read1_first: 1:1
+close.client.both_data.b_so_error_after_read: 104(len=4)
+close.client.both_data.b_read1: 0
+close.client.both_data.b_read2: 0
+close.client.both_data.b_ev_after: IN|OUT|HUP|RDHUP
+close.client.both_data.b_write1: -EPIPE
+close.client.both_data.b_write2: -EPIPE
+close.client.both_data.b_shutdown: 0
+close.client.both_data.b_getpeername: fam=1 len=2 kind=unnamed same_as_expected=-1
+close.accepted.both_data.b_ev: IN|OUT|ERR|HUP|RDHUP
+close.accepted.both_data.b_read1_first: 1:1
+close.accepted.both_data.b_so_error_after_read: 104(len=4)
+close.accepted.both_data.b_read1: 0
+close.accepted.both_data.b_read2: 0
+close.accepted.both_data.b_ev_after: IN|OUT|HUP|RDHUP
+close.accepted.both_data.b_write1: -EPIPE
+close.accepted.both_data.b_write2: -EPIPE
+close.accepted.both_data.b_shutdown: 0
+close.accepted.both_data.b_getpeername: fam=1 len=24 kind=abstract same_as_expected=-1
+close.sp.a_shut_rdwr.b_ev: IN|OUT|HUP|RDHUP
+close.sp.a_shut_rdwr.b_so_error: 0(len=4)
+close.sp.a_shut_rdwr.b_read1: 0
+close.sp.a_shut_rdwr.b_read2: 0
+close.sp.a_shut_rdwr.b_ev_after: IN|OUT|HUP|RDHUP
+close.sp.a_shut_rdwr.b_write1: -EPIPE
+close.sp.a_shut_rdwr.b_write2: -EPIPE
+close.sp.a_shut_rdwr.b_shutdown: 0
+close.sp.a_shut_rdwr.b_getpeername: fam=1 len=2 kind=unnamed same_as_expected=-1
+close.client.a_shut_rdwr.b_ev: IN|OUT|HUP|RDHUP
+close.client.a_shut_rdwr.b_so_error: 0(len=4)
+close.client.a_shut_rdwr.b_read1: 0
+close.client.a_shut_rdwr.b_read2: 0
+close.client.a_shut_rdwr.b_ev_after: IN|OUT|HUP|RDHUP
+close.client.a_shut_rdwr.b_write1: -EPIPE
+close.client.a_shut_rdwr.b_write2: -EPIPE
+close.client.a_shut_rdwr.b_shutdown: 0
+close.client.a_shut_rdwr.b_getpeername: fam=1 len=2 kind=unnamed same_as_expected=-1
+close.accepted.a_shut_rdwr.b_ev: IN|OUT|HUP|RDHUP
+close.accepted.a_shut_rdwr.b_so_error: 0(len=4)
+close.accepted.a_shut_rdwr.b_read1: 0
+close.accepted.a_shut_rdwr.b_read2: 0
+close.accepted.a_shut_rdwr.b_ev_after: IN|OUT|HUP|RDHUP
+close.accepted.a_shut_rdwr.b_write1: -EPIPE
+close.accepted.a_shut_rdwr.b_write2: -EPIPE
+close.accepted.a_shut_rdwr.b_shutdown: 0
+close.accepted.a_shut_rdwr.b_getpeername: fam=1 len=24 kind=abstract same_as_expected=-1
+close.data_then_eof.read1: 10:last wor
+close.data_then_eof.read2: 0
+close.dup_alive.b_ev: OUT
+close.dup_alive.b_read: -EAGAIN
+close.dup_closed.b_ev: IN|OUT|HUP|RDHUP
+close.listener_pending.client_idle.pathname.ev: IN|OUT|ERR|HUP|RDHUP
+close.listener_pending.client_idle.pathname.read1_first: -ECONNRESET
+close.listener_pending.client_idle.pathname.so_error_after_read: 0(len=4)
+close.listener_pending.client_idle.pathname.read2: 0
+close.listener_pending.client_idle.pathname.write: -EPIPE
+close.listener_pending.client_idle.pathname.so_error_first: 104(len=4)
+close.listener_pending.client_idle.pathname.read_after_so_error: 0
+close.listener_pending.client_idle.abstract.ev: IN|OUT|ERR|HUP|RDHUP
+close.listener_pending.client_idle.abstract.read1_first: -ECONNRESET
+close.listener_pending.client_idle.abstract.so_error_after_read: 0(len=4)
+close.listener_pending.client_idle.abstract.read2: 0
+close.listener_pending.client_idle.abstract.write: -EPIPE
+close.listener_pending.client_idle.abstract.so_error_first: 104(len=4)
+close.listener_pending.client_idle.abstract.read_after_so_error: 0
+close.listener_pending.client_wrote.pathname.ev: IN|OUT|ERR|HUP|RDHUP
+close.listener_pending.client_wrote.pathname.read1_first: -ECONNRESET
+close.listener_pending.client_wrote.pathname.so_error_after_read: 0(len=4)
+close.listener_pending.client_wrote.pathname.read2: 0
+close.listener_pending.client_wrote.pathname.write: -EPIPE
+close.listener_pending.client_wrote.pathname.so_error_first: 104(len=4)
+close.listener_pending.client_wrote.pathname.read_after_so_error: 0
+close.listener_pending.client_wrote.abstract.ev: IN|OUT|ERR|HUP|RDHUP
+close.listener_pending.client_wrote.abstract.read1_first: -ECONNRESET
+close.listener_pending.client_wrote.abstract.so_error_after_read: 0(len=4)
+close.listener_pending.client_wrote.abstract.read2: 0
+close.listener_pending.client_wrote.abstract.write: -EPIPE
+close.listener_pending.client_wrote.abstract.so_error_first: 104(len=4)
+close.listener_pending.client_wrote.abstract.read_after_so_error: 0
+close.so_error.first: 104(len=4)
+close.so_error.second: 0(len=4)
+close.so_error.then_read: 0
+ev.idle.poll_all: OUT|HUP
+ev.idle.poll_in_only: HUP
+ev.idle.poll_out_only: OUT|HUP
+ev.idle.poll_none_requested: HUP
+ev.idle.epoll_all: OUT|HUP
+ev.idle.epoll_in_only: HUP
+ev.idle.epoll_out_only: OUT|HUP
+ev.idle.epoll_none_requested: HUP
+ev.idle.select: r=1 w=1 e=0
+ev.bound.poll_all: OUT|HUP
+ev.bound.poll_in_only: HUP
+ev.bound.poll_out_only: OUT|HUP
+ev.bound.poll_none_requested: HUP
+ev.bound.epoll_all: OUT|HUP
+ev.bound.epoll_in_only: HUP
+ev.bound.epoll_out_only: OUT|HUP
+ev.bound.epoll_none_requested: HUP
+ev.bound.select: r=1 w=1 e=0
+ev.listening.poll_all: 0
+ev.listening.poll_in_only: 0
+ev.listening.poll_out_only: 0
+ev.listening.poll_none_requested: 0
+ev.listening.epoll_all: none
+ev.listening.epoll_in_only: none
+ev.listening.epoll_out_only: none
+ev.listening.epoll_none_requested: none
+ev.listening.select: r=0 w=0 e=0
+ev.sp.poll_all: OUT
+ev.sp.poll_in_only: 0
+ev.sp.poll_out_only: OUT
+ev.sp.poll_none_requested: 0
+ev.sp.epoll_all: OUT
+ev.sp.epoll_in_only: none
+ev.sp.epoll_out_only: OUT
+ev.sp.epoll_none_requested: none
+ev.sp.select: r=0 w=1 e=0
+ev.client.poll_all: OUT
+ev.client.poll_in_only: 0
+ev.client.poll_out_only: OUT
+ev.client.poll_none_requested: 0
+ev.client.epoll_all: OUT
+ev.client.epoll_in_only: none
+ev.client.epoll_out_only: OUT
+ev.client.epoll_none_requested: none
+ev.client.select: r=0 w=1 e=0
+ev.accepted.poll_all: OUT
+ev.accepted.poll_in_only: 0
+ev.accepted.poll_out_only: OUT
+ev.accepted.poll_none_requested: 0
+ev.accepted.epoll_all: OUT
+ev.accepted.epoll_in_only: none
+ev.accepted.epoll_out_only: OUT
+ev.accepted.epoll_none_requested: none
+ev.accepted.select: r=0 w=1 e=0
+ev.peer_closed.poll_all: IN|OUT|HUP|RDHUP
+ev.peer_closed.poll_in_only: IN|HUP
+ev.peer_closed.poll_out_only: OUT|HUP
+ev.peer_closed.poll_none_requested: HUP
+ev.peer_closed.epoll_all: IN|OUT|HUP|RDHUP
+ev.peer_closed.epoll_in_only: IN|HUP
+ev.peer_closed.epoll_out_only: OUT|HUP
+ev.peer_closed.epoll_none_requested: HUP
+ev.peer_closed.select: r=1 w=1 e=0
+ev.peer_shut_wr.poll_all: IN|OUT|RDHUP
+ev.peer_shut_wr.poll_in_only: IN
+ev.peer_shut_wr.poll_out_only: OUT
+ev.peer_shut_wr.poll_none_requested: 0
+ev.peer_shut_wr.epoll_all: IN|OUT|RDHUP
+ev.peer_shut_wr.epoll_in_only: IN
+ev.peer_shut_wr.epoll_out_only: OUT
+ev.peer_shut_wr.epoll_none_requested: none
+ev.peer_shut_wr.select: r=1 w=1 e=0
+ev.peer_shut_rd.poll_all: OUT
+ev.peer_shut_rd.poll_in_only: 0
+ev.peer_shut_rd.poll_out_only: OUT
+ev.peer_shut_rd.poll_none_requested: 0
+ev.peer_shut_rd.epoll_all: OUT
+ev.peer_shut_rd.epoll_in_only: none
+ev.peer_shut_rd.epoll_out_only: OUT
+ev.peer_shut_rd.epoll_none_requested: none
+ev.peer_shut_rd.select: r=0 w=1 e=0
+ev.self_shut_wr.poll_all: OUT
+ev.self_shut_wr.poll_in_only: 0
+ev.self_shut_wr.poll_out_only: OUT
+ev.self_shut_wr.poll_none_requested: 0
+ev.self_shut_wr.epoll_all: OUT
+ev.self_shut_wr.epoll_in_only: none
+ev.self_shut_wr.epoll_out_only: OUT
+ev.self_shut_wr.epoll_none_requested: none
+ev.self_shut_wr.select: r=0 w=1 e=0
+ev.self_shut_rd.poll_all: IN|OUT|RDHUP
+ev.self_shut_rd.poll_in_only: IN
+ev.self_shut_rd.poll_out_only: OUT
+ev.self_shut_rd.poll_none_requested: 0
+ev.self_shut_rd.epoll_all: IN|OUT|RDHUP
+ev.self_shut_rd.epoll_in_only: IN
+ev.self_shut_rd.epoll_out_only: OUT
+ev.self_shut_rd.epoll_none_requested: none
+ev.self_shut_rd.select: r=1 w=1 e=0
+ev.pending.poll_all: OUT
+ev.pending.poll_in_only: 0
+ev.pending.poll_out_only: OUT
+ev.pending.poll_none_requested: 0
+ev.pending.epoll_all: OUT
+ev.pending.epoll_in_only: none
+ev.pending.epoll_out_only: OUT
+ev.pending.epoll_none_requested: none
+ev.pending.select: r=0 w=1 e=0
+ev.data_at_a.poll_all: IN|OUT
+ev.data_at_a.poll_in_only: IN
+ev.data_at_a.poll_out_only: OUT
+ev.data_at_a.poll_none_requested: 0
+ev.data_at_a.epoll_all: IN|OUT
+ev.data_at_a.epoll_in_only: IN
+ev.data_at_a.epoll_out_only: OUT
+ev.data_at_a.epoll_none_requested: none
+ev.data_at_a.select: r=1 w=1 e=0
+ev.a_full.poll_all: 0
+ev.a_full.poll_in_only: 0
+ev.a_full.poll_out_only: 0
+ev.a_full.poll_none_requested: 0
+ev.a_full.epoll_all: none
+ev.a_full.epoll_in_only: none
+ev.a_full.epoll_out_only: none
+ev.a_full.epoll_none_requested: none
+ev.a_full.select: r=0 w=0 e=0
+ev.b_full.poll_all: IN|OUT
+ev.b_full.poll_in_only: IN
+ev.b_full.poll_out_only: OUT
+ev.b_full.poll_none_requested: 0
+ev.b_full.epoll_all: IN|OUT
+ev.b_full.epoll_in_only: IN
+ev.b_full.epoll_out_only: OUT
+ev.b_full.epoll_none_requested: none
+ev.b_full.select: r=1 w=1 e=0
+ev.peer_closed_data.poll_all: IN|OUT|HUP|RDHUP
+ev.peer_closed_data.poll_in_only: IN|HUP
+ev.peer_closed_data.poll_out_only: OUT|HUP
+ev.peer_closed_data.poll_none_requested: HUP
+ev.peer_closed_data.epoll_all: IN|OUT|HUP|RDHUP
+ev.peer_closed_data.epoll_in_only: IN|HUP
+ev.peer_closed_data.epoll_out_only: OUT|HUP
+ev.peer_closed_data.epoll_none_requested: HUP
+ev.peer_closed_data.select: r=1 w=1 e=0
+ev.listener.empty: 0
+ev.listener.one_pending: IN
+ev.listener.two_pending: IN
+ev.listener.one_accepted: IN
+ev.listener.both_accepted: 0
+ev.listener.epoll_both_accepted: none
+ev.listener.select_both_accepted: r=0 w=0 e=0
+ev.out_threshold.full: 0
+ev.out_threshold.after_reading: 0k:- 0k:- 4k:- 16k:- 64k:- 128k:- 167k:OUT
+ev.closed_fd: NVAL
+ev.poll_woken_by_connect: 1 ev=IN
+epoll.et.initial: none
+epoll.et.after_write: n=1 IN
+epoll.et.no_new_data: none
+epoll.et.second_write_unread_first: n=1 IN
+epoll.et.after_partial_read: none
+epoll.et.after_drain_and_write: n=1 IN
+epoll.et.data_before_add: n=1 IN
+epoll.lt.data_before_add: n=1 IN
+epoll.lt.repeats: n=1 IN
+epoll.et.out.initial: n=1 OUT
+epoll.et.out.again: none
+epoll.et.out.after_fill: none
+epoll.et.out.after_drain: n=1 OUT
+epoll.lt.partial_read_still_ready: n=1 IN
+epoll.lt.drained: none
+epoll.et.peer_close: n=1 IN|OUT|HUP|RDHUP
+epoll.et.peer_close.again: none
+epoll.et.peer_shut_wr: n=1 IN|OUT|RDHUP
+epoll.et.peer_shut_wr.again: none
+epoll.et.peer_shut_rd: n=1 OUT
+epoll.et.peer_shut_rd.again: none
+epoll.et.peer_shut_rdwr: n=1 IN|OUT|HUP|RDHUP
+epoll.et.peer_shut_rdwr.again: none
+epoll.et.self_shut_rd: n=1 IN|OUT|RDHUP
+epoll.et.self_shut_rd.again: none
+epoll.et.self_shut_wr: n=1 OUT
+epoll.et.self_shut_wr.again: none
+epoll.et.self_shut_rdwr: n=1 IN|OUT|HUP|RDHUP
+epoll.et.self_shut_rdwr.again: none
+epoll.listener.et.empty: none
+epoll.listener.et.first: n=1 IN
+epoll.listener.et.second: n=1 IN
+epoll.listener.et.no_new: none
+epoll.listener.et.after_one_accept_one_left: none
+epoll.listener.lt.connect_before_add: n=1 IN
+epoll.listener.lt.after_accept: none
+epoll.closed_fd_removed: none
+epoll.dup_stays_registered: n=1 IN
+epoll.blocked_wait.peer_write: 1 woken ev=IN
+epoll.blocked_wait.peer_close: 1 woken ev=IN|HUP|RDHUP
+epoll.blocked_wait.peer_shut_wr: 1 woken ev=IN|RDHUP
+epoll.blocked_wait.self_shut_rd: 1 woken ev=IN|RDHUP
+epoll.blocked_wait.self_shut_rdwr: 1 woken ev=IN|HUP|RDHUP
+epoll.out.full: none
+epoll.out.after_1_byte_read: none
+epoll.out.after_drain: n=1 OUT
+epoll.add: 0
+epoll.add_again: -EEXIST
+epoll.add_oneshot: 0
+epoll.oneshot.first: n=1 IN
+epoll.oneshot.second: none
+blk.read.woken_by_write: 3 woken
+blk.read.peer_close: 0 woken
+blk.read.peer_shut_wr: 0 woken
+blk.read.peer_shut_rdwr: 0 woken
+blk.read.peer_shut_rd: BLOCKED
+blk.read.self_shut_rd: 0 woken
+blk.read.self_shut_rdwr: 0 woken
+blk.read.self_shut_wr: BLOCKED
+blk.write_full.peer_close: -ECONNRESET woken
+blk.write_full.peer_shut_rd: -EPIPE woken
+blk.write_full.peer_shut_rdwr: -EPIPE woken
+blk.write_full.peer_shut_wr: BLOCKED
+blk.write_full.self_shut_wr: -EPIPE woken
+blk.write_full.self_shut_rdwr: -EPIPE woken
+blk.write_full.self_shut_rd: BLOCKED
+blk.write_full.woken_by_peer_read: BLOCKED
+blk.accept.woken_by_connect: 0 woken
+blk.accept.shut_rd: shutdown=0 accept=-EINVAL woken
+blk.accept.shut_rd.after: connect=-ECONNREFUSED accept=-EAGAIN
+blk.accept.shut_wr: shutdown=0 accept=BLOCKED
+blk.accept.shut_wr.after: connect=0 accept=blocked_one_woke_on_connect
+blk.accept.shut_rdwr: shutdown=0 accept=-EINVAL woken
+blk.accept.shut_rdwr.after: connect=-ECONNREFUSED accept=-EAGAIN
+blk.poll.woken_by_write: 1 woken ev=IN
+blk.poll.peer_close: 1 woken ev=IN|HUP|RDHUP
+blk.poll.peer_shut_wr: 1 woken ev=IN|RDHUP
+blk.poll.peer_shut_rdwr: 1 woken ev=IN|HUP|RDHUP
+blk.poll.self_shut_rd: 1 woken ev=IN|RDHUP
+blk.poll.self_shut_wr: 0 woken ev=0
+blk.poll.self_shut_rdwr: 1 woken ev=IN|HUP|RDHUP
+sig.read.no_restart: -EINTR
+sig.accept.no_restart: -EINTR
+sig.write_full.no_restart: -EINTR
+sig.connect_full_backlog.no_restart: -EINTR
+sig.read.sa_restart: restarted_and_completed
+sig.accept.sa_restart: restarted_and_completed
+sig.write_full.sa_restart: restarted_and_completed
+sig.connect_full_backlog.sa_restart: restarted_and_completed
+thr.two_acceptors_one_connect: finished=1
+thr.two_acceptors_two_connects: finished=2
+thr.close_fd_while_reading.still_blocked: 1
+thr.close_fd_while_reading.data_wakes: done=1 res=1
+thr.close_listener_while_accepting: connect=0 accept_done=1
+thr.six_readers_two_bytes: finished=1
+thr.six_readers_after_peer_close: finished=6
+tmo.set_rcvtimeo: 0
+tmo.get_rcvtimeo: 0 sec=0 usec_ms=300 len=16
+tmo.set_sndtimeo: 0
+tmo.get_sndtimeo: 0 sec=0 usec_ms=300 len=16
+tmo.set_usec_too_big: -EDOM
+tmo.set_negative: 0
+tmo.set_short_optlen: -EINVAL
+tmo.read: -EAGAIN on_time
+tmo.recv: -EAGAIN on_time
+tmo.recv_waitall: -EAGAIN on_time
+tmo.read_data_before_timeout: 2
+tmo.recv_waitall_partial: 3 on_time
+tmo.zero_then_eof: 0
+tmo.write_full: -EAGAIN on_time
+tmo.send_full: -EAGAIN on_time
+tmo.listener_set_rcvtimeo: 0
+tmo.accept: -EAGAIN on_time
+tmo.connect_full_backlog: -EAGAIN on_time
+tmo.accepted_inherits_rcvtimeo: BLOCKED(not inherited)
+tmo.nonblock_read: -EAGAIN
+opt.get.SO_TYPE.idle: 1(len=4)
+opt.get.SO_DOMAIN.idle: 1(len=4)
+opt.get.SO_PROTOCOL.idle: 0(len=4)
+opt.get.SO_ERROR.idle: 0(len=4)
+opt.get.SO_ACCEPTCONN.idle: 0(len=4)
+opt.get.SO_SNDBUF.idle: 212992(len=4)
+opt.get.SO_RCVBUF.idle: 212992(len=4)
+opt.get.SO_KEEPALIVE.idle: 0(len=4)
+opt.get.SO_REUSEADDR.idle: 0(len=4)
+opt.get.SO_REUSEPORT.idle: 0(len=4)
+opt.get.SO_PASSCRED.idle: 0(len=4)
+opt.get.SO_OOBINLINE.idle: 0(len=4)
+opt.get.SO_BROADCAST.idle: 0(len=4)
+opt.get.SO_PRIORITY.idle: 0(len=4)
+opt.get.SO_RCVLOWAT.idle: 1(len=4)
+opt.get.SO_SNDLOWAT.idle: 1(len=4)
+opt.get.SO_TIMESTAMP.idle: 0(len=4)
+opt.get.SO_DONTROUTE.idle: 0(len=4)
+opt.get.SO_DEBUG.idle: 0(len=4)
+opt.get.SO_MARK.idle: 0(len=4)
+opt.get.SO_PEEK_OFF.idle: -1(len=4)
+opt.get.SO_PASSSEC.idle: 0(len=4)
+opt.get.SO_NO_CHECK.idle: 0(len=4)
+opt.get.SO_BUSY_POLL.idle: 0(len=4)
+opt.get.SO_INCOMING_CPU.idle: -1(len=4)
+opt.get.SO_RXQ_OVFL.idle: 0(len=4)
+opt.get.SO_LOCK_FILTER.idle: 0(len=4)
+opt.get.SO_PEERPIDFD.idle: -E61
+opt.get.SO_TYPE.sp: 1(len=4)
+opt.get.SO_ACCEPTCONN.sp: 0(len=4)
+opt.get.SO_PEERCRED.sp: len=12 pid_is_self=1 pid_zero=0 uid_is_self=1 uid=0 gid_is_self=1
+opt.get.SO_PEERCRED.client: len=12 pid_is_self=1 pid_zero=0 uid_is_self=1 uid=0 gid_is_self=1
+opt.get.SO_PEERCRED.accepted: len=12 pid_is_self=1 pid_zero=0 uid_is_self=1 uid=0 gid_is_self=1
+opt.get.SO_PEERCRED.idle: len=12 pid_is_self=0 pid_zero=1 uid_is_self=0 uid=-1 gid_is_self=0
+opt.get.SO_PEERPIDFD.sp: 0 fd_ge3=1
+opt.get.SO_PEERSEC.sp: 0
+opt.get.SO_PEERGROUPS.sp: 0 len=4
+opt.get.SO_BINDTODEVICE.sp: 0 len=0
+opt.get.SO_LINGER.sp: 0 on=0 secs=0 len=8
+opt.set.SO_KEEPALIVE: 0 -> get 1(len=4)
+opt.set.SO_REUSEADDR: 0 -> get 1(len=4)
+opt.set.SO_REUSEPORT: -EOPNOTSUPP -> get 0(len=4)
+opt.set.SO_PASSCRED: 0 -> get 1(len=4)
+opt.set.SO_OOBINLINE: 0 -> get 1(len=4)
+opt.set.SO_BROADCAST: 0 -> get 1(len=4)
+opt.set.SO_PRIORITY: 0 -> get 3(len=4)
+opt.set.SO_RCVLOWAT: 0 -> get 5(len=4)
+opt.set.SO_SNDLOWAT: -ENOPROTOOPT -> get 1(len=4)
+opt.set.SO_TIMESTAMP: 0 -> get 1(len=4)
+opt.set.SO_DONTROUTE: 0 -> get 1(len=4)
+opt.set.SO_DEBUG: 0 -> get 1(len=4)
+opt.set.SO_MARK: 0 -> get 7(len=4)
+opt.set.SO_PASSSEC: 0 -> get 1(len=4)
+opt.set.SO_BUSY_POLL: 0 -> get 0(len=4)
+opt.set.SO_SNDBUF: 0 -> get 131072(len=4)
+opt.set.SO_RCVBUF: 0 -> get 131072(len=4)
+opt.set.SO_ERROR: -ENOPROTOOPT -> get 0(len=4)
+opt.set.SO_TYPE: -ENOPROTOOPT -> get 1(len=4)
+opt.set.SO_ACCEPTCONN: -ENOPROTOOPT -> get 0(len=4)
+opt.set.SO_DOMAIN: -ENOPROTOOPT -> get 1(len=4)
+opt.set.SO_SNDBUF.tiny: 0 -> get 4608(len=4)
+opt.set.SO_RCVBUF.tiny: 0 -> get 2304(len=4)
+opt.set.SO_SNDBUF.huge: 0 -> get 8388608(len=4)
+opt.set.SO_SNDBUF.negative: 0
+opt.set.SO_LINGER: 0
+opt.set.SO_LINGER.get: on=1 secs=5
+opt.sndbuf_effect.fill_after_set_4096: small
+opt.set.TCP_NODELAY: -EOPNOTSUPP
+opt.get.TCP_NODELAY: -EOPNOTSUPP
+opt.set.IP_TTL: -EOPNOTSUPP
+opt.get.IP_TTL: -EOPNOTSUPP
+opt.set.IPV6_V6ONLY: -EOPNOTSUPP
+opt.set.SOL_UNIX_level_0: -EOPNOTSUPP
+opt.set.level_bogus: -EOPNOTSUPP
+opt.get.level_bogus: -EOPNOTSUPP
+opt.set.optname_bogus: -ENOPROTOOPT
+opt.get.optname_bogus: -ENOPROTOOPT
+opt.set.optlen_short: -EINVAL
+opt.set.optlen_zero: -EINVAL
+opt.set.optval_null: -EFAULT
+opt.set.optval_bad_ptr: -EFAULT
+opt.get.optlen_1: 0 len=1
+opt.get.optlen_8: 0 len=4
+opt.get.optlen_0: 0 len=0
+opt.get.optval_null_len0: 0
+opt.get.optval_null_len4: -EFAULT
+opt.get.optlen_null: -EFAULT
+opt.get.SO_ERROR.client: 0(len=4)
+opt.get.SO_ACCEPTCONN.accepted: 0(len=4)
+opt.get.SO_SNDBUF.accepted: 212992(len=4)
+pipe.write_after_peer_close: -EPIPE sigpipe=1
+pipe.write_again: -EPIPE sigpipe=1
+pipe.send_nosignal: -EPIPE sigpipe=0
+pipe.send_no_flags: -EPIPE sigpipe=1
+pipe.writev: -EPIPE sigpipe=1
+pipe.sendmsg: -EPIPE sigpipe=1
+pipe.sendmsg_nosignal: -EPIPE sigpipe=0
+pipe.write_zero_after_peer_close: -EPIPE sigpipe=1
+pipe.write_after_self_shut_wr: -EPIPE sigpipe=1
+pipe.write_after_peer_shut_rd: -EPIPE sigpipe=1
+pipe.write_after_self_shut_rd: 1 sigpipe=0
+pipe.write_after_peer_shut_wr: 1 sigpipe=0
+pipe.write_unconnected: -ENOTCONN sigpipe=0
+pipe.blocked_write_peer_closes: -ECONNRESET sigpipe=0
+pipe.write_sigpipe_blocked: -EPIPE sigpipe=0
+pipe.sigpipe_pending_after_blocked_write: 1
+anc.rights.send: 1
+anc.rights.recv: 1 controllen=24 flags=0x0 nfd=1 cmsgs=[lvl=1 type=1 len=20]
+anc.rights.fd_is_new: 1
+anc.rights.fd_works: 5 pipe!
+anc.rights.exact_len.recv: 1 controllen=24 flags=0x0 nfd=1 cmsgs=[lvl=1 type=1 len=20]
+anc.rights.exact_len.fd_works: 5 pipe!
+anc.rights.plain_read_gets: 1
+anc.rights.plain_read_then_more: -EAGAIN
+anc.rights.then_plain.recv1: 1 controllen=24 flags=0x0 nfd=1 cmsgs=[lvl=1 type=1 len=20]
+anc.rights.then_plain.recv2: 2:yz
+anc.rights.recv_without_ctl_buffer: 1 controllen=0 flags=0x8 nfd=-1 cmsgs=none
+anc.rights.recv_without_ctl_buffer.then_read: -EAGAIN
+anc.rights.ctl_buffer_too_small: 1 controllen=0 flags=0x8 nfd=-1 cmsgs=none
+anc.recvmsg_ctl_blocking_data_only: 5 controllen=0
+anc.recvmsg_ctl_nonblocking_data_only: 5 controllen=0 flags=0x0 nfd=-1 cmsgs=none
+anc.recvmsg_ctl_nonblocking_data_only.then_read: -EAGAIN
+anc.recvmsg_ctl_following_data: 5 controllen=0 flags=0x0 nfd=-1 cmsgs=none
+anc.recvmsg_ctl_following_data.then_read: 6:world!
+anc.passcred.set: 0
+anc.passcred.recv: 1 controllen=32 flags=0x0 nfd=-1 cmsgs=[lvl=1 type=2 len=28]
+anc.passcred.then_read: -EAGAIN
+anc.credentials.send: 1
+anc.credentials.recv: 1 controllen=32 flags=0x0 nfd=-1 cmsgs=[lvl=1 type=2 len=28]
+anc.credentials.then_read: -EAGAIN
+anc.bogus_cmsg.send: -EINVAL
+anc.bogus_cmsg.peer_read: -EAGAIN
+anc.bogus_level.send: 1
+anc.bogus_level.peer_read: 1:b
+anc.short_controllen.send: 1
+anc.short_controllen.peer_read: 1:b
+spawn.echo.child_status: spawn=0 status=0
+spawn.echo.reply: 5:HELLO
+spawn.cloexec_not_inherited: spawn=0 status=0
+spawn.nonblock_flag_inherited: spawn=0 status=0
+spawn.child_accepts_inherited_listener: spawn=0 status=0
+spawn.after_child_exit_and_parent_close_b.read: 5:HELLO
+spawn.after_child_exit_and_parent_close_b.read2: 0
+mem.many_sockets_created: stopped_at_1021_EMFILE
+lclose.accepted_still_works.write: 1
+lclose.accepted_still_works.read: 2:dz
+lclose.accepted_ev: OUT
+lclose.pending_client.ev: IN|OUT|ERR|HUP|RDHUP
+lclose.pending_client.read: -ECONNRESET
+lclose.pending_client.read2: 0
+lclose.pending_client.write: -EPIPE
+lclose.new_connect: -ECONNREFUSED
+lclose.race_tight.only_ok_or_refused: 1 other=[]
+lclose.race.connect_results: only_ok_or_refused=1 other=[]
+lclose.race.some_refused_or_ok: 1
+lclose.race.queued_then_dropped_client_read_sane: 1
+stress.pingpong_4_pairs_150_rounds: errors=0 timeouts=0 unfinished=0
+stress.connect_storm_4x40: ok=160 failed=0 unfinished=0 last_errno=none
+crash.rights_socketpair.send: 1
+crash.rights_socketpair.recv: 1 controllen=24 flags=0x0 nfd=1 cmsgs=[lvl=1 type=1 len=20]
+crash.rights_socketpair.fd_works: 1
+crash.rights_closed.send: 1
+crash.rights_closed.recv: 1 controllen=24 flags=0x0 nfd=1 cmsgs=[lvl=1 type=1 len=20]
+crash.rights_closed.fd_works: 1
+crash.rights_thread_gone.recv: 1 controllen=24 flags=0x0 nfd=1 cmsgs=[lvl=1 type=1 len=20]
+crash.rights_thread_gone.fd_works: 1
+crash.abstract_non_utf8.bind: 0
+crash.abstract_non_utf8.connect: 0
+crash.abstract_non_utf8.getsockname: fam=1 len=14 kind=abstract same_as_expected=1
+crash.nonblock_toggle_vs_getfl_race: survived
+backlog.relisten_while_accept_blocked: 0
+backlog.relisten_while_accept_blocked.connect_then_accept_done: connect=0 accept_done=1
