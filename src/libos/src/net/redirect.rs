@@ -19,11 +19,12 @@
 //! The epoll files that monitor the file descriptor go on monitoring it, with
 //! the Unix socket, and the Unix socket is nonblocking and close-on-spawn if
 //! the TCP socket was. It has the timeouts of the TCP socket (SO_RCVTIMEO and
-//! SO_SNDTIMEO), as it is the Unix socket that waits in accept() and
-//! connect(). What else the program did with the TCP socket before bind() or
-//! connect() does not carry over: its other options, which change nothing for
-//! a Unix socket but what getsockopt() returns, and other file descriptors for
-//! it, e.g., from dup().
+//! SO_SNDTIMEO), as it is the Unix socket that waits in accept(), connect(),
+//! and the calls that read and write. What else the program did with the TCP
+//! socket before bind() or connect() does not carry over: its other options,
+//! e.g., SO_SNDBUF, which limits the bytes that the Unix socket has in flight
+//! if the program sets it after bind() or connect(), and other file
+//! descriptors for it, e.g., from dup().
 
 use std::sync::atomic::{AtomicU16, Ordering};
 
