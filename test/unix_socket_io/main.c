@@ -1166,6 +1166,37 @@ static int test_msg_waitall(void) {
 // MSG_DONTWAIT and MSG_PEEK
 // ---------------------------------------------------------------------------------------------
 
+// The timeout of a receive is for the whole call, not for each wait. A receive with MSG_WAITALL that
+// bytes wake up again and again, none of which fills its buffer, gives up when its time is over, with
+// the bytes that it has: a byte every 20 ms would take the 1.3 s that 64 bytes need, if the time
+// started again with each wake-up
+static int test_timeout_counts_over_all_waits(void) {
+    char buf[64];
+    int sv[2];
+    call_t c;
+    flow_t writer;
+
+    CHECK(make_pair(sv) == 0, "failed to create a socket pair");
+    CHECK(set_timeout(sv[0], SO_RCVTIMEO, TIMEOUT_MS) == 0, "failed to set SO_RCVTIMEO");
+    CHECK(flow_start(&writer, writer_main, sv[1], 200, 1, 0, 20) == 0,
+          "failed to start the writer");
+    CHECK(call_start(&c, call_recv, sv[0], buf, sizeof(buf), MSG_WAITALL) == 0,
+          "failed to start recv");
+    CHECK(call_wait(&c, WAKE_MS), "recv with a timeout does not return, though bytes come");
+    // The bytes of the time of the timeout, or none if the host is so slow that none came
+    CHECK((c.ret > 0 && c.ret < (long)sizeof(buf)) || (c.ret < 0 && c.err == EAGAIN),
+          "recv returned %ld bytes, after the bytes of %ld ms instead of those of %d ms", c.ret,
+          c.elapsed_ms, TIMEOUT_MS);
+    EXPECT_TIME(&c, TIMEOUT_MS, "recv with MSG_WAITALL");
+    call_finish(&c);
+    // The writer fails when the socket is closed
+    close(sv[0]);
+    CHECK(flow_join(&writer, WAKE_MS) ||
+          atomic_load(&writer.err) != 0, "the writer does not end");
+    close(sv[1]);
+    return 0;
+}
+
 // MSG_DONTWAIT makes a call of a blocking socket fail with EAGAIN instead of waiting, and leaves
 // the socket blocking
 static int test_msg_dontwait(void) {
@@ -1489,6 +1520,7 @@ static test_case_t test_cases[] = {
     TEST_CASE(test_timeout_is_not_changed_by_other_signals),
     TEST_CASE(test_interrupted_reads),
     TEST_CASE(test_msg_waitall),
+    TEST_CASE(test_timeout_counts_over_all_waits),
     TEST_CASE(test_msg_dontwait),
     TEST_CASE(test_msg_peek),
     TEST_CASE(test_msg_peek_waits_for_data),
