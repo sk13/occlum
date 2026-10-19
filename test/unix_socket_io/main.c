@@ -1779,6 +1779,119 @@ static int test_oob_flag_does_not_hang(void) {
     return 0;
 }
 
+// A receive into no bytes is a receive: it returns 0 if the socket has bytes or has reached its end,
+// fails with EAGAIN if it has none and must not wait, and waits else, as long as SO_RCVTIMEO says.
+// It takes no byte. A program may use recv(fd, NULL, 0, MSG_PEEK | MSG_DONTWAIT) to find out if there
+// are bytes. read() and readv() into no bytes return 0 at once, which Linux does for sockets.
+static const named_call_t zero_recv_calls[] = {
+    { "recv", call_recv }, { "recvfrom", call_recvfrom }, { "recvmsg", call_recvmsg },
+    { "recvmmsg", call_recvmmsg },
+};
+
+static int test_receive_into_no_bytes(void) {
+    char buf[8];
+    int sv[2];
+    call_t c;
+    stimulus_t s;
+
+    for (size_t i = 0; i < ARRAY_SIZE(zero_recv_calls); i++) {
+        const char *what = zero_recv_calls[i].name;
+        call_fn fn = zero_recv_calls[i].fn;
+        // recvmmsg returns the number of messages, which is one
+        long ok = fn == call_recvmmsg ? 1 : 0;
+        CHECK(make_pair(sv) == 0, "failed to create a socket pair");
+
+        // No bytes: the calls that must not wait fail
+        static const int no_wait[] = { MSG_DONTWAIT, MSG_DONTWAIT | MSG_PEEK,
+                                       MSG_DONTWAIT | MSG_WAITALL
+                                     };
+        for (size_t f = 0; f < ARRAY_SIZE(no_wait); f++) {
+            CHECK(call_start_n(&c, fn, sv[0], buf, 0, no_wait[f], 1) == 0, "failed to start %s",
+                  what);
+            EXPECT_NOW(&c, -1, EAGAIN, what);
+            call_finish(&c);
+        }
+        set_nonblocking(sv[0], 1);
+        for (int peek = 0; peek < 2; peek++) {
+            CHECK(call_start_n(&c, fn, sv[0], buf, 0, peek ? MSG_PEEK : 0, 1) == 0,
+                  "failed to start %s", what);
+            EXPECT_NOW(&c, -1, EAGAIN, what);
+            call_finish(&c);
+        }
+        set_nonblocking(sv[0], 0);
+
+        // A blocking socket waits for a byte, which the call leaves where it is
+        CHECK(call_start_n(&c, fn, sv[0], buf, 0, 0, 1) == 0, "failed to start %s", what);
+        CHECK(call_blocks(&c), "%s into no bytes returns on an empty socket", what);
+        CHECK(stimulus_start(&s, sv[1], 0, "x", 0) == 0, "failed to start");
+        stimulus_join(&s);
+        EXPECT_CALL(&c, WAKE_MS, ok, 0, what);
+        call_finish(&c);
+        CHECK(recv(sv[0], buf, sizeof(buf), MSG_DONTWAIT) == 1 && buf[0] == 'x',
+              "%s took the byte", what);
+
+        // The same with MSG_PEEK
+        CHECK(call_start_n(&c, fn, sv[0], buf, 0, MSG_PEEK, 1) == 0, "failed to start %s", what);
+        CHECK(call_blocks(&c), "%s into no bytes returns on an empty socket", what);
+        CHECK(stimulus_start(&s, sv[1], 0, "y", 0) == 0, "failed to start");
+        stimulus_join(&s);
+        EXPECT_CALL(&c, WAKE_MS, ok, 0, what);
+        call_finish(&c);
+
+        // With bytes it returns at once, and takes none, whatever the flags
+        static const int flags[] = { 0, MSG_DONTWAIT, MSG_PEEK, MSG_WAITALL };
+        for (size_t f = 0; f < ARRAY_SIZE(flags); f++) {
+            CHECK(call_start_n(&c, fn, sv[0], buf, 0, flags[f], 1) == 0, "failed to start %s",
+                  what);
+            EXPECT_NOW(&c, ok, 0, what);
+            call_finish(&c);
+        }
+        CHECK(recv(sv[0], buf, sizeof(buf), MSG_DONTWAIT) == 1 && buf[0] == 'y',
+              "%s took the byte", what);
+
+        // The end of the stream is a result, too
+        close(sv[1]);
+        CHECK(call_start_n(&c, fn, sv[0], buf, 0, 0, 1) == 0, "failed to start %s", what);
+        EXPECT_NOW(&c, ok, 0, what);
+        call_finish(&c);
+        close(sv[0]);
+
+        // The timeout of SO_RCVTIMEO ends the wait
+        CHECK(make_pair(sv) == 0, "failed to create a socket pair");
+        CHECK(set_timeout(sv[0], SO_RCVTIMEO, TIMEOUT_MS) == 0, "failed to set SO_RCVTIMEO");
+        CHECK(call_start_n(&c, fn, sv[0], buf, 0, 0, 1) == 0, "failed to start %s", what);
+        EXPECT_CALL(&c, WAKE_MS, -1, EAGAIN, what);
+        EXPECT_TIME(&c, TIMEOUT_MS, what);
+        call_finish(&c);
+        close(sv[0]);
+        close(sv[1]);
+    }
+
+    // read() and readv() do not wait for bytes that they have no room for
+    static const named_call_t read_calls[] = { { "read", call_read }, { "readv", call_readv } };
+    CHECK(make_pair(sv) == 0, "failed to create a socket pair");
+    for (size_t i = 0; i < ARRAY_SIZE(read_calls); i++) {
+        CHECK(call_start(&c, read_calls[i].fn, sv[0], buf, 0, 0) == 0, "failed to start %s",
+              read_calls[i].name);
+        EXPECT_NOW(&c, 0, 0, read_calls[i].name);
+        call_finish(&c);
+    }
+    close(sv[0]);
+    close(sv[1]);
+
+    // Also on a socket that is not connected, as Linux checks the length first
+    int idle = socket(AF_UNIX, SOCK_STREAM, 0);
+    CHECK(idle >= 0, "failed to create a socket");
+    for (size_t i = 0; i < ARRAY_SIZE(read_calls); i++) {
+        CHECK(call_start(&c, read_calls[i].fn, idle, buf, 0, 0) == 0, "failed to start %s",
+              read_calls[i].name);
+        EXPECT_NOW(&c, 0, 0, read_calls[i].name);
+        call_finish(&c);
+    }
+    close(idle);
+    return 0;
+}
+
 // ---------------------------------------------------------------------------------------------
 // SIGPIPE
 // ---------------------------------------------------------------------------------------------
@@ -2473,6 +2586,7 @@ static test_case_t test_cases[] = {
     TEST_CASE(test_msg_peek_of_a_long_queue),
     TEST_CASE(test_msg_flags_without_effect),
     TEST_CASE(test_oob_flag_does_not_hang),
+    TEST_CASE(test_receive_into_no_bytes),
     TEST_CASE(test_write_to_a_closed_peer_raises_sigpipe),
     TEST_CASE(test_blocked_sigpipe_stays_pending),
     TEST_CASE(test_sendmmsg_to_a_closed_peer_raises_sigpipe),
