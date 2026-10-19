@@ -11,7 +11,7 @@ lazy_static! {
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
 pub enum AddressSpaceKey {
     FileKey(usize),
-    AbstrKey(String),
+    AbstrKey(Vec<u8>),
 }
 
 impl AddressSpaceKey {
@@ -19,8 +19,8 @@ impl AddressSpaceKey {
         AddressSpaceKey::FileKey(inode)
     }
 
-    pub fn from_path(path: String) -> Self {
-        AddressSpaceKey::AbstrKey(path)
+    pub fn from_name(name: Vec<u8>) -> Self {
+        AddressSpaceKey::AbstrKey(name)
     }
 }
 
@@ -153,9 +153,7 @@ impl AddressSpace {
                     None
                 }
             }
-            UnixAddr::Abstract(path) => Some(AddressSpaceKey::from_path(
-                addr.path_str().unwrap().to_string(),
-            )),
+            UnixAddr::Abstract(name) => Some(AddressSpaceKey::from_name(name.clone())),
             UnixAddr::Unnamed => None,
         }
     }

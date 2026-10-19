@@ -288,10 +288,10 @@ impl Redirect {
         };
         let port = port.to_string();
         let addr = match self.to.strip_prefix('@') {
-            Some(name) => UnixAddr::Abstract(Self::expand(name, &ip, &port)),
+            Some(name) => UnixAddr::Abstract(Self::expand(name, &ip, &port).into_bytes()),
             None => UnixAddr::File(None, UnixPath::new(&Self::expand(&self.to, &ip, &port))),
         };
-        if addr.path_str()?.len() > MAX_UNIX_NAME_LEN {
+        if addr.path_bytes()?.len() > MAX_UNIX_NAME_LEN {
             return_errno!(ENAMETOOLONG, "the redirect target is too long");
         }
         Ok(addr)

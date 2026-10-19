@@ -1,21 +1,14 @@
-use crate::net::socket::CSockAddr;
-
 use super::*;
-use sgx_trts::c_str::CStr;
 use std::path::{Path, PathBuf};
 use std::{cmp, mem, slice, str};
 
-const MAX_PATH_LEN: usize = 108;
 const SUN_FAMILY_LEN: usize = mem::size_of::<libc::sa_family_t>();
-lazy_static! {
-    static ref SUN_PATH_OFFSET: usize = memoffset::offset_of!(libc::sockaddr_un, sun_path);
-}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum UnixAddr {
     Unnamed,
     File(Option<usize>, UnixPath), // An optional inode number and path. Use inode if there is one.
-    Abstract(String),
+    Abstract(Vec<u8>),             // The name after the leading NUL. It can have any bytes.
 }
 
 impl UnixAddr {
@@ -28,59 +21,37 @@ impl UnixAddr {
         if c_addr.sun_family != libc::AF_UNIX as libc::sa_family_t {
             return_errno!(EINVAL, "an unix address is expected");
         }
-        if c_len < std::mem::size_of::<libc::sa_family_t>() {
+        if c_len < SUN_FAMILY_LEN {
             return_errno!(EINVAL, "the length of the address is too small");
         } else if c_len > std::mem::size_of::<libc::sockaddr_un>() {
             return_errno!(EINVAL, "the length of the address is too large");
         }
 
-        if c_len == std::mem::size_of::<libc::sa_family_t>() {
+        if c_len == SUN_FAMILY_LEN {
             return Ok(Self::Unnamed);
         }
 
-        let path_len = c_len - std::mem::size_of::<libc::sa_family_t>();
-        debug_assert!(path_len > 1);
-        if path_len == 1 {
-            // Both pathname and abstract addresses require a path_len greater than 1.
-            return_errno!(EINVAL, "the pathname must not be empty");
-        }
+        // At most the 108 bytes of sun_path, as c_len is checked above
+        let path_len = c_len - SUN_FAMILY_LEN;
+        // Safety. Converting from &[c_char] to &[u8] is harmless.
+        let path: &[u8] =
+            unsafe { slice::from_raw_parts(c_addr.sun_path.as_ptr() as *const u8, path_len) };
 
         // A pathname address
-        if c_addr.sun_path[0] != 0 {
-            // More sanity check
-            let last_char = c_addr.sun_path[path_len - 1];
-            if last_char != 0 {
-                return_errno!(EINVAL, "the pathname is not null-terminated");
-            }
+        if path[0] != 0 {
+            // Like Linux, the pathname ends with the first NUL, or with the
+            // address if there is none: a program may count the NUL in the
+            // length of the address, or not.
+            let end = path.iter().position(|byte| *byte == 0).unwrap_or(path_len);
+            let pathname =
+                str::from_utf8(&path[..end]).map_err(|_| errno!(EINVAL, "path is not UTF8"))?;
 
-            let pathname = {
-                // Safety. Converting from &[c_char] to &[i8] is harmless.
-                let path_slice: &[i8] = unsafe {
-                    let char_slice = &c_addr.sun_path[..(path_len - 1)];
-                    std::mem::transmute(char_slice)
-                };
-                let path_cstr = unsafe { CStr::from_ptr(path_slice.as_ptr()) };
-                if path_cstr.to_bytes_with_nul().len() > MAX_PATH_LEN {
-                    return_errno!(EINVAL, "no null in the address");
-                }
-                path_cstr
-                    .to_str()
-                    .map_err(|_| errno!(EINVAL, "path is not UTF8"))?
-                    .to_string()
-            };
-
-            Ok(Self::File(None, UnixPath::new(&pathname)))
+            Ok(Self::File(None, UnixPath::new(pathname)))
         }
-        // An abstract address
+        // An abstract address, whose name is made of all the bytes after the
+        // first NUL, the NULs at the end included
         else {
-            // Safety. Converting from &[c_char] to &[u8] is harmless.
-            let u8_slice: &[u8] = unsafe {
-                let char_slice = &c_addr.sun_path[1..(path_len)];
-                std::mem::transmute(char_slice)
-            };
-            Ok(Self::Abstract(
-                str::from_utf8(u8_slice).unwrap().to_string(),
-            ))
+            Ok(Self::Abstract(path[1..].to_vec()))
         }
     }
 
@@ -94,33 +65,39 @@ impl UnixAddr {
     }
 
     pub fn copy_to_slice(&self, dst: &mut [u8]) -> usize {
-        let (raw_addr, addr_len) = self.to_c();
-        let src =
-            unsafe { std::slice::from_raw_parts(&raw_addr as *const _ as *const u8, addr_len) };
-        let copied = std::cmp::min(dst.len(), addr_len);
+        let src = self.to_bytes();
+        let copied = std::cmp::min(dst.len(), src.len());
         dst[..copied].copy_from_slice(&src[..copied]);
         copied
     }
 
     pub fn raw_len(&self) -> usize {
-        /// The '/0' at the end of Self::File counts
-        match self.path_str() {
-            Ok(str) => str.len() + 1 + *SUN_PATH_OFFSET,
-            Err(_) => std::mem::size_of::<libc::sa_family_t>(),
-        }
+        self.to_bytes().len()
     }
 
-    pub fn path_str(&self) -> Result<&str> {
+    /// Returns the path of a pathname address, or the name of an abstract
+    /// address (without the leading NUL).
+    pub fn path_bytes(&self) -> Result<&[u8]> {
         match self {
-            Self::File(_, unix_path) => Ok(&unix_path.path_str()),
-            Self::Abstract(path) => Ok(&path),
+            Self::File(_, unix_path) => Ok(unix_path.path_str().as_bytes()),
+            Self::Abstract(name) => Ok(name),
             Self::Unnamed => return_errno!(EINVAL, "can't get path name for unnamed socket"),
         }
     }
 
     pub fn to_c_storage(&self) -> (libc::sockaddr_storage, usize) {
-        let c_un_addr = self.to_c();
-        c_un_addr.to_c_storage()
+        let bytes = self.to_bytes();
+        let mut c_storage = unsafe { mem::zeroed::<libc::sockaddr_storage>() };
+        // Safety. Converting from sockaddr_storage to &mut [u8] is harmless.
+        let dst = unsafe {
+            slice::from_raw_parts_mut(
+                &mut c_storage as *mut _ as *mut u8,
+                mem::size_of::<libc::sockaddr_storage>(),
+            )
+        };
+        let len = cmp::min(bytes.len(), dst.len());
+        dst[..len].copy_from_slice(&bytes[..len]);
+        (c_storage, len)
     }
 
     pub fn to_raw(&self) -> SockAddr {
@@ -128,34 +105,24 @@ impl UnixAddr {
         SockAddr::from_c_storage(&storage, addr_len)
     }
 
-    fn to_c(&self) -> (libc::sockaddr_un, usize) {
-        const FAMILY_LEN: usize = std::mem::size_of::<libc::sa_family_t>();
-
-        let mut addr: libc::sockaddr_un = unsafe { mem::zeroed() };
-        addr.sun_family = Domain::LOCAL as libc::sa_family_t;
-
-        let addr_len = match self {
-            Self::Unnamed => FAMILY_LEN,
+    /// The bytes of the C address: the family, and the path with its NUL, or
+    /// the name with its leading NUL. Like in Linux, the length of a pathname
+    /// address counts the NUL, which does not fit into `sockaddr_un` if the
+    /// path has 108 characters.
+    fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = (Domain::LOCAL as libc::sa_family_t).to_ne_bytes().to_vec();
+        match self {
+            Self::Unnamed => (),
             Self::File(_, unix_path) => {
-                let path_str = unix_path.path_str();
-                let buf_len = path_str.len();
-                /// addr is initialized to all zeros and try_from_raw guarentees
-                /// unix_path length is shorter than sun_path, so sun_path here
-                /// will always have a null terminator
-                addr.sun_path[..buf_len]
-                    .copy_from_slice(unsafe { &*(path_str.as_bytes() as *const _ as *const [i8]) });
-                buf_len + *SUN_PATH_OFFSET + 1
+                bytes.extend_from_slice(unix_path.path_str().as_bytes());
+                bytes.push(0);
             }
-            Self::Abstract(path_str) => {
-                addr.sun_path[0] = 0;
-                let buf_len = path_str.len() + 1;
-                addr.sun_path[1..buf_len]
-                    .copy_from_slice(unsafe { &*(path_str.as_bytes() as *const _ as *const [i8]) });
-                buf_len + *SUN_PATH_OFFSET
+            Self::Abstract(name) => {
+                bytes.push(0);
+                bytes.extend_from_slice(name);
             }
-        };
-
-        (addr, addr_len)
+        }
+        bytes
     }
 }
 
