@@ -388,8 +388,11 @@ impl Observer<IoEvents> for RelayNotifier {
         }
 
         if event.contains(IoEvents::ERR) {
+            // The peer cannot read any more, which Linux tells a poller, too, as it wakes it up
+            // whatever it waits for: the socket is writable if it has room, which a poller that
+            // waits for room, or an edge triggered epoll, has to find out
             event -= IoEvents::ERR;
-            event |= IoEvents::HUP;
+            event |= IoEvents::HUP | IoEvents::OUT;
         }
 
         // A notifier can only have events after observe_endpoint
