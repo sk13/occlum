@@ -1008,6 +1008,78 @@ static int test_redirected_sockets_time_out() {
     return 0;
 }
 
+// Returns the number of bytes that the socket takes before a write would block
+static long fill_nonblocking(int fd) {
+    static char buf[4096];
+    int flags = fcntl(fd, F_GETFL);
+    if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+        return -1;
+    }
+    long total = 0;
+    ssize_t n;
+    while (total < (4L << 20) && (n = write(fd, buf, sizeof(buf))) > 0) {
+        total += n;
+    }
+    fcntl(fd, F_SETFL, flags);
+    return total;
+}
+
+// SO_SNDBUF of a redirected socket limits the bytes that it has in flight, as it does for a Unix
+// socket, also if the socket is connected already, and the socket that a redirected listener
+// accepts has the size of the listener, as the sockets that a TCP socket accepts do
+static int test_redirected_sockets_limit_the_send_buffer() {
+    int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in addr = addr4("127.0.0.1", REDIRECTED_PORT);
+    // The options of the TCP socket are lost when it is replaced, but for the timeouts: the program
+    // sets the size on the socket that replaced it
+    int size = 4096;
+    if (listen_fd < 0 || bind(listen_fd, SA(addr), sizeof(addr)) < 0 ||
+            setsockopt(listen_fd, SOL_SOCKET, SO_SNDBUF, &size, sizeof(size)) < 0 ||
+            listen(listen_fd, 4) < 0) {
+        THROW_ERROR("listening on the redirected address failed");
+    }
+    int client_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (client_fd < 0 || connect(client_fd, SA(addr), sizeof(addr)) < 0) {
+        THROW_ERROR("connecting to the redirected address failed");
+    }
+    int accepted_fd = accept(listen_fd, NULL, NULL);
+    if (accepted_fd < 0) {
+        THROW_ERROR("accept failed");
+    }
+
+    // The accepted socket shows the size of the listener, and is limited by it, the socket that
+    // connected has the default size
+    if (get_int_opt(accepted_fd, SOL_SOCKET, SO_SNDBUF) != 2 * size) {
+        THROW_ERROR("the accepted socket shows a send buffer of %d bytes, not %d",
+                    get_int_opt(accepted_fd, SOL_SOCKET, SO_SNDBUF), 2 * size);
+    }
+    long accepted_bytes = fill_nonblocking(accepted_fd);
+    long client_bytes = fill_nonblocking(client_fd);
+    if (accepted_bytes <= 0 || accepted_bytes > 50000) {
+        THROW_ERROR("the accepted socket with a send buffer of %d bytes takes %ld bytes",
+                    2 * size,
+                    accepted_bytes);
+    }
+    if (client_bytes < 100000) {
+        THROW_ERROR("the socket that connected takes only %ld bytes", client_bytes);
+    }
+
+    // A socket that is connected has the size that the program sets at once
+    int second_fd = socket(AF_INET, SOCK_STREAM, 0), third_fd = -1;
+    if (second_fd < 0 || connect(second_fd, SA(addr), sizeof(addr)) < 0 ||
+            setsockopt(second_fd, SOL_SOCKET, SO_SNDBUF, &size, sizeof(size)) < 0 ||
+            (third_fd = accept(listen_fd, NULL, NULL)) < 0) {
+        THROW_ERROR("the second connection failed");
+    }
+    long second_bytes = fill_nonblocking(second_fd);
+    if (second_bytes <= 0 || second_bytes > 50000) {
+        THROW_ERROR("the socket with a send buffer of %d bytes, set after connect, takes %ld bytes",
+                    2 * size, second_bytes);
+    }
+    close_files(5, third_fd, second_fd, accepted_fd, client_fd, listen_fd);
+    return 0;
+}
+
 // ============================================================================
 // Test suite main
 // ============================================================================
@@ -1026,6 +1098,7 @@ static test_case_t test_cases[] = {
     TEST_CASE(test_connect_timeout_on_a_full_backlog),
     TEST_CASE(test_accept_timeout),
     TEST_CASE(test_redirected_sockets_time_out),
+    TEST_CASE(test_redirected_sockets_limit_the_send_buffer),
 };
 
 int main(int argc, const char *argv[]) {
