@@ -768,6 +768,69 @@ static int test_interrupted_connect_leaves_the_room_to_the_next(void) {
     return 0;
 }
 
+// A connect() that waits for room and finds its socket connected already, because another thread
+// has connected it meanwhile, fails with EISCONN, and leaves the room to the connect() behind it.
+// Two threads connect one socket and a third connects another one, on a full backlog. The first
+// thread connects when an accept() makes room, the second one fails when the next accept() makes
+// room for it, and the third one gets that room. The listener has room for one connection again,
+// not none. Linux does not pass the room on: the third thread waits for another accept(), so that
+// only Occlum is checked
+static int test_connect_with_eisconn_leaves_the_room_to_the_next(void) {
+    unix_addr_t a;
+    int l = listener(&a, 0);
+    CHECK(l >= 0, "failed to listen");
+    int first = new_socket(0);
+    CHECK(connect_to(first, &a) == 0, "failed to connect");
+
+    // The threads wait for room in this order
+    int shared = new_socket(0), other = new_socket(0);
+    op_t con_a, con_b, con_c;
+    CHECK(op_start_connect(&con_a, shared, &a) == 0, "failed to start the thread");
+    sleep_ms(SETTLE_MS);
+    CHECK(op_start_connect(&con_b, shared, &a) == 0, "failed to start the thread");
+    sleep_ms(SETTLE_MS);
+    CHECK(op_start_connect(&con_c, other, &a) == 0, "failed to start the thread");
+    CHECK(op_blocks(&con_c) && !op_done(&con_a) && !op_done(&con_b),
+          "connect() on a full backlog does not wait");
+
+    // Takes the connection that was queued, and makes room for the first thread
+    int s1 = accept(l, NULL, NULL);
+    CHECK(s1 >= 0, "failed to accept");
+    EXPECT_RETURNS(&con_a, 0, 0, "connect() after the first accept");
+    op_finish(&con_a);
+    // Takes the connection of the first thread, and makes room for the second one, which fails
+    int s2 = accept(l, NULL, NULL);
+    CHECK(s2 >= 0, "failed to accept the connection of the first thread");
+    EXPECT_RETURNS(&con_b, -1, EISCONN, "connect() of a socket that is connected already");
+    op_finish(&con_b);
+
+    if (in_occlum()) {
+        // The room that the second thread gives back goes to the third one
+        EXPECT_RETURNS(&con_c, 0, 0, "connect() behind the one that failed with EISCONN");
+        op_finish(&con_c);
+        int s3 = accept(l, NULL, NULL);
+        CHECK(s3 >= 0, "failed to accept the connection of the third thread");
+        close(s3);
+        // and the room that it reserved is not lost: the backlog 0 takes one connection
+        int fds[4];
+        int n = fill_backlog(&a, fds, 4);
+        CHECK(n == 1, "the backlog 0 takes %d connections after the failed connect()", n);
+        close_all(fds, n);
+    }
+    // A thread that still waits is refused when the listener is closed
+    close(l);
+    if (!op_done(&con_c)) {
+        EXPECT_RETURNS(&con_c, -1, ECONNREFUSED, "connect() whose listener is closed");
+        op_finish(&con_c);
+    }
+    close(s2);
+    close(s1);
+    close(other);
+    close(shared);
+    close(first);
+    return 0;
+}
+
 // SO_SNDTIMEO ends the wait of connect() on a full backlog with EAGAIN
 static int test_connect_timeout_on_full_backlog(void) {
     unix_addr_t a;
@@ -1555,6 +1618,7 @@ static test_case_t test_cases[] = {
     TEST_CASE(test_blocked_connects_proceed_one_by_one),
     TEST_CASE(test_many_blocked_connects_all_proceed),
     TEST_CASE(test_interrupted_connect_leaves_the_room_to_the_next),
+    TEST_CASE(test_connect_with_eisconn_leaves_the_room_to_the_next),
     TEST_CASE(test_connect_timeout_on_full_backlog),
     TEST_CASE(test_connect_on_full_backlog_is_interrupted),
     TEST_CASE(test_blocked_connect_is_refused_when_the_listener_closes),
