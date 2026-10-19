@@ -1,5 +1,5 @@
 // Reading and writing on unix stream sockets: what the calls return when they block, how long they
-// wait, and what the flags of the send and receive calls do. The expectations are
+// wait, and what the flags and the addresses of the send and receive calls do. The expectations are
 // the behavior of Linux (checked on Linux 7.0): the test passes there, too (gcc -pthread
 // -I../include main.c).
 //
@@ -8,7 +8,9 @@
 //    EINTR and EAGAIN if there are none). A nonblocking socket, or MSG_DONTWAIT, writes what fits.
 //  - SO_RCVTIMEO and SO_SNDTIMEO end a wait with EAGAIN. A receive with MSG_WAITALL returns the
 //    bytes that came by then. The timeouts belong to the socket, not to the descriptor.
-//  - MSG_DONTWAIT, MSG_PEEK and MSG_WAITALL, and the flags that have no effect.
+//  - MSG_DONTWAIT, MSG_PEEK and MSG_WAITALL, the flags that have no effect, and the address of a
+//    send on a connected (EISCONN) or an unconnected (EOPNOTSUPP) socket.
+//  - recvmsg and recvfrom tell the name of the peer.
 //
 // MSG_OOB is not supported by the LibOS: it takes the byte as plain data (see
 // test_oob_flag_does_not_hang).
@@ -177,6 +179,57 @@ static size_t check_pattern(const char *buf, size_t len, size_t pos) {
         }
     }
     return len;
+}
+
+typedef struct {
+    struct sockaddr_un sa;
+    socklen_t len;
+} unix_addr_t;
+
+// A new abstract address, which needs no file
+static unix_addr_t new_addr(void) {
+    static int counter;
+    unix_addr_t a;
+    memset(&a, 0, sizeof(a));
+    a.sa.sun_family = AF_UNIX;
+    int n = snprintf(a.sa.sun_path + 1, sizeof(a.sa.sun_path) - 1,
+                     "unix_socket_io.%d.%d", (int)getpid(), counter++);
+    a.len = offsetof(struct sockaddr_un, sun_path) + 1 + n;
+    return a;
+}
+
+// Makes a listening socket at a new address, which is returned in `listener_addr`, and a client
+// that is connected to it, and the socket that the listener accepts. The client is bound to an
+// address of its own, which is returned in `client_addr`, if `bind_client`. The listener is closed.
+static int make_connection(int *client, int *server, unix_addr_t *listener_addr,
+                           unix_addr_t *client_addr, int bind_client) {
+    *listener_addr = new_addr();
+    int l = socket(AF_UNIX, SOCK_STREAM, 0);
+    int c = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (l < 0 || c < 0) {
+        return -1;
+    }
+    if (bind(l, (struct sockaddr *)&listener_addr->sa, listener_addr->len) < 0 ||
+            listen(l, 4) < 0) {
+        return -1;
+    }
+    if (bind_client) {
+        *client_addr = new_addr();
+        if (bind(c, (struct sockaddr *)&client_addr->sa, client_addr->len) < 0) {
+            return -1;
+        }
+    }
+    if (connect(c, (struct sockaddr *)&listener_addr->sa, listener_addr->len) < 0) {
+        return -1;
+    }
+    int s = accept(l, NULL, NULL);
+    if (s < 0) {
+        return -1;
+    }
+    close(l);
+    *client = c;
+    *server = s;
+    return 0;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1507,6 +1560,143 @@ static int test_oob_flag_does_not_hang(void) {
     return 0;
 }
 
+// ---------------------------------------------------------------------------------------------
+// Addresses
+// ---------------------------------------------------------------------------------------------
+
+// An address in a send is an error: EISCONN if the socket is connected, else EOPNOTSUPP. An
+// address of length 0 is no address.
+static int test_sendto_and_sendmsg_with_an_address(void) {
+    int client, server;
+    unix_addr_t laddr, caddr;
+    char buf[8];
+    call_t c;
+    CHECK(make_connection(&client, &server, &laddr, &caddr, 1) == 0, "failed to connect");
+
+    // Connected: the data is not sent
+    for (int which = 0; which < 2; which++) {
+        for (size_t i = 0; i < 2; i++) {
+            // sendto and sendmsg
+            call_fn fn = i == 0 ? call_sendto : call_sendmsg;
+            const char *what = i == 0 ? "sendto" : "sendmsg";
+            call_init(&c, fn, which ? server : client, "x", 1, MSG_NOSIGNAL);
+            c.name = which ? caddr.sa : laddr.sa;
+            c.namelen = which ? caddr.len : laddr.len;
+            CHECK(call_run(&c) == 0, "failed to start %s", what);
+            EXPECT_NOW(&c, -1, EISCONN, what);
+            call_finish(&c);
+        }
+    }
+    CHECK(drain(server) == 0 && drain(client) == 0, "bytes arrive");
+
+    // An address of length 0 is no address: the data is sent
+    CHECK(sendto(client, "ab", 2, MSG_NOSIGNAL, (struct sockaddr *)&laddr.sa, 0) == 2,
+          "sendto with an address of length 0 fails");
+    CHECK(recv(server, buf, sizeof(buf), 0) == 2, "the bytes do not arrive");
+    close(client);
+    close(server);
+
+    // Not connected: an idle socket, and a listening socket
+    for (int listening = 0; listening < 2; listening++) {
+        unix_addr_t a = new_addr();
+        int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+        if (listening) {
+            CHECK(bind(fd, (struct sockaddr *)&a.sa, a.len) == 0 && listen(fd, 1) == 0,
+                  "failed to listen");
+        }
+        for (size_t i = 0; i < 2; i++) {
+            call_fn fn = i == 0 ? call_sendto : call_sendmsg;
+            const char *what = i == 0 ? "sendto" : "sendmsg";
+            call_init(&c, fn, fd, "x", 1, MSG_NOSIGNAL);
+            c.name = laddr.sa;
+            c.namelen = laddr.len;
+            CHECK(call_run(&c) == 0, "failed to start %s", what);
+            EXPECT_NOW(&c, -1, EOPNOTSUPP, what);
+            call_finish(&c);
+
+            // No address, or one of length 0
+            CHECK(call_start(&c, fn, fd, "x", 1, MSG_NOSIGNAL) == 0, "failed to start %s", what);
+            EXPECT_NOW(&c, -1, ENOTCONN, what);
+            call_finish(&c);
+        }
+        errno = 0;
+        CHECK(sendto(fd, "x", 1, MSG_NOSIGNAL, (struct sockaddr *)&laddr.sa, 0) == -1 &&
+              errno == ENOTCONN, "sendto with an address of length 0 does not fail with ENOTCONN");
+        close(fd);
+    }
+    return 0;
+}
+
+// recvfrom and recvmsg tell the name that the peer is bound to, which is that of the listener for
+// the socket that accept returns, and nothing for a peer that has no name
+static int test_receive_tells_the_name_of_the_peer(void) {
+    static const named_call_t calls[] = { { "recvfrom", call_recvfrom }, { "recvmsg", call_recvmsg } };
+    int client, server;
+    unix_addr_t laddr, caddr;
+    char buf[8];
+    call_t c;
+
+    for (int bound = 0; bound < 2; bound++) {
+        CHECK(make_connection(&client, &server, &laddr, &caddr, bound) == 0, "failed to connect");
+        for (size_t i = 0; i < ARRAY_SIZE(calls); i++) {
+            const char *what = calls[i].name;
+
+            // The server reads what the client wrote: the name of the client, if it has one
+            CHECK(write(client, "x", 1) == 1, "failed to write");
+            CHECK(call_start(&c, calls[i].fn, server, buf, sizeof(buf), 0) == 0,
+                  "failed to start %s", what);
+            EXPECT_NOW(&c, 1, 0, what);
+            if (bound) {
+                CHECK(c.namelen == caddr.len && memcmp(&c.name, &caddr.sa, caddr.len) == 0,
+                      "%s returns a name of length %u, instead of the name of the client (%u)",
+                      what, (unsigned)c.namelen, (unsigned)caddr.len);
+            } else {
+                CHECK(c.namelen == 0, "%s returns a name of length %u for an unnamed peer", what,
+                      (unsigned)c.namelen);
+            }
+            call_finish(&c);
+
+            // The client reads what the server wrote: the name of the listener
+            CHECK(write(server, "y", 1) == 1, "failed to write");
+            CHECK(call_start(&c, calls[i].fn, client, buf, sizeof(buf), 0) == 0,
+                  "failed to start %s", what);
+            EXPECT_NOW(&c, 1, 0, what);
+            CHECK(c.namelen == laddr.len && memcmp(&c.name, &laddr.sa, laddr.len) == 0,
+                  "%s returns a name of length %u, instead of the name of the listener (%u)",
+                  what, (unsigned)c.namelen, (unsigned)laddr.len);
+            call_finish(&c);
+        }
+
+        // A name that does not fit is cut, and its whole length is returned
+        if (bound) {
+            struct sockaddr_un small;
+            socklen_t len = 5;
+            memset(&small, 0, sizeof(small));
+            CHECK(write(client, "x", 1) == 1, "failed to write");
+            CHECK(recvfrom(server, buf, sizeof(buf), 0, (struct sockaddr *)&small, &len) == 1,
+                  "failed to receive");
+            CHECK(len == caddr.len && memcmp(&small, &caddr.sa, 5) == 0 &&
+                  ((char *)&small)[5] == 0, "a name that is cut is wrong (length %u)",
+                  (unsigned)len);
+        }
+        close(client);
+        close(server);
+    }
+
+    // A socket pair has no names
+    int sv[2];
+    CHECK(make_pair(sv) == 0, "failed to create a socket pair");
+    CHECK(write(sv[1], "x", 1) == 1, "failed to write");
+    CHECK(call_start(&c, call_recvmsg, sv[0], buf, sizeof(buf), 0) == 0,
+          "failed to start recvmsg");
+    EXPECT_NOW(&c, 1, 0, "recvmsg");
+    CHECK(c.namelen == 0, "recvmsg returns a name for a socket pair");
+    call_finish(&c);
+    close(sv[0]);
+    close(sv[1]);
+    return 0;
+}
+
 static test_case_t test_cases[] = {
     TEST_CASE(test_blocking_writes_write_everything),
     TEST_CASE(test_concurrent_writes_deliver_everything),
@@ -1527,6 +1717,8 @@ static test_case_t test_cases[] = {
     TEST_CASE(test_msg_peek_of_a_long_queue),
     TEST_CASE(test_msg_flags_without_effect),
     TEST_CASE(test_oob_flag_does_not_hang),
+    TEST_CASE(test_sendto_and_sendmsg_with_an_address),
+    TEST_CASE(test_receive_tells_the_name_of_the_peer),
 };
 
 int main(int argc, const char *argv[]) {
