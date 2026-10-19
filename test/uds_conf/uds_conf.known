@@ -46,7 +46,6 @@ io.fionread.idle
 io.fionread.listening
 io.idle.read
 io.idle.recv
-io.idle.read_zero
 
 # group c08_msgflags
 flags.sockatmark

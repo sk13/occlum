@@ -397,11 +397,26 @@ impl Stream {
             all: flags.contains(RecvFlags::MSG_WAITALL),
             ..Default::default()
         };
+        // Like Linux, a receive into no bytes waits for the bytes of the socket, or its end, which
+        // it does not take: EAGAIN if there are none and the call does not wait
+        if bufs.iter().all(|buf| buf.is_empty()) {
+            return endpoint.peek(&mut [&mut [0]], &opts).map(|_| 0);
+        }
         if flags.contains(RecvFlags::MSG_PEEK) {
             endpoint.peek(bufs, &opts)
         } else {
             endpoint.read(bufs, &opts)
         }
+    }
+
+    /// Reads the bytes into the buffers, which is what read() and readv() do. Unlike the receive
+    /// calls, they return 0 at once if there is no room for bytes, as Linux does, also on a socket
+    /// that is not connected.
+    pub(super) fn read_bufs(&self, bufs: &mut [&mut [u8]]) -> Result<usize> {
+        if bufs.iter().all(|buf| buf.is_empty()) {
+            return Ok(0);
+        }
+        self.recv(bufs, RecvFlags::empty())
     }
 
     /// Sends the bytes of the buffers, which is what all the calls that write to the socket do. A

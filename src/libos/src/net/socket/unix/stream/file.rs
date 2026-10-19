@@ -13,7 +13,7 @@ const SOCKET_DEV: usize = 8;
 
 impl File for Stream {
     fn read(&self, buf: &mut [u8]) -> Result<usize> {
-        self.recv(&mut [buf], RecvFlags::empty())
+        self.read_bufs(&mut [buf])
     }
 
     fn write(&self, buf: &[u8]) -> Result<usize> {
@@ -41,7 +41,7 @@ impl File for Stream {
     }
 
     fn readv(&self, bufs: &mut [&mut [u8]]) -> Result<usize> {
-        self.recv(bufs, RecvFlags::empty())
+        self.read_bufs(bufs)
     }
 
     fn writev(&self, bufs: &[&[u8]]) -> Result<usize> {
