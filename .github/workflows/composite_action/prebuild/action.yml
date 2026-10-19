@@ -16,7 +16,6 @@ runs:
         docker exec ${{ inputs.container-name }} bash -c "git config --global --add safe.directory /root/occlum/deps/itoa-sgx";
         docker exec ${{ inputs.container-name }} bash -c "git config --global --add safe.directory /root/occlum/deps/mlsdisk";
         docker exec ${{ inputs.container-name }} bash -c "git config --global --add safe.directory /root/occlum/deps/resolv-conf";
-        docker exec ${{ inputs.container-name }} bash -c "git config --global --add safe.directory /root/occlum/deps/ringbuf";
         docker exec ${{ inputs.container-name }} bash -c "git config --global --add safe.directory /root/occlum/deps/rust-sgx-sdk";
         docker exec ${{ inputs.container-name }} bash -c "git config --global --add safe.directory /root/occlum/deps/sefs";
         docker exec ${{ inputs.container-name }} bash -c "git config --global --add safe.directory /root/occlum/deps/serde-json-sgx";

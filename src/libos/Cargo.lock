@@ -34,7 +34,6 @@ dependencies = [
  "rcore-fs-unionfs",
  "regex",
  "resolv-conf",
- "ringbuf",
  "scroll",
  "serde 1.0.104",
  "serde_json",
@@ -924,13 +923,6 @@ name = "resolv-conf"
 version = "0.7.0"
 dependencies = [
  "quick-error",
- "sgx_tstd",
-]
-
-[[package]]
-name = "ringbuf"
-version = "0.2.1"
-dependencies = [
  "sgx_tstd",
 ]
 

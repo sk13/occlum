@@ -18,9 +18,6 @@
 	path = deps/grpc-rust
 	url = https://github.com/stepancheg/grpc-rust.git
 	branch = v0.8
-[submodule "deps/ringbuf"]
-	path = deps/ringbuf
-	url = https://github.com/agerasev/ringbuf.git
 [submodule "deps/resolv-conf"]
 	path = deps/resolv-conf
 	url = https://github.com/tailhook/resolv-conf.git

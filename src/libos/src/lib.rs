@@ -45,7 +45,6 @@ extern crate rcore_fs_sefs;
 extern crate rcore_fs_unionfs;
 #[macro_use]
 extern crate derive_builder;
-extern crate ringbuf;
 extern crate serde;
 extern crate serde_json;
 #[macro_use]

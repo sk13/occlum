@@ -1,9 +1,10 @@
 //! A single-producer single-consumer queue whose memory follows its contents.
 //!
-//! The ring buffer of the `ringbuf` crate allocates its whole capacity when it is created. That is
-//! 208 KiB for each direction of a unix socket connection and 1 MiB for a pipe, whether or not
-//! anything is ever written: a connection that waits in a backlog took 416 KiB of the kernel heap,
-//! so 91 of them exhausted the 40 MB heap of the test configuration and aborted the enclave.
+//! The ring buffer that the channels used before (the `ringbuf` crate) allocated its whole
+//! capacity when it was created. That was 208 KiB for each direction of a unix socket connection
+//! and 1 MiB for a pipe, whether or not anything was ever written: a connection that waited in a
+//! backlog took 416 KiB of the kernel heap, so 91 of them exhausted the 40 MB heap of the test
+//! configuration and aborted the enclave.
 //!
 //! A `Ring` keeps its items in a list of chunks instead. The producer appends a chunk when the one
 //! that it fills is full, and the consumer gives up a chunk when it has read it, so the memory in
@@ -12,7 +13,7 @@
 //! and one that carries a bulk transfer reaches the largest chunk, 16 KiB for a unix socket and
 //! 64 KiB for a pipe.
 //!
-//! The two ends are used like those of `ringbuf`: a producer and a consumer may work in
+//! The two ends are used like those of that ring buffer: a producer and a consumer may work in
 //! parallel, each of them from one thread at a time, which the channel guarantees with a lock per
 //! end. No lock is needed between them. The items move through the chunks, which hold them in
 //! order, and two counters tell how many items were pushed and popped altogether, so the length of
