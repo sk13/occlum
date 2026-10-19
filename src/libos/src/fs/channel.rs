@@ -1,9 +1,12 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Weak;
+use std::time::Duration;
 
 use self::ring::{NoMemory, PushError, Ring, RingConsumer, RingProducer};
 use super::{IoEvents, IoNotifier};
-use crate::events::{Event, EventFilter, Notifier, Observer, Waiter, WaiterQueueObserver};
+use crate::events::{
+    Event, EventFilter, Notifier, Observer, Waiter, WaiterQueue, WaiterQueueObserver,
+};
 use crate::prelude::*;
 
 mod ring;
@@ -114,6 +117,79 @@ impl<I: Copy> Channel<I> {
     /// Pop a slice of items from the channel.
     pub fn pop_slice(&self, items: &mut [I]) -> Result<usize> {
         self.consumer.pop_slice(items)
+    }
+}
+
+/// How a call that moves items through a channel waits, besides the flag of its endpoint.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct IoOpts {
+    /// The call does not wait for the other end, as if the endpoint were nonblocking
+    /// (`MSG_DONTWAIT`).
+    pub nonblocking: bool,
+    /// The time that the call waits for the other end, which is not limited if it is `None`. The
+    /// call fails with EAGAIN if it has waited that long, or it returns the items that it has moved
+    /// so far. A writer waits that long for room, so its time starts again when it has made
+    /// progress; a reader waits that long in all.
+    pub timeout: Option<Duration>,
+    /// The call moves all the items if it blocks: it waits for the other end as long as it takes
+    /// (`write` of a blocking pipe or socket, `MSG_WAITALL`), unless the end of the channel, an
+    /// interrupt, or the timeout stops it, which return the items that were moved so far, if some
+    /// were. A call that does not block moves what it can. Without it, a call that has moved
+    /// items returns them.
+    pub all: bool,
+}
+
+/// What an attempt of a call that moves items has come to.
+enum Attempt<T> {
+    /// The call is over
+    Done(T),
+    /// The call has to wait for the other end
+    Wait,
+    /// The call has moved some items, but not all, and has to wait for the other end for more
+    WaitAfterProgress,
+}
+
+/// Makes attempts until one of them is over. A thread that makes no progress waits for a wake-up of
+/// the queue between the attempts, for the time of the timeout, which is counted over all the
+/// waits. After that time it has one more attempt, and fails with EAGAIN if that is not over. If
+/// an attempt has made progress, the time starts again. EINTR if a signal interrupts the wait.
+fn wait_for<T>(
+    queue: &WaiterQueue,
+    timeout: Option<Duration>,
+    mut attempt: impl FnMut() -> Result<Attempt<T>>,
+) -> Result<T> {
+    // Try without creating a waiter. This saves some CPU cycles if the first attempt succeeds.
+    if let Attempt::Done(value) = attempt()? {
+        return Ok(value);
+    }
+
+    let waiter = Waiter::new();
+    // The waiter stays in the queue unless the queue wakes it up. Dequeue it whenever the loop is
+    // left (a successful attempt, an error, or an interrupted wait), or the queue of an idle
+    // channel would grow with every call.
+    let _dequeue = queue.dequeue_on_drop(&waiter);
+    let mut remaining = timeout;
+    let mut timed_out = false;
+    loop {
+        // Before the attempt, so that no wake-up gets lost between the attempt and the wait
+        queue.reset_and_enqueue(&waiter);
+        match attempt()? {
+            Attempt::Done(value) => return Ok(value),
+            Attempt::Wait => (),
+            Attempt::WaitAfterProgress => {
+                remaining = timeout;
+                timed_out = false;
+            }
+        }
+        if timed_out {
+            return_errno!(EAGAIN, "the timeout is over");
+        }
+        // The time that is left is kept if the waiter has to go on waiting
+        match waiter.wait_mut(remaining.as_mut()) {
+            Ok(()) => (),
+            Err(e) if e.errno() == ETIMEDOUT => timed_out = true,
+            Err(e) => return Err(e),
+        }
     }
 }
 
@@ -308,46 +384,78 @@ impl<I: Copy> Producer<I> {
     }
 
     pub fn push_slices(&self, item_slices: &[&[I]]) -> Result<usize> {
+        self.push_slices_with(item_slices, &IoOpts::default())
+    }
+
+    /// Pushes the items of the slices, and returns their number. A call that has to wait for room
+    /// stops at the first push if the options do not say `all`. It fails with EPIPE if an end of
+    /// the channel is shut down, unless it has pushed items already, in which case it returns
+    /// their number.
+    pub fn push_slices_with(&self, item_slices: &[&[I]], opts: &IoOpts) -> Result<usize> {
         let len: usize = item_slices.iter().map(|slice| slice.len()).sum();
         if len == 0 {
             return Ok(0);
         }
+        // The items that were pushed, which the call returns if it stops early
+        let mut done = 0;
 
-        waiter_loop!(
-            {
-                let mut rb_producer = self.inner.lock().unwrap();
-                if self.is_self_shutdown() || self.is_peer_shutdown() {
-                    return_errno!(EPIPE, "one or both endpoints have been shutdown");
+        let result = wait_for(self.observer.waiter_queue(), opts.timeout, || {
+            let mut rb_producer = self.inner.lock().unwrap();
+            if self.is_self_shutdown() || self.is_peer_shutdown() {
+                return_errno!(EPIPE, "one or both endpoints have been shutdown");
+            }
+            let nonblocking = self.is_nonblocking() || opts.nonblocking;
+            let mut pushed = 0;
+            let mut no_memory = false;
+            // The slices begin with the items that were pushed by an earlier attempt
+            let mut skip = done;
+            for items in item_slices {
+                if skip >= items.len() {
+                    skip -= items.len();
+                    continue;
                 }
-
-                let mut total_count = 0;
-                for items in item_slices {
-                    let count = match rb_producer.push_slice(items) {
-                        Ok(count) => count,
-                        // Report what was pushed before the memory ran out, if anything
-                        Err(NoMemory) if total_count > 0 => break,
-                        Err(NoMemory) => return_errno!(ENOMEM, "no memory for the items"),
-                    };
-                    total_count += count;
-                    if count < items.len() {
+                let items = &items[skip..];
+                skip = 0;
+                let count = match rb_producer.push_slice(items) {
+                    Ok(count) => count,
+                    Err(NoMemory) => {
+                        no_memory = true;
                         break;
-                    } else {
-                        continue;
                     }
+                };
+                pushed += count;
+                if count < items.len() {
+                    break;
                 }
+            }
+            drop(rb_producer);
+            if pushed > 0 {
+                done += pushed;
+                self.trigger_peer_events(&IoEvents::IN);
+            }
 
-                if total_count > 0 {
-                    drop(rb_producer);
-                    self.trigger_peer_events(&IoEvents::IN);
-                    return Ok(total_count);
-                }
+            // Report what was pushed before the memory ran out, if anything
+            if no_memory && done == 0 {
+                return_errno!(ENOMEM, "no memory for the items");
+            }
+            if done == len || no_memory || (done > 0 && (!opts.all || nonblocking)) {
+                return Ok(Attempt::Done(done));
+            }
+            if nonblocking {
+                return_errno!(EAGAIN, "try again later");
+            }
+            Ok(if pushed > 0 {
+                Attempt::WaitAfterProgress
+            } else {
+                Attempt::Wait
+            })
+        });
 
-                if self.is_nonblocking() {
-                    return_errno!(EAGAIN, "try again later");
-                }
-            },
-            self.observer.waiter_queue()
-        );
+        // The items that were pushed are what the call has done, whatever stopped it
+        match result {
+            Err(_) if done > 0 => Ok(done),
+            result => result,
+        }
     }
 }
 
@@ -464,44 +572,102 @@ impl<I: Copy> Consumer<I> {
     }
 
     pub fn pop_slices(&self, item_slices: &mut [&mut [I]]) -> Result<usize> {
+        self.pop_slices_with(item_slices, &IoOpts::default())
+    }
+
+    /// Pops items into the slices, and returns their number. A call that has to wait for items
+    /// stops at the first pop if the options do not say `all`. It returns 0 at the end of the
+    /// channel, or the number of the items that it has popped if it reaches it.
+    pub fn pop_slices_with(&self, item_slices: &mut [&mut [I]], opts: &IoOpts) -> Result<usize> {
+        let len: usize = item_slices.iter().map(|slice| slice.len()).sum();
+        if len == 0 {
+            return Ok(0);
+        }
+        // The items that were popped, which the call returns if it stops early
+        let mut done = 0;
+
+        let result = wait_for(self.observer.waiter_queue(), opts.timeout, || {
+            let mut rb_consumer = self.inner.lock().unwrap();
+            // Get the flag before the items, see pop()
+            let is_peer_shutdown = self.is_peer_shutdown();
+
+            // The slices begin with the items that were popped by an earlier attempt
+            let mut skip = done;
+            let mut popped = 0;
+            for items in item_slices.iter_mut() {
+                if skip >= items.len() {
+                    skip -= items.len();
+                    continue;
+                }
+                let items = &mut items[skip..];
+                skip = 0;
+                let count = rb_consumer.pop_slice(items);
+                popped += count;
+                if count < items.len() {
+                    break;
+                }
+            }
+            drop(rb_consumer);
+            if popped > 0 {
+                done += popped;
+                self.trigger_peer_events(&IoEvents::OUT);
+            }
+
+            // The end of the file, see pop()
+            let nonblocking = self.is_nonblocking() || opts.nonblocking;
+            if done == len || (done > 0 && !opts.all) || is_peer_shutdown || self.is_self_shutdown()
+            {
+                return Ok(Attempt::Done(done));
+            }
+            if nonblocking && done > 0 {
+                return Ok(Attempt::Done(done));
+            }
+            if nonblocking {
+                return_errno!(EAGAIN, "try again later");
+            }
+            Ok(Attempt::Wait)
+        });
+
+        // The items that were popped are what the call has done, whatever stopped it
+        match result {
+            Err(_) if done > 0 => Ok(done),
+            result => result,
+        }
+    }
+
+    /// Copies the first items of the channel into the slices without popping them, and returns
+    /// their number. It waits for items like `pop_slices_with` does, if there are none, but it
+    /// does not wait for more than there are, whatever `opts.all` says.
+    pub fn peek_slices_with(&self, item_slices: &mut [&mut [I]], opts: &IoOpts) -> Result<usize> {
         let len: usize = item_slices.iter().map(|slice| slice.len()).sum();
         if len == 0 {
             return Ok(0);
         }
 
-        waiter_loop!(
-            {
-                let mut rb_consumer = self.inner.lock().unwrap();
-                // Get the flag before the items, see pop()
-                let is_peer_shutdown = self.is_peer_shutdown();
+        wait_for(self.observer.waiter_queue(), opts.timeout, || {
+            let rb_consumer = self.inner.lock().unwrap();
+            // Get the flag before the items, see pop()
+            let is_peer_shutdown = self.is_peer_shutdown();
 
-                let mut total_count = 0;
-                for items in item_slices.iter_mut() {
-                    let count = rb_consumer.pop_slice(items);
-                    total_count += count;
-                    if count < items.len() {
-                        break;
-                    } else {
-                        continue;
-                    }
+            let mut peeked = 0;
+            for items in item_slices.iter_mut() {
+                let count = rb_consumer.peek_slice_at(peeked, items);
+                peeked += count;
+                if count < items.len() {
+                    break;
                 }
+            }
+            drop(rb_consumer);
 
-                if total_count > 0 {
-                    drop(rb_consumer);
-                    self.trigger_peer_events(&IoEvents::OUT);
-                    return Ok(total_count);
-                };
-
-                // The end of the file, see pop()
-                if is_peer_shutdown || self.is_self_shutdown() {
-                    return Ok(0);
-                }
-                if self.is_nonblocking() {
-                    return_errno!(EAGAIN, "try again later");
-                }
-            },
-            self.observer.waiter_queue()
-        );
+            // The end of the file, see pop()
+            if peeked > 0 || is_peer_shutdown || self.is_self_shutdown() {
+                return Ok(Attempt::Done(peeked));
+            }
+            if self.is_nonblocking() || opts.nonblocking {
+                return_errno!(EAGAIN, "try again later");
+            }
+            Ok(Attempt::Wait)
+        })
     }
 }
 
