@@ -13,22 +13,11 @@ const SOCKET_DEV: usize = 8;
 
 impl File for Stream {
     fn read(&self, buf: &mut [u8]) -> Result<usize> {
-        // The connected status will not be changed any more
-        // in the current implementation. Use clone to release
-        // the mutex lock early.
-        let status = (*self.inner()).clone();
-        match status {
-            Status::Connected(endpoint) => endpoint.read(buf),
-            _ => return_errno!(ENOTCONN, "unconnected socket"),
-        }
+        self.recv(&mut [buf], RecvFlags::empty())
     }
 
     fn write(&self, buf: &[u8]) -> Result<usize> {
-        let status = (*self.inner()).clone();
-        match status {
-            Status::Connected(endpoint) => endpoint.write(buf),
-            _ => return_errno!(ENOTCONN, "unconnected socket"),
-        }
+        self.send(&[buf], SendFlags::empty())
     }
 
     fn read_at(&self, offset: usize, buf: &mut [u8]) -> Result<usize> {
@@ -52,19 +41,11 @@ impl File for Stream {
     }
 
     fn readv(&self, bufs: &mut [&mut [u8]]) -> Result<usize> {
-        let status = (*self.inner()).clone();
-        match status {
-            Status::Connected(endpoint) => endpoint.readv(bufs),
-            _ => return_errno!(ENOTCONN, "unconnected socket"),
-        }
+        self.recv(bufs, RecvFlags::empty())
     }
 
     fn writev(&self, bufs: &[&[u8]]) -> Result<usize> {
-        let status = (*self.inner()).clone();
-        match status {
-            Status::Connected(endpoint) => endpoint.writev(bufs),
-            _ => return_errno!(ENOTCONN, "unconnected socket"),
-        }
+        self.send(bufs, SendFlags::empty())
     }
 
     fn ioctl(&self, cmd: &mut dyn IoctlCmd) -> Result<()> {

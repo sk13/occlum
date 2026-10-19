@@ -26,6 +26,7 @@ use super::stream::Status;
 use super::*;
 use bitflags::bitflags;
 use std::convert::{TryFrom, TryInto};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 /// The timeouts that `SO_RCVTIMEO` and `SO_SNDTIMEO` set.
@@ -47,6 +48,66 @@ pub struct SockTimeouts {
     pub recv: Option<Duration>,
     /// The timeout of writing, sending and connecting (`SO_SNDTIMEO`)
     pub send: Option<Duration>,
+}
+
+/// The timeouts of a socket in atomics. A call that reads or writes needs them
+/// every time, and a lock costs about as much as the rest of a call that does
+/// not wait, so they are also kept here, in nanoseconds, for the calls to read
+/// without a lock. They are always those of the options: `Stream::setsockopt`
+/// stores them when the program sets one, and a socket that accept() returns
+/// gets those of its options (see `AtomicTimeouts::of`), which are those of the
+/// listening socket if that replaces a TCP socket.
+#[derive(Debug)]
+pub struct AtomicTimeouts {
+    recv: AtomicU64,
+    send: AtomicU64,
+}
+
+/// The value of an atomic timeout that is no timeout. The longest timeout is
+/// shorter, see `MAX_TIMEOUT_SECS`.
+const NO_TIMEOUT_NANOS: u64 = u64::MAX;
+
+impl AtomicTimeouts {
+    /// Returns the timeouts of the options
+    pub fn of(options: &SockOptions) -> Self {
+        let timeouts = Self::default();
+        timeouts.store(options.timeouts);
+        timeouts
+    }
+
+    fn store(&self, timeouts: SockTimeouts) {
+        self.recv.store(to_nanos(timeouts.recv), Ordering::Release);
+        self.send.store(to_nanos(timeouts.send), Ordering::Release);
+    }
+
+    pub fn recv(&self) -> Option<Duration> {
+        from_nanos(self.recv.load(Ordering::Acquire))
+    }
+
+    pub fn send(&self) -> Option<Duration> {
+        from_nanos(self.send.load(Ordering::Acquire))
+    }
+}
+
+impl Default for AtomicTimeouts {
+    fn default() -> Self {
+        Self {
+            recv: AtomicU64::new(NO_TIMEOUT_NANOS),
+            send: AtomicU64::new(NO_TIMEOUT_NANOS),
+        }
+    }
+}
+
+fn to_nanos(timeout: Option<Duration>) -> u64 {
+    timeout.map_or(NO_TIMEOUT_NANOS, |timeout| timeout.as_nanos() as u64)
+}
+
+fn from_nanos(nanos: u64) -> Option<Duration> {
+    if nanos == NO_TIMEOUT_NANOS {
+        None
+    } else {
+        Some(Duration::from_nanos(nanos))
+    }
 }
 
 /// About 292 years, the longest timeout that fits in nanoseconds of an i64
@@ -565,7 +626,12 @@ impl Stream {
             }
             return_errno!(EOPNOTSUPP, "unix sockets have no options at this level");
         }
-        let result = self.options.lock().unwrap().set(optname, optval, tcp);
+        let result = {
+            let mut options = self.options.lock().unwrap();
+            let result = options.set(optname, optval, tcp);
+            self.timeouts.store(options.timeouts);
+            result
+        };
         if tcp {
             return Ok(());
         }
@@ -576,19 +642,23 @@ impl Stream {
     /// connect. The wait of such a call has to end with EAGAIN when the timeout
     /// has passed, see `SockTimeouts`. The timeout of accept() is that of the
     /// listening socket, and a socket that it accepts has none of its own, as in
-    /// Linux.
+    /// Linux, but for a socket that replaces a TCP socket, which passes its
+    /// timeouts on (see `options_of_accepted`).
     pub fn timeouts(&self) -> SockTimeouts {
-        self.options.lock().unwrap().timeouts
+        SockTimeouts {
+            recv: self.timeouts.recv(),
+            send: self.timeouts.send(),
+        }
     }
 
     /// Returns the timeout of reading, receiving and accepting
     pub fn recv_timeout(&self) -> Option<Duration> {
-        self.timeouts().recv
+        self.timeouts.recv()
     }
 
     /// Returns the timeout of writing, sending and connecting
     pub fn send_timeout(&self) -> Option<Duration> {
-        self.timeouts().send
+        self.timeouts.send()
     }
 
     /// Returns the size of the buffer for sending, which is the number of bytes

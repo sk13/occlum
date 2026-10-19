@@ -1,6 +1,6 @@
 use super::*;
 use events::{Event, EventFilter, Notifier, Observer};
-use fs::channel::{Channel, Consumer, Producer};
+use fs::channel::{Channel, Consumer, IoOpts, Producer};
 use fs::{IoEvents, IoNotifier};
 use std::any::Any;
 use std::sync::{Arc, Weak};
@@ -84,20 +84,18 @@ impl Inner {
         assert_eq!(cons_nonblocking, prod_nonblocking);
         cons_nonblocking
     }
-    pub fn read(&self, buf: &mut [u8]) -> Result<usize> {
-        self.reader.pop_slice(buf)
+
+    pub fn read(&self, bufs: &mut [&mut [u8]], opts: &IoOpts) -> Result<usize> {
+        self.reader.pop_slices_with(bufs, opts)
     }
 
-    pub fn write(&self, buf: &[u8]) -> Result<usize> {
-        self.writer.push_slice(buf)
+    /// Reads the bytes without taking them
+    pub fn peek(&self, bufs: &mut [&mut [u8]], opts: &IoOpts) -> Result<usize> {
+        self.reader.peek_slices_with(bufs, opts)
     }
 
-    pub fn readv(&self, bufs: &mut [&mut [u8]]) -> Result<usize> {
-        self.reader.pop_slices(bufs)
-    }
-
-    pub fn writev(&self, bufs: &[&[u8]]) -> Result<usize> {
-        self.writer.push_slices(bufs)
+    pub fn write(&self, bufs: &[&[u8]], opts: &IoOpts) -> Result<usize> {
+        self.writer.push_slices_with(bufs, opts)
     }
 
     pub fn bytes_to_read(&self) -> usize {

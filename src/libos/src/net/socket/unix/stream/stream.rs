@@ -1,8 +1,9 @@
 use super::address_space::ADDRESS_SPACE;
 use super::endpoint::{end_pair, Ancillary, Endpoint, RelayNotifier};
-use super::options::SockOptions;
+use super::options::{AtomicTimeouts, SockOptions};
 use super::*;
 use events::{Event, EventFilter, Notifier, Observer};
+use fs::channel::IoOpts;
 use fs::{CreationFlags, FileMode};
 use net::socket::{CMessages, CmsgData};
 use std::fmt;
@@ -25,6 +26,9 @@ pub struct Stream {
     inet: SgxMutex<Option<InetView>>,
     // The options of SOL_SOCKET that the program set (see options.rs)
     pub(super) options: SgxMutex<SockOptions>,
+    // The timeouts of the options for the calls that read and write, which read them
+    // without the lock of the options (see `AtomicTimeouts`)
+    pub(super) timeouts: AtomicTimeouts,
     // Whether accept returned the socket. Its endpoint has the address that
     // the listening socket bound (see connect), so the socket must not release
     // it when it is closed.
@@ -60,6 +64,7 @@ impl Stream {
             notifier: Arc::new(RelayNotifier::new()),
             inet: SgxMutex::new(None),
             options: SgxMutex::new(SockOptions::default()),
+            timeouts: AtomicTimeouts::default(),
             accepted: false,
         }
     }
@@ -82,6 +87,7 @@ impl Stream {
             notifier: notifier_a,
             inet: SgxMutex::new(None),
             options: SgxMutex::new(SockOptions::default()),
+            timeouts: AtomicTimeouts::default(),
             accepted: false,
         };
 
@@ -91,6 +97,7 @@ impl Stream {
             notifier: notifier_b,
             inet: SgxMutex::new(None),
             options: SgxMutex::new(SockOptions::default()),
+            timeouts: AtomicTimeouts::default(),
             accepted: false,
         };
 
@@ -285,13 +292,18 @@ impl Stream {
 
                 debug!("accept socket from {:?}", peer_addr);
 
+                // The cache of the timeouts has to have the timeouts of the options, which a socket
+                // that replaces a TCP socket takes over from the listening one
+                let options = self.options_of_accepted();
+                let timeouts = AtomicTimeouts::of(&options);
                 Ok((
                     Self {
                         ino: next_ino(),
                         inner: SgxMutex::new(Status::Connected(endpoint)),
                         notifier: notifier,
                         inet: SgxMutex::new(None),
-                        options: SgxMutex::new(self.options_of_accepted()),
+                        options: SgxMutex::new(options),
+                        timeouts,
                         accepted: true,
                     },
                     peer_addr,
@@ -301,14 +313,12 @@ impl Stream {
         }
     }
 
-    // TODO: handle flags
     pub fn sendto(&self, buf: &[u8], flags: SendFlags, addr: Option<&UnixAddr>) -> Result<usize> {
-        self.write(buf)
+        self.send(&[buf], flags)
     }
 
-    // TODO: handle flags
     pub fn recvfrom(&self, buf: &mut [u8], flags: RecvFlags) -> Result<(usize, Option<UnixAddr>)> {
-        let data_len = self.read(buf)?;
+        let data_len = self.recv(&mut [buf], flags)?;
         // Like Linux, no address for an unnamed peer, nor for a TCP socket
         let addr = self
             .peer_addr()
@@ -326,13 +336,9 @@ impl Stream {
         flags: SendFlags,
         control: Option<&[u8]>,
     ) -> Result<usize> {
-        if !flags.is_empty() {
-            warn!("unsupported flags: {:?}", flags);
-        }
-
-        let data_len = self.writev(bufs)?;
+        let data_len = self.send(bufs, flags)?;
         if let Some(msg_control) = control {
-            self.write(msg_control)?;
+            self.send(&[msg_control], flags)?;
         }
 
         Ok(data_len)
@@ -344,11 +350,7 @@ impl Stream {
         flags: RecvFlags,
         control: Option<&mut [u8]>,
     ) -> Result<(usize, Option<AnyAddr>, MsgFlags, usize)> {
-        if !flags.is_empty() {
-            warn!("unsupported flags: {:?}", flags);
-        }
-
-        let data_len = self.readv(bufs)?;
+        let data_len = self.recv(bufs, flags)?;
 
         // For stream socket, the msg_name is ignored. And other fields are not supported.
         let mut msg_flags = MsgFlags::empty();
@@ -371,6 +373,50 @@ impl Stream {
         };
 
         Ok((data_len, None, msg_flags, control_len))
+    }
+
+    /// Receives bytes into the buffers, which is what all the calls that read from the socket do.
+    /// Unless the socket is nonblocking, or the call has MSG_DONTWAIT, it waits for bytes as long
+    /// as SO_RCVTIMEO says, which ends with EAGAIN. MSG_PEEK does not take the bytes. MSG_WAITALL
+    /// waits until the buffers are full, but a peek returns the bytes that are queued, like in
+    /// Linux.
+    pub(super) fn recv(&self, bufs: &mut [&mut [u8]], flags: RecvFlags) -> Result<usize> {
+        let endpoint = self.connected_endpoint()?;
+        let opts = IoOpts {
+            nonblocking: flags.contains(RecvFlags::MSG_DONTWAIT),
+            timeout: self.recv_timeout(),
+            all: flags.contains(RecvFlags::MSG_WAITALL),
+            ..Default::default()
+        };
+        if flags.contains(RecvFlags::MSG_PEEK) {
+            endpoint.peek(bufs, &opts)
+        } else {
+            endpoint.read(bufs, &opts)
+        }
+    }
+
+    /// Sends the bytes of the buffers, which is what all the calls that write to the socket do. A
+    /// call waits for room until all the bytes are written, as long as SO_SNDTIMEO says for each
+    /// wait, unless the socket is nonblocking, or the call has MSG_DONTWAIT, which write what
+    /// fits. If a signal or the timeout ends the wait, the call returns the number of the bytes
+    /// that it has written, or fails with EINTR or EAGAIN if it has written none.
+    pub(super) fn send(&self, bufs: &[&[u8]], flags: SendFlags) -> Result<usize> {
+        let endpoint = self.connected_endpoint()?;
+        let opts = IoOpts {
+            nonblocking: flags.contains(SendFlags::MSG_DONTWAIT),
+            timeout: self.send_timeout(),
+            all: true,
+            ..Default::default()
+        };
+        endpoint.write(bufs, &opts)
+    }
+
+    /// Returns the endpoint of a connected socket
+    fn connected_endpoint(&self) -> Result<Endpoint> {
+        match &*self.inner() {
+            Status::Connected(endpoint) => Ok(endpoint.clone()),
+            _ => return_errno!(ENOTCONN, "unconnected socket"),
+        }
     }
 
     /// Replaces the file descriptors in the control messages, which are those
