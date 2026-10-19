@@ -9,32 +9,13 @@ create.raw
 create.socketpair.dgram
 create.socketpair.seqpacket
 
-# group c02_bind_addr
-bind.len_3.path_first_byte
-
 # group c02_bind_path
-bind.path.file_exists
-bind.path.after_close_stat
+# The LibOS releases the name of a socket when its last socket closes, so that a socket binds to the
+# file that is left without unlinking it (the redirects of the network policy depend on it)
 bind.path.after_close_rebind_no_unlink
 bind.path.after_unlink_rebind
 bind.path.bound_stat
-bind.path.listener_closed_stat
 bind.path.listener_closed_rebind
-bind.path.existing_regular_file
-bind.path.existing_dir
-bind.path.dir_dotdot_dir_itself
-bind.path.symlink_dangling
-bind.path.mode_umask022
-bind.path.mode_umask077
-
-# group c03_names_files
-files.symlink.stat_follow
-files.hardlink.connect
-files.hardlink.stat
-files.open_socket_file
-files.open_socket_file_wronly
-files.truncate_socket_file
-files.chmod_socket_file.stat
 
 # group c09_shutdown_matrix
 shut.b_full.wr.b_write
