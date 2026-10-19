@@ -129,6 +129,10 @@ static int set_timeout(int fd, int optname, long ms) {
     return setsockopt(fd, SOL_SOCKET, optname, &timeout, sizeof(timeout));
 }
 
+static int set_sndbuf(int fd, int size) {
+    return setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &size, sizeof(size));
+}
+
 // Writes to the socket until it is full, without blocking. Returns the number of the bytes, or -1.
 static long fill(int fd) {
     static char chunk[4096];
@@ -928,6 +932,106 @@ static int test_write_timeout_restarts_with_progress(void) {
     call_finish(&c);
     CHECK(flow_join(&reader, WAKE_MS), "the reader does not get everything");
     CHECK(reader.bad_pos == total, "a wrong byte at %zu", reader.bad_pos);
+    close(sv[0]);
+    close(sv[1]);
+    free(data);
+    return 0;
+}
+
+// A write whose wait for room has timed out makes one more attempt, and if that one writes some
+// bytes (a reader has made room just then), the write goes on and waits for room again, for the
+// whole time. It does not give up at once, as if the timeout were over. The time between the end
+// of a wait and the attempt after it is a few microseconds wide, so no reader can be made to read
+// in it. The test makes many writes whose reader drains the socket at times around the end of the
+// first wait, and checks the one thing that holds however the times fall: a write that has written
+// some of its bytes, not all of them, does not return before a whole timeout has passed since the
+// reader took the bytes. It is one-sided: a call that gives up too early is caught if a reader hits the window, which takes
+// about one in three of the writes on the LibOS (a LibOS that does not restart the timeout after
+// the attempt fails the test, in all runs).
+#define PROGRESS_TIMEOUT_MS     10
+#define PROGRESS_ROUNDS         150
+
+static long now_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000000000L + ts.tv_nsec;
+}
+
+typedef struct {
+    int fd;
+    char *buf;
+    size_t len;
+    atomic_long start_ns;   // before the call
+    long end_ns;            // after the call
+    long ret;
+    int err;
+} timed_write_t;
+
+static void *timed_write_main(void *arg) {
+    timed_write_t *w = arg;
+    atomic_store(&w->start_ns, now_ns());
+    errno = 0;
+    w->ret = write(w->fd, w->buf, w->len);
+    w->err = errno;
+    w->end_ns = now_ns();
+    return NULL;
+}
+
+static int test_write_goes_on_when_room_comes_after_its_timeout(void) {
+    const long timeout_ns = PROGRESS_TIMEOUT_MS * 1000000L;
+    int sv[2];
+    char *data = calloc(1, MIB);
+    CHECK(make_pair(sv) == 0, "failed to create a socket pair");
+    CHECK(set_timeout(sv[0], SO_SNDTIMEO, PROGRESS_TIMEOUT_MS) == 0,
+          "failed to set SO_SNDTIMEO");
+    CHECK(set_sndbuf(sv[0], 4096) == 0, "failed to set SO_SNDBUF");
+
+    int progressed = 0;
+    for (int round = 0; round < PROGRESS_ROUNDS; round++) {
+        CHECK(fill(sv[0]) > 0, "failed to fill the buffer");
+
+        timed_write_t w = { .fd = sv[0], .buf = data, .len = MIB };
+        pthread_t thread;
+        atomic_store(&w.start_ns, 0);
+        CHECK(pthread_create(&thread, NULL, timed_write_main, &w) == 0,
+              "failed to create a thread");
+        while (atomic_load(&w.start_ns) == 0) {
+            usleep(100);
+        }
+
+        // The reader takes the bytes at a time from just before the end of the wait of the writer
+        // to long enough after it, which each round moves by 2 us
+        long off_ns = -20000 + (round * 37 % 100) * 2000;
+        long target = atomic_load(&w.start_ns) + timeout_ns + off_ns;
+        long until_target = target - now_ns();
+        if (until_target > 3000000) {
+            usleep((until_target - 3000000) / 1000);
+        }
+        while (now_ns() < target) {
+        }
+        long taken_ns = now_ns();
+        CHECK(drain(sv[1]) >= 0, "failed to drain the socket");
+
+        pthread_join(thread, NULL);
+        if (w.ret > 0) {
+            progressed++;
+            // The write has written bytes after the reader took the bytes, and it waits for room
+            // again for a whole timeout, unless the reader has made room for all its bytes, which
+            // is over when they are written. Half of it is the margin of the clocks.
+            CHECK((size_t)w.ret == w.len || w.end_ns >= taken_ns + timeout_ns / 2,
+                  "round %d: a write that wrote %ld bytes after its timeout returned %ld us after "
+                  "the reader took the bytes, which is less than its timeout of %d ms",
+                  round, w.ret, (w.end_ns - taken_ns) / 1000, PROGRESS_TIMEOUT_MS);
+        } else {
+            CHECK(w.ret == -1 && w.err == EAGAIN, "round %d: write returned %ld (errno %d)", round,
+                  w.ret, w.err);
+        }
+        CHECK(drain(sv[1]) >= 0, "failed to drain the socket");
+    }
+    // Some of the rounds must have been in time for the writer, or the test tests nothing
+    CHECK(progressed > PROGRESS_ROUNDS / 10,
+          "the reader was too late for the writer in all but %d "
+          "of the %d rounds", progressed, PROGRESS_ROUNDS);
     close(sv[0]);
     close(sv[1]);
     free(data);
@@ -2211,10 +2315,6 @@ static int test_recvmmsg_timeout(void) {
 // The size of the send buffer
 // ---------------------------------------------------------------------------------------------
 
-static int set_sndbuf(int fd, int size) {
-    return setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &size, sizeof(size));
-}
-
 // SO_SNDBUF limits what a socket has in flight to its peer, whenever it is set. If it is raised, the
 // writers that wait for room go on.
 static int test_sndbuf_limits_the_bytes_in_flight(void) {
@@ -2358,6 +2458,7 @@ static test_case_t test_cases[] = {
     TEST_CASE(test_interrupted_write_returns_the_progress),
     TEST_CASE(test_write_timeout),
     TEST_CASE(test_write_timeout_restarts_with_progress),
+    TEST_CASE(test_write_goes_on_when_room_comes_after_its_timeout),
     TEST_CASE(test_peer_goes_while_a_write_waits),
     TEST_CASE(test_read_timeout),
     TEST_CASE(test_timeouts_belong_to_the_socket),
