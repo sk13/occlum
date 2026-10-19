@@ -26,6 +26,7 @@
 #include <sys/epoll.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/un.h>
 #include <sys/time.h>
 #include <sys/wait.h>
@@ -1132,6 +1133,32 @@ static int test_redirected_sockets_have_the_errors_of_tcp(void) {
     return 0;
 }
 
+// The file of the redirect is a socket file, like the file of any Unix socket: it cannot be opened,
+// and it stays when the program closes the socket, so that the program binds to the address again
+static int test_redirect_file_is_a_socket_file() {
+    int listen_fd = listen_redirected();
+    if (listen_fd < 0) {
+        THROW_ERROR("listening on the redirected address failed");
+    }
+    struct stat st;
+    if (stat(REDIRECTED_PATH, &st) < 0 || !S_ISSOCK(st.st_mode)) {
+        THROW_ERROR("%s is not a socket file", REDIRECTED_PATH);
+    }
+    if (open(REDIRECTED_PATH, O_RDONLY) >= 0 || errno != ENXIO) {
+        THROW_ERROR("opening %s should fail with ENXIO", REDIRECTED_PATH);
+    }
+    close(listen_fd);
+    if (stat(REDIRECTED_PATH, &st) < 0 || !S_ISSOCK(st.st_mode)) {
+        THROW_ERROR("the socket file is gone after the socket is closed");
+    }
+    listen_fd = listen_redirected();
+    if (listen_fd < 0) {
+        THROW_ERROR("listening on the redirected address again failed");
+    }
+    close(listen_fd);
+    return 0;
+}
+
 // ============================================================================
 // Test suite main
 // ============================================================================
@@ -1152,6 +1179,7 @@ static test_case_t test_cases[] = {
     TEST_CASE(test_redirected_sockets_time_out),
     TEST_CASE(test_redirected_sockets_limit_the_send_buffer),
     TEST_CASE(test_redirected_sockets_have_the_errors_of_tcp),
+    TEST_CASE(test_redirect_file_is_a_socket_file),
 };
 
 int main(int argc, const char *argv[]) {
