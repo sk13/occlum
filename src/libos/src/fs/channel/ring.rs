@@ -70,15 +70,21 @@
 //! # Tests
 //!
 //! The file uses nothing but `std`, so that its tests run on the host, without an enclave. They
-//! keep a count of the live bytes with a global allocator, so they run one after the other.
-//! `make test-host` builds and runs them, which comes down to
+//! count the live bytes and the allocations with a global allocator, for each test by itself (the
+//! threads that a test starts count with it, those of the test harness with nobody), so that the
+//! tests compare them exactly and may run at the same time. `make test-host` builds and runs
+//! them, one after the other, which comes down to
 //!
 //! ```text
 //! rustc --edition 2021 --test -C opt-level=2 -C debug-assertions=on ring.rs -o ring_tests
 //! ./ring_tests --test-threads=1
 //! ```
 //!
-//! They run clean under AddressSanitizer (`-Zsanitizer=address`). Under ThreadSanitizer (with
+//! The test `close_while_the_consumer_parks` hammers the handshake between `close` and `park`,
+//! which is a few nanoseconds wide, with two threads that start each round together. It takes
+//! about a second. `RING_HAMMER_ROUNDS=1000000 make test-host` makes a million rounds of it.
+//!
+//! The tests run clean under AddressSanitizer (`-Zsanitizer=address`). Under ThreadSanitizer (with
 //! ASLR switched off) they report no race on the chunks, the slots or the counters, only the
 //! fence of `Arc::drop`, which it does not know, and the internals of libtest.
 
@@ -682,3 +688,7 @@ impl<T: Copy> RingConsumer<T> {
         done
     }
 }
+
+#[cfg(test)]
+#[path = "ring/tests.rs"]
+mod tests;

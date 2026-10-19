@@ -21,6 +21,10 @@ Users could run the unit test manually as well.
 
 // run test without rebuilding Occlum, using binaries installed already
 # OCCLUM_BIN_PATH=/opt/occlum/build/bin make test
+
+// run the unit tests of the LibOS code that needs no enclave, on the host (so far
+// the queue of the channels of pipes and unix sockets)
+# make test-host
 ```
 
 ## Gvisor Tests

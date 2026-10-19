@@ -1,4 +1,4 @@
-.PHONY: all submodule githooks src test tools install format format-check gen_cov_report clean
+.PHONY: all submodule githooks src test test-host tools install format format-check gen_cov_report clean
 
 all: src
 
@@ -89,6 +89,14 @@ test:
 
 test-glibc:
 	@$(MAKE) --no-print-directory -C test test-glibc
+
+# The unit tests of the LibOS code that does not need an enclave. They run on the host: the tests of
+# the queue of the channels (see the header of the file, also for RING_HAMMER_ROUNDS)
+test-host:
+	@mkdir -p build/host-tests
+	@rustc --edition 2021 --test -C opt-level=2 -C debug-assertions=on \
+		src/libos/src/fs/channel/ring.rs -o build/host-tests/ring_tests
+	@build/host-tests/ring_tests --test-threads=1
 
 OCCLUM_PREFIX ?= /opt/occlum
 install: minimal_sgx_libs install_bins_and_libs
