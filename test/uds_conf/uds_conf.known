@@ -137,6 +137,9 @@ sig.connect_full_backlog.sa_restart
 # group c15_options
 opt.get.SO_PEERPIDFD.sp
 opt.get.SO_PEERSEC.sp
+# The expected value is twice net.core.wmem_max of the host that ran Linux for it (4 MiB there). The
+# LibOS limits the size to 208 KiB, the default of Linux (see MAX_SOCK_BUF_SIZE in options.rs)
+opt.set.SO_SNDBUF.huge
 
 # group c16_sigpipe
 pipe.blocked_write_peer_closes

@@ -128,9 +128,12 @@ const DEFAULT_SOCK_BUF_SIZE: i32 = DEFAULT_BUF_SIZE as i32;
 const MIN_SOCK_SNDBUF: i32 = 4608;
 const MIN_SOCK_RCVBUF: i32 = 2304;
 /// The greatest size that a program sets the buffer to, unless it forces it
-/// (`net.core.wmem_max` and `rmem_max` of Linux, which are 4 MiB on tuned
-/// systems, but 208 KiB by default)
-const MAX_SOCK_BUF_SIZE: u32 = 4 * 1024 * 1024;
+/// (`net.core.wmem_max` and `rmem_max` of Linux, which are 208 KiB by default).
+/// A connection queues up to twice the size from the kernel heap, which is a
+/// few tens of megabytes (40 MB in the test configuration), not the memory of a
+/// Linux system: a limit of 4 MiB, which tuned systems have, let five
+/// connections to slow readers take the heap, and the limit of Linux lets 96.
+const MAX_SOCK_BUF_SIZE: u32 = 212992;
 
 bitflags! {
     /// The options that are on or off
@@ -316,7 +319,8 @@ impl SockOptions {
             SockOptName::SO_RCVBUF => {
                 self.rcvbuf = buf_size((val as u32).min(MAX_SOCK_BUF_SIZE) as i32, MIN_SOCK_RCVBUF)
             }
-            // The size is not limited, as root forces it
+            // The size is not limited, as root forces it. A program that forces a size of
+            // megabytes may take the kernel heap with a connection whose peer does not read.
             SockOptName::SO_SNDBUFFORCE => self.sndbuf = buf_size(val, MIN_SOCK_SNDBUF),
             SockOptName::SO_RCVBUFFORCE => self.rcvbuf = buf_size(val, MIN_SOCK_RCVBUF),
             // SO_TIMESTAMP and SO_TIMESTAMPNS, of which a socket has one
