@@ -17,7 +17,9 @@
 //! share the file description.
 //!
 //! A socket that replaces a TCP socket (see `net::redirect`) takes the options
-//! of all levels silently, and stores those of `SOL_SOCKET`.
+//! of all levels silently, and stores those of `SOL_SOCKET`. It has the
+//! timeouts of the TCP socket, and the sockets that it accepts have all its
+//! options, as with TCP.
 
 use super::endpoint::DEFAULT_BUF_SIZE;
 use super::stream::Status;
@@ -537,6 +539,20 @@ impl Stream {
             SockOptName::SO_BINDTODEVICE => Vec::new(),
             _ => int(0),
         })
+    }
+
+    /// Returns the options of a socket that accept() returns. A Unix socket
+    /// passes on the credentials only, see `SockOptions::of_accepted`. A socket
+    /// that replaces a TCP socket passes on all, as a TCP socket does: what it
+    /// accepts has its timeouts, for one.
+    pub(super) fn options_of_accepted(&self) -> SockOptions {
+        let tcp = self.inet_view().is_some();
+        let options = self.options.lock().unwrap();
+        if tcp {
+            options.clone()
+        } else {
+            options.of_accepted()
+        }
     }
 
     /// Sets a socket option, which is `optval`.

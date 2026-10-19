@@ -18,14 +18,18 @@
 //!
 //! The epoll files that monitor the file descriptor go on monitoring it, with
 //! the Unix socket, and the Unix socket is nonblocking and close-on-spawn if
-//! the TCP socket was. What else the program did with the TCP socket before
-//! bind() or connect() does not carry over: its options, and other file
-//! descriptors for it, e.g., from dup().
+//! the TCP socket was. It has the timeouts of the TCP socket (SO_RCVTIMEO and
+//! SO_SNDTIMEO), as it is the Unix socket that waits in accept() and
+//! connect(). What else the program did with the TCP socket before bind() or
+//! connect() does not carry over: its other options, which change nothing for
+//! a Unix socket but what getsockopt() returns, and other file descriptors for
+//! it, e.g., from dup().
 
 use std::sync::atomic::{AtomicU16, Ordering};
 
 use super::policy::{self, RedirectOp};
 use super::socket::{Ipv4Addr, Ipv4SocketAddr, Ipv6Addr, Ipv6SocketAddr, SocketFlags};
+use super::syscalls::{get_optval, new_host_getsockopt_cmd, new_uring_getsockopt_cmd};
 use super::*;
 use crate::fs::{FileDesc, FileRef, StatusFlags};
 
@@ -101,14 +105,45 @@ fn redirect_target(file_ref: &FileRef, op: RedirectOp, addr: &AnyAddr) -> Result
     Ok(if is_tcp { Some(unix_addr) } else { None })
 }
 
-/// Returns a Unix socket that is nonblocking if the socket is.
+/// Returns a Unix socket that is nonblocking if the socket is, and has its
+/// timeouts.
 fn new_stream(file_ref: &FileRef) -> Result<UnixStream> {
     let flags = if file_ref.status_flags()?.contains(StatusFlags::O_NONBLOCK) {
         SocketFlags::SOCK_NONBLOCK
     } else {
         SocketFlags::empty()
     };
-    unix_socket(SocketType::STREAM, flags, 0)
+    let stream = unix_socket(SocketType::STREAM, flags, 0)?;
+    for optname in [SockOptName::SO_RCVTIMEO_OLD, SockOptName::SO_SNDTIMEO_OLD] {
+        if let Some(timeout) = tcp_timeout(file_ref, optname)? {
+            stream.setsockopt(libc::SOL_SOCKET, optname as i32, &timeout)?;
+        }
+    }
+    Ok(stream)
+}
+
+/// Returns the value of SO_RCVTIMEO or SO_SNDTIMEO of the socket, a struct
+/// timeval, unless it is zero, which is no timeout.
+fn tcp_timeout(file_ref: &FileRef, optname: SockOptName) -> Result<Option<Vec<u8>>> {
+    const OPTLEN: u32 = std::mem::size_of::<libc::timeval>() as u32;
+    let level = libc::SOL_SOCKET;
+    let optname = optname as i32;
+    let timeout = if let Ok(host_socket) = file_ref.as_host_socket() {
+        let mut cmd = new_host_getsockopt_cmd(level, optname, OPTLEN)?;
+        host_socket.ioctl(cmd.as_mut())?;
+        get_optval(cmd.as_ref())?.to_vec()
+    } else if let Ok(uring_socket) = file_ref.as_uring_socket() {
+        let mut cmd = new_uring_getsockopt_cmd(level, optname, OPTLEN, uring_socket.get_type())?;
+        uring_socket.ioctl(cmd.as_mut())?;
+        get_optval(cmd.as_ref())?.to_vec()
+    } else {
+        return Ok(None);
+    };
+    Ok(if timeout.iter().all(|&byte| byte == 0) {
+        None
+    } else {
+        Some(timeout)
+    })
 }
 
 /// Puts the Unix socket at `fd` in place of the socket, keeping close-on-spawn

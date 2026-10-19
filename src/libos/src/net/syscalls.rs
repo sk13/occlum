@@ -1152,7 +1152,11 @@ fn copy_sock_addr_to_user(
 }
 
 /// Create a new ioctl command for host socket getsockopt syscall
-fn new_host_getsockopt_cmd(level: i32, optname: i32, optlen: u32) -> Result<Box<dyn IoctlCmd>> {
+pub(super) fn new_host_getsockopt_cmd(
+    level: i32,
+    optname: i32,
+    optlen: u32,
+) -> Result<Box<dyn IoctlCmd>> {
     if level != libc::SOL_SOCKET {
         return Ok(Box::new(GetSockOptRawCmd::new(level, optname, optlen)));
     }
@@ -1167,7 +1171,7 @@ fn new_host_getsockopt_cmd(level: i32, optname: i32, optlen: u32) -> Result<Box<
 }
 
 /// Create a new ioctl command for uring socket getsockopt syscall
-fn new_uring_getsockopt_cmd(
+pub(super) fn new_uring_getsockopt_cmd(
     level: i32,
     optname: i32,
     optlen: u32,
@@ -1366,7 +1370,7 @@ fn new_uring_setsockopt_cmd(
     })
 }
 
-fn get_optval(cmd: &dyn IoctlCmd) -> Result<&[u8]> {
+pub(super) fn get_optval(cmd: &dyn IoctlCmd) -> Result<&[u8]> {
     crate::match_ioctl_cmd_ref!(cmd, {
         cmd : GetAcceptConnCmd => {
             cmd.get_output_as_bytes()

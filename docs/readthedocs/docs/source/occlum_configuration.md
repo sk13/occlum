@@ -246,8 +246,8 @@ A `redirect` of a rule lets a program use TCP where the data should stay in the 
 * Redirects apply to TCP sockets only; other sockets, e.g., of UDP, are checked against `bind` and `connect` as usual.
 * The Unix socket shows IP addresses to the program: `getsockname()` returns the address bound to, or `127.0.0.1` (`::1`) with an ephemeral port after `connect()`, and `getpeername()` the address connected to, or `127.0.0.1` (`::1`) with an ephemeral port for an accepted socket. Its `SO_DOMAIN` and `SO_PROTOCOL` are those of TCP, and it accepts the options of the IP levels, e.g., `TCP_NODELAY`, and returns zeros for them.
 * Connecting fails with `ECONNREFUSED` if nothing listens on the Unix address.
-* Connecting waits for an `accept()` if the backlog of the Unix socket that listens is full, like a TCP `connect()` does. A nonblocking socket fails with `EAGAIN` instead.
-* The socket is replaced at the same file descriptor, and the epoll files that monitor it go on monitoring it. It is nonblocking and close-on-exec if the TCP socket was; other options of the TCP socket, and other file descriptors for it, e.g., from `dup()` before `bind()` or `connect()`, are not carried over.
+* Connecting waits for an `accept()` if the backlog of the Unix socket that listens is full, like a TCP `connect()` does, as long as `SO_SNDTIMEO` of the TCP socket allows. When the time is over, `connect()` fails with `EAGAIN`, where a TCP `connect()` fails with `EINPROGRESS`. A nonblocking socket fails with `EAGAIN` at once.
+* The socket is replaced at the same file descriptor, and the epoll files that monitor it go on monitoring it. It is nonblocking and close-on-exec if the TCP socket was, and has its `SO_RCVTIMEO` (for `accept()`) and `SO_SNDTIMEO`, as do the sockets that it accepts; other options of the TCP socket, and other file descriptors for it, e.g., from `dup()` before `bind()` or `connect()`, are not carried over.
 
 ## Runtime Resource Configuration for Occlum process
 

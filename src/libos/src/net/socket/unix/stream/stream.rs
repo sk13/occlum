@@ -291,7 +291,7 @@ impl Stream {
                         inner: SgxMutex::new(Status::Connected(endpoint)),
                         notifier: notifier,
                         inet: SgxMutex::new(None),
-                        options: SgxMutex::new(self.options.lock().unwrap().of_accepted()),
+                        options: SgxMutex::new(self.options_of_accepted()),
                         accepted: true,
                     },
                     peer_addr,
