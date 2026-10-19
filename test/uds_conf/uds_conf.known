@@ -44,31 +44,12 @@ connect.listener_closed_pending.read
 io.siocoutq.sender
 io.fionread.idle
 io.fionread.listening
-io.blocking_write_1MB_with_reader
 io.idle.read
 io.idle.recv
 io.idle.read_zero
 
 # group c08_msgflags
-flags.recv_dontwait_empty_blocking_socket
-flags.send_dontwait_full_blocking_socket
-flags.recv_after_peek
-flags.recv_peek_empty
-flags.peek_does_not_consume_fionread
-flags.recv_peek_larger_than_data
-flags.recv_waitall
 flags.sockatmark
-flags.recv_flags_errqueue
-addr.sendto_with_addr_on_connected
-addr.sendto_with_addr_on_connected.same_addr_as_peer
-addr.recvfrom_unnamed_peer_listener
-addr.recvmsg_named_peer
-addr.sendmsg_with_name_on_connected
-addr.sendto_unconnected_with_addr
-addr.sendto_addr_len_mismatch
-# musl emulates sendmmsg() with sendmsg(), so that it matches Linux there
-msg.sendmmsg
-msg.recvmmsg
 
 # group c09_shutdown_matrix
 shut.idle.rd.rc
@@ -153,30 +134,12 @@ sig.accept.sa_restart
 sig.write_full.sa_restart
 sig.connect_full_backlog.sa_restart
 
-# group c14_timeouts
-tmo.read
-tmo.recv
-tmo.recv_waitall
-tmo.recv_waitall_partial
-tmo.write_full
-tmo.send_full
-
 # group c15_options
 opt.get.SO_PEERPIDFD.sp
 opt.get.SO_PEERSEC.sp
-opt.sndbuf_effect.fill_after_set_4096
 
 # group c16_sigpipe
-pipe.write_after_peer_close
-pipe.write_again
-pipe.send_no_flags
-pipe.writev
-pipe.sendmsg
-pipe.write_zero_after_peer_close
-pipe.write_after_self_shut_wr
-pipe.write_after_peer_shut_rd
 pipe.blocked_write_peer_closes
-pipe.sigpipe_pending_after_blocked_write
 
 # group c17_ancillary
 anc.rights.recv
