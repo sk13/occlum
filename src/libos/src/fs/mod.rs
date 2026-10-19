@@ -34,6 +34,7 @@ pub use self::locks::range_lock::{
 };
 pub use self::pipe::PipeType;
 pub use self::rootfs::{ROOT_FS, SEFS_MANAGER};
+pub use self::socket_inode::{FileId, SocketInode};
 pub use self::stdio::{HostStdioFds, StdinFile, StdoutFile};
 pub use self::syscalls::*;
 pub use self::timer_file::{AsTimer, TimerCreationFlags, TimerFile};
@@ -55,6 +56,7 @@ mod pipe;
 mod procfs;
 mod rootfs;
 mod sefs;
+mod socket_inode;
 mod stdio;
 mod syscalls;
 mod timer_file;

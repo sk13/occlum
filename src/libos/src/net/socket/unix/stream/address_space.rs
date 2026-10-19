@@ -2,7 +2,9 @@ use super::endpoint::Endpoint;
 use super::endpoint::RelayNotifier;
 use super::listener::Listener;
 use super::*;
+use fs::{FileId, SocketInode};
 use misc::get_random;
+use rcore_fs::vfs::INode;
 use std::collections::btree_map::BTreeMap;
 use std::time::Duration;
 
@@ -12,13 +14,13 @@ lazy_static! {
 
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
 pub enum AddressSpaceKey {
-    FileKey(usize),
+    FileKey(FileId),
     AbstrKey(Vec<u8>),
 }
 
 impl AddressSpaceKey {
-    pub fn from_inode(inode: usize) -> Self {
-        AddressSpaceKey::FileKey(inode)
+    pub fn from_file(file: FileId) -> Self {
+        AddressSpaceKey::FileKey(file)
     }
 
     pub fn from_name(name: Vec<u8>) -> Self {
@@ -27,16 +29,19 @@ impl AddressSpaceKey {
 }
 
 /// What a socket bound to a name: the address as it was bound, which the peers
-/// of the socket show whatever name they used to connect, and the listener
-/// once the socket is listening.
+/// of the socket show whatever name they used to connect, the listener once the
+/// socket is listening, and the file of a pathname, which the socket keeps like
+/// Linux does: the number of its inode is not given to another file, even if
+/// the file is unlinked.
 struct Binding {
     addr: UnixAddr,
     listener: Option<Arc<Listener>>,
+    file: Option<Arc<dyn INode>>,
 }
 
 pub struct AddressSpace {
-    // For "file", use inode number as "key" instead of path string so that listeners can still
-    // be reached even if the socket file is moved or renamed.
+    // For "file", use the file (its file system and inode number) as "key" instead of path string
+    // so that listeners can still be reached even if the socket file is moved or renamed.
     file: SgxMutex<BTreeMap<AddressSpaceKey, Binding>>,
     abstr: SgxMutex<BTreeMap<AddressSpaceKey, Binding>>,
 }
@@ -49,9 +54,10 @@ impl AddressSpace {
         }
     }
 
-    /// Binds the address, which is automatically chosen if it is unnamed.
-    /// Returns the address that was bound.
-    pub fn add_binder(&self, addr: &UnixAddr) -> Result<UnixAddr> {
+    /// Binds the address, which is automatically chosen if it is unnamed. The
+    /// file of a pathname address is kept by the binding. Returns the address
+    /// that was bound.
+    pub fn add_binder(&self, addr: &UnixAddr, file: Option<SocketInode>) -> Result<UnixAddr> {
         if let UnixAddr::Unnamed = addr {
             return self.add_autobinder();
         }
@@ -59,6 +65,12 @@ impl AddressSpace {
         let key = Self::get_key(addr)?;
         let mut space = self.get_space(addr)?;
         if space.contains_key(&key) {
+            drop(space);
+            // The file is the socket's that has bound it, even if this call has created it
+            // and the other has taken it meanwhile
+            if let Some(file) = file {
+                file.keep();
+            }
             return_errno!(EADDRINUSE, "the addr is already bound");
         } else {
             space.insert(
@@ -66,6 +78,7 @@ impl AddressSpace {
                 Binding {
                     addr: addr.clone(),
                     listener: None,
+                    file: file.map(SocketInode::keep),
                 },
             );
             Ok(addr.clone())
@@ -93,6 +106,7 @@ impl AddressSpace {
                     Binding {
                         addr: addr.clone(),
                         listener: None,
+                        file: None,
                     },
                 );
                 return Ok(addr);
@@ -142,6 +156,7 @@ impl AddressSpace {
             Some(Binding {
                 addr,
                 listener: Some(listener),
+                ..
             }) => Ok((listener.clone(), addr.clone())),
             _ => return_errno!(ECONNREFUSED, "no one's listening on the remote address"),
         }
@@ -162,8 +177,8 @@ impl AddressSpace {
     pub fn remove_addr(&self, addr: &UnixAddr) {
         let key = Self::get_key(addr);
         if let Ok(key) = key {
-            let mut space = self.get_space(addr).unwrap();
-            space.remove(&key);
+            // Release the file of the binding after the lock, as that may take a while
+            let _binding = self.get_space(addr).unwrap().remove(&key);
         } else {
             warn!("address space key not exit: {:?}", addr);
         }
@@ -183,16 +198,13 @@ impl AddressSpace {
     fn get_key(addr: &UnixAddr) -> Result<AddressSpaceKey> {
         trace!("addr = {:?}", addr);
         match addr {
-            UnixAddr::File(Some(inode_num), _) => Ok(AddressSpaceKey::from_inode(*inode_num)),
+            UnixAddr::File(Some(file), _) => Ok(AddressSpaceKey::from_file(*file)),
             UnixAddr::File(None, unix_path) => {
                 // The errors of the lookup are those of connect()
-                let inode = {
-                    let file_path = unix_path.absolute();
-                    let current = current!();
-                    let fs = current.fs().read().unwrap();
-                    fs.lookup_inode(&file_path)?
-                };
-                Ok(AddressSpaceKey::from_inode(inode.metadata()?.inode))
+                let file_path = unix_path.absolute();
+                let current = current!();
+                let fs = current.fs().read().unwrap();
+                Ok(AddressSpaceKey::from_file(FileId::at(&fs, &file_path)?))
             }
             UnixAddr::Abstract(name) => Ok(AddressSpaceKey::from_name(name.clone())),
             UnixAddr::Unnamed => return_errno!(EINVAL, "an unnamed address has no key"),

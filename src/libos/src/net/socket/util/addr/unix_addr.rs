@@ -1,4 +1,5 @@
 use super::*;
+use crate::fs::FileId;
 use std::path::{Path, PathBuf};
 use std::{cmp, mem, slice, str};
 
@@ -7,8 +8,8 @@ const SUN_FAMILY_LEN: usize = mem::size_of::<libc::sa_family_t>();
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum UnixAddr {
     Unnamed,
-    File(Option<usize>, UnixPath), // An optional inode number and path. Use inode if there is one.
-    Abstract(Vec<u8>),             // The name after the leading NUL. It can have any bytes.
+    File(Option<FileId>, UnixPath), // An optional file and path. Use the file if there is one.
+    Abstract(Vec<u8>),              // The name after the leading NUL. It can have any bytes.
 }
 
 impl UnixAddr {

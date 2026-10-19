@@ -4,7 +4,7 @@ use super::options::{AtomicTimeouts, SockOptions};
 use super::*;
 use events::{Event, EventFilter, Notifier, Observer};
 use fs::channel::IoOpts;
-use fs::{CreationFlags, FileMode, IoEvents};
+use fs::{FileMode, IoEvents, SocketInode};
 use net::socket::{CMessages, CmsgData};
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -142,8 +142,9 @@ impl Stream {
 
         let mut unix_addr = addr.clone();
         let addr = &mut unix_addr;
+        let mut file = None;
 
-        if let UnixAddr::File(inode_num, path) = addr {
+        if let UnixAddr::File(file_id, path) = addr {
             // Linux creates the file before it finds out that the socket is
             // bound already, so the name that exists is in use
             if bound {
@@ -158,18 +159,16 @@ impl Stream {
                 );
             }
 
-            // create the corresponding file in the fs and fill Addr with its inode
-            let corresponding_inode_num = {
+            // create the corresponding socket file in the fs, with the mode that the umask
+            // leaves, and fill Addr with it
+            let socket_inode = {
                 let current = current!();
                 let fs = current.fs().read().unwrap();
-                let file_ref = fs.open_file(
-                    path.path_str(),
-                    CreationFlags::O_CREAT.bits(),
-                    FileMode::from_bits(0o777).unwrap(),
-                )?;
-                file_ref.metadata()?.inode
+                let mode = FileMode::from_bits(0o777).unwrap() & !current.process().umask();
+                SocketInode::bind(&fs, path.path_str(), mode)?
             };
-            *inode_num = Some(corresponding_inode_num);
+            *file_id = Some(socket_inode.id());
+            file = Some(socket_inode);
         }
 
         match &mut *self.inner() {
@@ -179,7 +178,7 @@ impl Stream {
                 }
 
                 // check the global address space to see if the address is available before bind
-                let addr = ADDRESS_SPACE.add_binder(addr)?;
+                let addr = ADDRESS_SPACE.add_binder(addr, file)?;
                 info.set_addr(&addr);
             }
             Status::Connected(endpoint) => {
@@ -187,7 +186,7 @@ impl Stream {
                     return_errno!(EINVAL, "the socket is already bound");
                 }
 
-                let addr = ADDRESS_SPACE.add_binder(addr)?;
+                let addr = ADDRESS_SPACE.add_binder(addr, file)?;
                 endpoint.set_addr(&addr);
             }
             Status::Listening(_) => return_errno!(EINVAL, "the socket is already bound"),

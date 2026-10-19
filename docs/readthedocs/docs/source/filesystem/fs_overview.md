@@ -120,6 +120,8 @@ The configuration of enabling Ext2 is showed above, you can specify your mount p
 ## HostFS
 The HostFS is used for convenient data exchange between the LibOS and the host OS. It simply wraps the untrusted host OS file to implement the functionalities of FS. So the data is straightforwardly transferred between LibOS and host OS without any protection or validation.
 
+The HostFS has no files of the type socket: when a Unix socket binds to a path in it, the file is a regular file. It stays when the socket is closed, and as a file that exists, it makes `bind()` to the path fail with `EADDRINUSE` until it is unlinked, as on Linux. In the other file systems, a socket can bind to the file of a closed socket.
+
 ## RamFS and other pseudo filesystems
 The RamFS and other pseudo filesystems like ProcFS use the memory as the storage. So the data may lose if one terminates the enclave.
 
