@@ -13,6 +13,7 @@
 //  - recvmsg and recvfrom tell the name of the peer; sendmmsg and recvmmsg work.
 //  - Writing to a socket that cannot send raises SIGPIPE in the calling thread, unless the call has
 //    MSG_NOSIGNAL, or has waited for room before it failed.
+//  - SO_SNDBUF limits the bytes that a socket has in flight to its peer, whenever it is set.
 //
 // MSG_OOB is not supported by the LibOS: it takes the byte as plain data (see
 // test_oob_flag_does_not_hang).
@@ -2088,6 +2089,90 @@ static int test_recvmmsg(void) {
     return 0;
 }
 
+// ---------------------------------------------------------------------------------------------
+// The size of the send buffer
+// ---------------------------------------------------------------------------------------------
+
+static int set_sndbuf(int fd, int size) {
+    return setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &size, sizeof(size));
+}
+
+// SO_SNDBUF limits what a socket has in flight to its peer, whenever it is set. If it is raised, the
+// writers that wait for room go on.
+static int test_sndbuf_limits_the_bytes_in_flight(void) {
+    char buf[64];
+    int sv[2];
+    call_t c;
+    CHECK(make_pair(sv) == 0, "failed to create a socket pair");
+
+    long normal = fill(sv[1]);
+    CHECK(normal > 100000, "the buffer of a socket takes %ld bytes", normal);
+    CHECK(set_sndbuf(sv[0], 4096) == 0, "failed to set SO_SNDBUF");
+    long small = fill(sv[0]);
+    CHECK(small > 0 && small < 50000, "the send buffer of 4096 bytes takes %ld bytes", small);
+
+    // A write that waits for room, and the buffer is raised
+    CHECK(call_start(&c, call_write, sv[0], buf, 1, 0) == 0, "failed to start write");
+    CHECK(call_blocks(&c), "write returns on a full buffer");
+    CHECK(set_sndbuf(sv[0], 262144) == 0, "failed to set SO_SNDBUF");
+    EXPECT_CALL(&c, WAKE_MS, 1, 0, "write after SO_SNDBUF was raised");
+    call_finish(&c);
+    CHECK(drain(sv[1]) == small + 1, "not all the bytes arrive");
+
+    // The room that is left after the buffer was made smaller than what it holds comes when the
+    // reader has taken enough
+    CHECK(set_sndbuf(sv[0], 262144) == 0, "failed to set SO_SNDBUF");
+    CHECK(fill(sv[0]) > 100000, "failed to fill the buffer");
+    CHECK(set_sndbuf(sv[0], 4096) == 0, "failed to set SO_SNDBUF");
+    CHECK(call_start(&c, call_send, sv[0], buf, 1, MSG_DONTWAIT) == 0,
+          "failed to start send");
+    EXPECT_NOW(&c, -1, EAGAIN, "send to a buffer that is smaller than its bytes");
+    call_finish(&c);
+    CHECK(drain(sv[1]) > 100000, "not all the bytes arrive");
+    CHECK(call_start(&c, call_send, sv[0], buf, 1, MSG_DONTWAIT) == 0,
+          "failed to start send");
+    EXPECT_NOW(&c, 1, 0, "send after the reader took the bytes");
+    call_finish(&c);
+    close(sv[0]);
+    close(sv[1]);
+    return 0;
+}
+
+// The size of the send buffer that a socket sets before it connects is the limit of its connection,
+// and the socket that accept returns has the default size. The size of the receive buffer limits
+// nothing for the sender.
+static int test_sndbuf_before_connect(void) {
+    unix_addr_t laddr = new_addr();
+    int l = socket(AF_UNIX, SOCK_STREAM, 0);
+    int c = socket(AF_UNIX, SOCK_STREAM, 0);
+    CHECK(bind(l, (struct sockaddr *)&laddr.sa, laddr.len) == 0 && listen(l, 4) == 0,
+          "failed to listen");
+    CHECK(set_sndbuf(c, 4096) == 0, "failed to set SO_SNDBUF");
+    CHECK(connect(c, (struct sockaddr *)&laddr.sa, laddr.len) == 0, "failed to connect");
+    int s = accept(l, NULL, NULL);
+    CHECK(s >= 0, "failed to accept");
+
+    long from_client = fill(c);
+    CHECK(from_client > 0 && from_client < 50000, "the buffer of the client takes %ld bytes",
+          from_client);
+    long from_server = fill(s);
+    CHECK(from_server > 100000, "the buffer of the server takes %ld bytes", from_server);
+    close(c);
+    close(s);
+    close(l);
+
+    int sv[2];
+    int size = 4096;
+    CHECK(make_pair(sv) == 0, "failed to create a socket pair");
+    CHECK(setsockopt(sv[0], SOL_SOCKET, SO_RCVBUF, &size, sizeof(size)) == 0,
+          "failed to set SO_RCVBUF");
+    long sent = fill(sv[1]);
+    CHECK(sent > 100000, "the sender takes %ld bytes for a receive buffer of 4096", sent);
+    close(sv[0]);
+    close(sv[1]);
+    return 0;
+}
+
 // sendmmsg takes at most 1024 messages (UIO_MAXIOV), whatever the length of the vector says, and
 // recvmmsg has no such limit. Both take no message from a vector of length 0, whatever its address
 static int test_mmsg_vector_length(void) {
@@ -2177,6 +2262,8 @@ static test_case_t test_cases[] = {
     TEST_CASE(test_sendmmsg),
     TEST_CASE(test_recvmmsg),
     TEST_CASE(test_mmsg_vector_length),
+    TEST_CASE(test_sndbuf_limits_the_bytes_in_flight),
+    TEST_CASE(test_sndbuf_before_connect),
 };
 
 int main(int argc, const char *argv[]) {
