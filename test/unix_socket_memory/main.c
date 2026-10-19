@@ -203,15 +203,22 @@ static int set_nonblocking(int fd) {
 }
 
 // Writes `len` bytes of the pattern from `offset` to a non-blocking descriptor until it is
-// full, and returns how many it took. -1 if it failed
+// full, and returns how many it took. -1 if it failed. A write of PIPE_BUF bytes or less to a
+// pipe takes all its bytes or none, so the room that is left, when a write fails with EAGAIN, is
+// filled with single bytes.
 static long fill_until_full(int fd, size_t offset, size_t limit) {
     unsigned char *buf = malloc(4093);
     size_t total = 0;
+    size_t chunk = 4093;
     long ret = -1;
     while (total < limit) {
-        size_t n = MIN(4093, limit - total);
+        size_t n = MIN(chunk, limit - total);
         fill_pattern(buf, offset + total, n);
         ssize_t r = write(fd, buf, n);
+        if (r < 0 && errno == EAGAIN && chunk > 1) {
+            chunk = 1;
+            continue;
+        }
         if (r < 0 && errno == EAGAIN) {
             ret = total;
             goto out;

@@ -1,7 +1,7 @@
 use atomic::{Atomic, Ordering};
 use net::PollEventFlags;
 
-use super::channel::{Channel, Consumer, Producer};
+use super::channel::{Channel, Consumer, IoOpts, Producer};
 use super::*;
 
 use crate::fs::{GetReadBufLen, IoctlCmd};
@@ -9,6 +9,10 @@ use crate::fs::{GetReadBufLen, IoctlCmd};
 // TODO: Add F_SETPIPE_SZ in fcntl to dynamically change the size of pipe
 // to improve memory efficiency. This value is got from /proc/sys/fs/pipe-max-size on linux.
 pub const PIPE_BUF_SIZE: usize = 1024 * 1024;
+
+// A write of no more bytes than this to a pipe is atomic: its bytes are not interleaved with those
+// of another write (PIPE_BUF)
+const PIPE_ATOMIC_WRITE_SIZE: usize = 4096;
 
 pub fn pipe(flags: StatusFlags) -> Result<(PipeReader, PipeWriter)> {
     let (producer, consumer) = Channel::new(PIPE_BUF_SIZE)?.split();
@@ -127,14 +131,31 @@ impl PipeReader {
 }
 
 impl PipeWriter {
-    /// Writes the bytes. A write of no bytes does nothing, like in Linux, also if no process
-    /// reads the pipe.
+    /// Writes the bytes like Linux does. A blocking pipe takes all of them, and a nonblocking pipe
+    /// what fits. A write of PIPE_BUF bytes or less takes all of them at once, or none. SIGPIPE
+    /// if no process reads the pipe, also if some bytes were written before the readers went,
+    /// except for a write of no bytes, which does nothing.
     fn write_bufs(&self, bufs: &[&[u8]]) -> Result<usize> {
-        if bufs.iter().all(|buf| buf.is_empty()) {
+        let len: usize = bufs.iter().map(|buf| buf.len()).sum();
+        if len == 0 {
             return Ok(0);
         }
 
-        self.producer.push_slices(bufs)
+        let opts = IoOpts {
+            all: true,
+            atomic: PIPE_ATOMIC_WRITE_SIZE,
+            ..Default::default()
+        };
+        let result = self.producer.push_slices_with(bufs, &opts);
+        // The write fails, or it stops after some bytes, because the readers are gone
+        let broken = match &result {
+            Ok(written) => *written < len && self.producer.is_peer_shutdown(),
+            Err(e) => e.errno() == EPIPE,
+        };
+        if broken {
+            crate::signal::raise_sigpipe();
+        }
+        result
     }
 }
 
@@ -208,7 +229,13 @@ impl File for PipeWriter {
     }
 
     fn poll_new(&self) -> IoEvents {
-        self.producer.poll()
+        let mut events = self.producer.poll();
+        // A write of PIPE_BUF bytes has to wait for room for all of them, so the pipe is not
+        // writable if it has less (unless a write fails with EPIPE, which is no wait)
+        if !events.contains(IoEvents::ERR) && self.producer.room() < PIPE_ATOMIC_WRITE_SIZE {
+            events -= IoEvents::OUT;
+        }
+        events
     }
 
     fn notifier(&self) -> Option<&IoNotifier> {

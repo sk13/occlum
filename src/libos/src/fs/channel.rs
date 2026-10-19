@@ -137,6 +137,10 @@ pub struct IoOpts {
     /// were. A call that does not block moves what it can. Without it, a call that has moved
     /// items returns them.
     pub all: bool,
+    /// A write of at most this number of items moves all of them or none: it waits for room for
+    /// them all, or fails with EAGAIN. A pipe does so for PIPE_BUF bytes, which it must not
+    /// interleave with the bytes of another write. The writes that are longer move what fits.
+    pub atomic: usize,
 }
 
 /// What an attempt of a call that waits has come to.
@@ -379,6 +383,11 @@ impl<I> Producer<I> {
     pub fn total_pushed(&self) -> usize {
         self.inner.lock().unwrap().total_pushed()
     }
+
+    /// Returns the number of items that the channel has room for.
+    pub fn room(&self) -> usize {
+        self.inner.lock().unwrap().remaining()
+    }
 }
 
 impl<I: Copy> Producer<I> {
@@ -411,9 +420,16 @@ impl<I: Copy> Producer<I> {
             let nonblocking = self.is_nonblocking() || opts.nonblocking;
             let mut pushed = 0;
             let mut no_memory = false;
+            // A write that has to be atomic pushes nothing if there is no room for all of it
+            let slices: &[&[I]] =
+                if done == 0 && len <= opts.atomic && rb_producer.remaining() < len {
+                    &[]
+                } else {
+                    item_slices
+                };
             // The slices begin with the items that were pushed by an earlier attempt
             let mut skip = done;
-            for items in item_slices {
+            for items in slices {
                 if skip >= items.len() {
                     skip -= items.len();
                     continue;
