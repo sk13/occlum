@@ -675,8 +675,25 @@ impl<T: Copy> RingConsumer<T> {
     /// Copies the first items of the queue as long as there is room for them in `items`, without
     /// removing them, and returns their number.
     pub fn peek_slice(&self, items: &mut [T]) -> usize {
-        let count = min(items.len(), self.len());
+        self.peek_slice_at(0, items)
+    }
+
+    /// Does the same for the items that follow the first `skip` items of the queue.
+    pub fn peek_slice_at(&self, skip: usize, items: &mut [T]) -> usize {
+        let count = min(items.len(), self.len().saturating_sub(skip));
+        if count == 0 {
+            return 0;
+        }
         let mut cursor = self.cursor;
+        let mut skipped = 0;
+        while skipped < skip {
+            // The items that are skipped are queued, as there are more behind them
+            unsafe {
+                let (_, n) = cursor.run(&self.shared, skip - skipped, false);
+                cursor.pos += n;
+                skipped += n;
+            }
+        }
         let mut done = 0;
         while done < count {
             unsafe {

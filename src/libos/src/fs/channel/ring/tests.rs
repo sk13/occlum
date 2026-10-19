@@ -679,6 +679,64 @@ fn items_in_order_across_chunks() {
     assert_eq!(live(), before);
 }
 
+// Peeking past the first items, over the boundaries of the chunks
+#[test]
+fn peek_slice_at_skips_items() {
+    track();
+    let before = live();
+    let (mut p, mut c) = Ring::<u32>::new(100_000).split();
+    let mut next = 0u32;
+    // Chunks of different sizes, some of them read
+    for n in [1usize, 3, 200, 129, 4000, 17, 6000, 1] {
+        let items: Vec<u32> = (0..n as u32).map(|i| next + i).collect();
+        assert_eq!(p.push_slice(&items), Ok(n));
+        next += n as u32;
+    }
+    let mut popped = vec![0u32; 1500];
+    assert_eq!(c.pop_slice(&mut popped), 1500);
+    let queued = next as usize - 1500;
+    assert_eq!(c.len(), queued);
+    for skip in [
+        0usize,
+        1,
+        2,
+        100,
+        127,
+        128,
+        129,
+        1000,
+        2500,
+        4096,
+        6000,
+        queued - 1,
+        queued,
+    ] {
+        for len in [0usize, 1, 5, 128, 3000, 10_000] {
+            let mut peeked = vec![0u32; len];
+            let n = c.peek_slice_at(skip, &mut peeked);
+            assert_eq!(n, len.min(queued - skip), "skip {} len {}", skip, len);
+            for (i, v) in peeked[..n].iter().enumerate() {
+                assert_eq!(
+                    *v as usize,
+                    1500 + skip + i,
+                    "skip {} len {} at {}",
+                    skip,
+                    len,
+                    i
+                );
+            }
+        }
+    }
+    // Skipping more than there is peeks nothing
+    let mut one = [0u32; 1];
+    assert_eq!(c.peek_slice_at(queued + 5, &mut one), 0);
+    assert_eq!(c.len(), queued);
+    drop(popped);
+    drop(p);
+    drop(c);
+    assert_eq!(live(), before);
+}
+
 // Records which items are dropped: how often each value was dropped
 struct Drops {
     each: Vec<AtomicUsize>,
