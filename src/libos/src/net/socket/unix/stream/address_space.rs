@@ -24,11 +24,19 @@ impl AddressSpaceKey {
     }
 }
 
+/// What a socket bound to a name: the address as it was bound, which the peers
+/// of the socket show whatever name they used to connect, and the listener
+/// once the socket is listening.
+struct Binding {
+    addr: UnixAddr,
+    listener: Option<Arc<Listener>>,
+}
+
 pub struct AddressSpace {
     // For "file", use inode number as "key" instead of path string so that listeners can still
     // be reached even if the socket file is moved or renamed.
-    file: SgxMutex<BTreeMap<AddressSpaceKey, Option<Arc<Listener>>>>,
-    abstr: SgxMutex<BTreeMap<AddressSpaceKey, Option<Arc<Listener>>>>,
+    file: SgxMutex<BTreeMap<AddressSpaceKey, Binding>>,
+    abstr: SgxMutex<BTreeMap<AddressSpaceKey, Binding>>,
 }
 
 impl AddressSpace {
@@ -40,12 +48,18 @@ impl AddressSpace {
     }
 
     pub fn add_binder(&self, addr: &UnixAddr) -> Result<()> {
-        let key = Self::get_key(addr).ok_or_else(|| errno!(EINVAL, "can't find socket file"))?;
+        let key = Self::get_key(addr)?;
         let mut space = self.get_space(addr)?;
         if space.contains_key(&key) {
             return_errno!(EADDRINUSE, "the addr is already bound");
         } else {
-            space.insert(key, None);
+            space.insert(
+                key,
+                Binding {
+                    addr: addr.clone(),
+                    listener: None,
+                },
+            );
             Ok(())
         }
     }
@@ -57,15 +71,12 @@ impl AddressSpace {
         nonblocking: bool,
         notifier: Arc<RelayNotifier>,
     ) -> Result<()> {
-        let key = Self::get_key(addr).ok_or_else(|| errno!(EINVAL, "the socket is not bound"))?;
+        let key = Self::get_key(addr).map_err(|_| errno!(EINVAL, "the socket is not bound"))?;
         let mut space = self.get_space(addr)?;
 
-        if let Some(option) = space.get(&key) {
-            if option.is_none() {
-                space.insert(
-                    key,
-                    Some(Arc::new(Listener::new(capacity, nonblocking, notifier)?)),
-                );
+        if let Some(binding) = space.get_mut(&key) {
+            if binding.listener.is_none() {
+                binding.listener = Some(Arc::new(Listener::new(capacity, nonblocking, notifier)?));
                 Ok(())
             } else {
                 return_errno!(EINVAL, "the socket is already listened");
@@ -76,11 +87,11 @@ impl AddressSpace {
     }
 
     pub fn resize_listener(&self, addr: &UnixAddr, capacity: usize) -> Result<()> {
-        let key = Self::get_key(addr).ok_or_else(|| errno!(EINVAL, "the socket is not bound"))?;
+        let key = Self::get_key(addr).map_err(|_| errno!(EINVAL, "the socket is not bound"))?;
         let mut space = self.get_space(addr)?;
 
-        if let Some(option) = space.get(&key) {
-            if let Some(listener) = option {
+        if let Some(binding) = space.get(&key) {
+            if let Some(listener) = &binding.listener {
                 listener.resize(capacity);
             } else {
                 return_errno!(EINVAL, "the socket is not listening");
@@ -91,10 +102,21 @@ impl AddressSpace {
         }
     }
 
-    pub fn push_incoming(&self, addr: &UnixAddr, sock: Endpoint) -> Result<()> {
-        self.get_listener_ref(addr)
-            .ok_or_else(|| errno!(ECONNREFUSED, "no one's listening on the remote address"))?
-            .push_incoming(sock)
+    /// Returns the listener that connecting to the address reaches, and the
+    /// address that its socket bound. The errors are those of Linux: a path
+    /// that cannot be resolved is ENOENT or ENOTDIR, while a name that no one
+    /// listens on, be it the path of a file that is no socket or has no
+    /// listener any more, is ECONNREFUSED.
+    pub fn find_listener(&self, addr: &UnixAddr) -> Result<(Arc<Listener>, UnixAddr)> {
+        let key = Self::get_key(addr)?;
+        let space = self.get_space(addr)?;
+        match space.get(&key) {
+            Some(Binding {
+                addr,
+                listener: Some(listener),
+            }) => Ok((listener.clone(), addr.clone())),
+            _ => return_errno!(ECONNREFUSED, "no one's listening on the remote address"),
+        }
     }
 
     pub fn pop_incoming(&self, addr: &UnixAddr) -> Result<Endpoint> {
@@ -104,18 +126,14 @@ impl AddressSpace {
     }
 
     pub fn get_listener_ref(&self, addr: &UnixAddr) -> Option<Arc<Listener>> {
-        let key = Self::get_key(addr);
-        if let Some(key) = key {
-            let space = self.get_space(addr).unwrap();
-            space.get(&key).map(|x| x.clone()).flatten()
-        } else {
-            None
-        }
+        let key = Self::get_key(addr).ok()?;
+        let space = self.get_space(addr).ok()?;
+        space.get(&key)?.listener.clone()
     }
 
     pub fn remove_addr(&self, addr: &UnixAddr) {
         let key = Self::get_key(addr);
-        if let Some(key) = key {
+        if let Ok(key) = key {
             let mut space = self.get_space(addr).unwrap();
             space.remove(&key);
         } else {
@@ -126,7 +144,7 @@ impl AddressSpace {
     fn get_space(
         &self,
         addr: &UnixAddr,
-    ) -> Result<SgxMutexGuard<'_, BTreeMap<AddressSpaceKey, Option<Arc<Listener>>>>> {
+    ) -> Result<SgxMutexGuard<'_, BTreeMap<AddressSpaceKey, Binding>>> {
         match addr {
             UnixAddr::File(_, _) => Ok(self.file.lock().unwrap()),
             UnixAddr::Abstract(_) => Ok(self.abstr.lock().unwrap()),
@@ -134,27 +152,22 @@ impl AddressSpace {
         }
     }
 
-    fn get_key(addr: &UnixAddr) -> Option<AddressSpaceKey> {
+    fn get_key(addr: &UnixAddr) -> Result<AddressSpaceKey> {
         trace!("addr = {:?}", addr);
         match addr {
-            UnixAddr::File(inode_num, unix_path) if inode_num.is_some() => {
-                Some(AddressSpaceKey::from_inode(inode_num.unwrap()))
-            }
-            UnixAddr::File(_, unix_path) => {
+            UnixAddr::File(Some(inode_num), _) => Ok(AddressSpaceKey::from_inode(*inode_num)),
+            UnixAddr::File(None, unix_path) => {
+                // The errors of the lookup are those of connect()
                 let inode = {
                     let file_path = unix_path.absolute();
                     let current = current!();
                     let fs = current.fs().read().unwrap();
-                    fs.lookup_inode(&file_path)
+                    fs.lookup_inode(&file_path)?
                 };
-                if let Ok(inode) = inode {
-                    Some(AddressSpaceKey::from_inode(inode.metadata().unwrap().inode))
-                } else {
-                    None
-                }
+                Ok(AddressSpaceKey::from_inode(inode.metadata()?.inode))
             }
-            UnixAddr::Abstract(name) => Some(AddressSpaceKey::from_name(name.clone())),
-            UnixAddr::Unnamed => None,
+            UnixAddr::Abstract(name) => Ok(AddressSpaceKey::from_name(name.clone())),
+            UnixAddr::Unnamed => return_errno!(EINVAL, "an unnamed address has no key"),
         }
     }
 }

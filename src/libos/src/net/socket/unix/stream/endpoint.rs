@@ -12,15 +12,22 @@ pub fn end_pair(nonblocking: bool) -> Result<(Endpoint, Endpoint)> {
     let (pro_a, con_a) = Channel::new(DEFAULT_BUF_SIZE)?.split();
     let (pro_b, con_b) = Channel::new(DEFAULT_BUF_SIZE)?.split();
 
+    // Each end shares its name with the other end, which can tell it, as Linux
+    // does, when the first end is gone
+    let name_a = Arc::new(RwLock::new(None));
+    let name_b = Arc::new(RwLock::new(None));
+
     let mut end_a = Arc::new(Inner {
-        addr: RwLock::new(None),
+        addr: name_a.clone(),
+        peer_addr: name_b.clone(),
         reader: con_a,
         writer: pro_b,
         peer: Weak::default(),
         ancillary: RwLock::new(None),
     });
     let end_b = Arc::new(Inner {
-        addr: RwLock::new(None),
+        addr: name_b,
+        peer_addr: name_a,
         reader: con_b,
         writer: pro_a,
         peer: Arc::downgrade(&end_a),
@@ -39,7 +46,8 @@ pub fn end_pair(nonblocking: bool) -> Result<(Endpoint, Endpoint)> {
 
 /// One end of the connected unix socket
 pub struct Inner {
-    addr: RwLock<Option<UnixAddr>>,
+    addr: Arc<RwLock<Option<UnixAddr>>>,
+    peer_addr: Arc<RwLock<Option<UnixAddr>>>,
     reader: Consumer<u8>,
     writer: Producer<u8>,
     peer: Weak<Self>,
@@ -55,8 +63,9 @@ impl Inner {
         *self.addr.write().unwrap() = Some(addr.clone());
     }
 
+    /// The name that the peer has bound, which is known after the peer is closed, too.
     pub fn peer_addr(&self) -> Option<UnixAddr> {
-        self.peer.upgrade().map(|end| end.addr().clone()).flatten()
+        self.peer_addr.read().unwrap().clone()
     }
 
     pub fn set_nonblocking(&self, nonblocking: bool) {

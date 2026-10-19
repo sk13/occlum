@@ -276,15 +276,14 @@ impl Stream {
         let mut inner = self.inner();
         match &*inner {
             Status::Idle(info) => {
-                let self_addr_opt = info.addr();
-                if let Some(self_addr) = self_addr_opt {
-                    if self_addr == addr {
-                        return_errno!(EINVAL, "self connect is not supported");
-                    }
-                }
+                let (listener, listener_addr) = ADDRESS_SPACE.find_listener(addr)?;
 
+                let self_addr_opt = info.addr();
                 let (end_self, end_incoming) = end_pair(info.nonblocking())?;
-                end_incoming.set_addr(addr);
+                // The name of the listener is the one that it bound, whatever
+                // the name that this socket used, which may have changed
+                // meanwhile, e.g., by renaming the socket file
+                end_incoming.set_addr(&listener_addr);
                 if let Some(self_addr) = self_addr_opt {
                     end_self.set_addr(self_addr);
                 }
@@ -292,17 +291,17 @@ impl Stream {
                 // Before the listener gets the peer, which may write right away
                 self.notifier.observe_endpoint(&end_self);
 
-                ADDRESS_SPACE
-                    .push_incoming(addr, end_incoming)
+                listener
+                    .push_incoming(end_incoming)
                     .map_err(|e| match e.errno() {
                         EAGAIN => errno!(ECONNREFUSED, "the backlog is full"),
+                        // The listener was closed after it was found
+                        EPIPE => errno!(ECONNREFUSED, "the listener is closed"),
                         _ => e,
                     })?;
 
                 // Notify listener for this event
-                if let Some(listener) = ADDRESS_SPACE.get_listener_ref(addr) {
-                    listener.notifier.notifier().broadcast(&IoEvents::IN);
-                }
+                listener.notifier.notifier().broadcast(&IoEvents::IN);
 
                 *inner = Status::Connected(end_self);
                 Ok(())

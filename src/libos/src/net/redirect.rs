@@ -60,7 +60,12 @@ pub fn redirect_connect(fd: FileDesc, file_ref: &FileRef, addr: &AnyAddr) -> Res
         None => return Ok(false),
     };
     let stream = new_stream(file_ref)?;
-    stream.connect(&unix_addr)?;
+    stream.connect(&unix_addr).map_err(|e| match e.errno() {
+        // A TCP client does not know of files: nothing listens, whether the
+        // file of the Unix socket is missing or not
+        ENOENT | ENOTDIR => errno!(ECONNREFUSED, "nothing listens on the Unix address"),
+        _ => e,
+    })?;
     stream.set_inet_view(InetView {
         local: loopback_addr(addr),
         peer: Some(addr.clone()),
