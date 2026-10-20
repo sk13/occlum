@@ -43,34 +43,5 @@ opt.get.SO_PEERSEC.sp
 # LibOS limits the size to 208 KiB, the default of Linux (see MAX_SOCK_BUF_SIZE in options.rs)
 opt.set.SO_SNDBUF.huge
 
-# group c17_ancillary
-anc.rights.recv
-anc.rights.fd_is_new
-anc.rights.plain_read_gets
-anc.rights.then_plain.recv1
-anc.rights.then_plain.recv2
-anc.rights.recv_without_ctl_buffer
-anc.rights.recv_without_ctl_buffer.then_read
-anc.rights.ctl_buffer_too_small
-anc.recvmsg_ctl_blocking_data_only
-anc.recvmsg_ctl_nonblocking_data_only
-anc.recvmsg_ctl_following_data
-anc.recvmsg_ctl_following_data.then_read
-anc.passcred.recv
-anc.credentials.recv
-anc.bogus_cmsg.send
-anc.bogus_cmsg.peer_read
-anc.bogus_level.peer_read
-anc.short_controllen.peer_read
-
 # group c19_memory
 mem.many_sockets_created
-
-# group c90_anc_rights_over_socketpair, c90_anc_rights_sender_closed_fd, c90_anc_rights_sender_thread_exited
-# (the LibOS drops the control message of a descriptor that it cannot look up at the receiver: MSG_CTRUNC)
-crash.rights_socketpair.recv
-crash.rights_socketpair.fd_works
-crash.rights_closed.recv
-crash.rights_closed.fd_works
-crash.rights_thread_gone.recv
-crash.rights_thread_gone.fd_works
