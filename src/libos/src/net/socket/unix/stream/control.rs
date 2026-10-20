@@ -469,8 +469,12 @@ impl PushMark for Mark<'_> {
 
     fn after(&mut self, pushed: usize) {
         let mut entries = self.queue.entries().lock().unwrap();
-        // The descriptors of a send that pushed no bytes are dropped with the send, not here
-        self.msg.fds = entries.pushed(pushed);
+        // The descriptors of a send that pushed no bytes are dropped with the send, not here. If
+        // the receiver is closed, they are still in the send, and stay there.
+        let back = entries.pushed(pushed);
+        if !back.is_empty() {
+            self.msg.fds = back;
+        }
         self.queue.len.store(entries.len(), Ordering::Release);
     }
 }
