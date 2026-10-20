@@ -4645,9 +4645,29 @@ CHECK(c15_options) {
         sr = SYS(setsockopt(b, SOL_SOCKET, SO_RCVBUF, &(int) {1}, sizeof(v)));
         emit("opt.set.SO_RCVBUF.tiny", "%s -> get %s", rs(sr), sockopt_s(b, SOL_SOCKET,
                 SO_RCVBUF));
+        /* The size is limited to net.core.wmem_max, which is not the same on every host (a host may
+         * raise it to MBytes), so the result says whether it is twice that limit, like Linux. The
+         * LibOS has no such file, and its limit is the default of Linux. */
         sr = SYS(setsockopt(b, SOL_SOCKET, SO_SNDBUF, &(int) {1 << 30}, sizeof(v)));
-        emit("opt.set.SO_SNDBUF.huge", "%s -> get %s", rs(sr), sockopt_s(b, SOL_SOCKET,
-                SO_SNDBUF));
+        {
+            long limit = 212992;
+            FILE *f = fopen("/proc/sys/net/core/wmem_max", "r");
+            if (f) {
+                long n;
+                if (fscanf(f, "%ld", &n) == 1 && n > 0) {
+                    limit = n;
+                }
+                fclose(f);
+            }
+            int got = 0;
+            socklen_t got_len = sizeof(got);
+            if (getsockopt(b, SOL_SOCKET, SO_SNDBUF, &got, &got_len) == 0 && got == 2 * limit) {
+                emit("opt.set.SO_SNDBUF.huge", "%s -> get twice net.core.wmem_max", rs(sr));
+            } else {
+                emit("opt.set.SO_SNDBUF.huge", "%s -> get %s", rs(sr), sockopt_s(b, SOL_SOCKET,
+                        SO_SNDBUF));
+            }
+        }
         emit("opt.set.SO_SNDBUF.negative", "%s", rs(SYS(setsockopt(b, SOL_SOCKET, SO_SNDBUF,
         &(int) {-5}, sizeof(v)))));
     }

@@ -1507,7 +1507,7 @@ opt.set.SO_ACCEPTCONN: -ENOPROTOOPT -> get 0(len=4)
 opt.set.SO_DOMAIN: -ENOPROTOOPT -> get 1(len=4)
 opt.set.SO_SNDBUF.tiny: 0 -> get 4608(len=4)
 opt.set.SO_RCVBUF.tiny: 0 -> get 2304(len=4)
-opt.set.SO_SNDBUF.huge: 0 -> get 8388608(len=4)
+opt.set.SO_SNDBUF.huge: 0 -> get twice net.core.wmem_max
 opt.set.SO_SNDBUF.negative: 0
 opt.set.SO_LINGER: 0
 opt.set.SO_LINGER.get: on=1 secs=5
