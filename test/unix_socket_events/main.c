@@ -1272,6 +1272,41 @@ static int test_epoll_wait_is_woken_by_shutdown_rd_of_the_peer(void) {
     return 0;
 }
 
+// epoll tells the shutdown of a socket that is not connected: the edge is there when no thread
+// waits, and a thread that waits in epoll_wait is woken up, as shutdown() makes the socket readable
+// (the end of the file)
+static int test_epoll_is_told_of_the_shutdown_of_an_idle_socket(void) {
+    const unsigned after = POLLIN | POLLOUT | POLLHUP | POLLRDHUP;
+    context = "no thread waits";
+    int s = socket(AF_UNIX, SOCK_STREAM, 0);
+    int ep = epoll_create1(0);
+    CHECK(s >= 0 && ep >= 0 &&
+          epoll_add(ep, s, EV_EDGE) == 0, "failed to make an epoll file");
+    CHECK_EPOLL(ep, POLLOUT | POLLHUP, "at the registration");
+    CHECK_EPOLL(ep, 0, "again");
+    CHECK(shutdown(s, SHUT_RD) == 0, "failed to shut down");
+    CHECK_EPOLL(ep, after, "after the shutdown");
+    close(ep);
+    close(s);
+
+    context = "a thread waits";
+    s = socket(AF_UNIX, SOCK_STREAM, 0);
+    ep = epoll_create1(0);
+    CHECK(s >= 0 && ep >= 0 &&
+          epoll_add(ep, s, EV_EDGE) == 0, "failed to make an epoll file");
+    CHECK_EPOLL(ep, POLLOUT | POLLHUP, "at the registration");
+    op_t op;
+    CHECK(op_start(&op, OP_EPOLL, ep) == 0, "epoll_wait does not wait");
+    CHECK(shutdown(s, SHUT_RD) == 0, "failed to shut down");
+    CHECK(op_finish(&op) == 0, "epoll_wait is not woken");
+    CHECK(op.ret == 1 &&
+          op.revents == after, "epoll_wait returns %ld, events %s, instead of %s",
+          op.ret, events_str(op.revents), events_str(after));
+    close(ep);
+    close(s);
+    return 0;
+}
+
 // ---------------------------------------------------------------------------------------------
 // What a call finds right after poll() has told the end of the file, and a write that races with a
 // close
@@ -1531,6 +1566,7 @@ static test_case_t test_cases[] = {
     TEST_CASE(test_epoll_wait_is_woken_by_the_reset),
     TEST_CASE(test_epoll_edge_is_told_of_the_shutdown_of_the_peer),
     TEST_CASE(test_epoll_wait_is_woken_by_shutdown_rd_of_the_peer),
+    TEST_CASE(test_epoll_is_told_of_the_shutdown_of_an_idle_socket),
     TEST_CASE(test_a_read_after_poll_tells_the_end_finds_it),
     TEST_CASE(test_a_write_that_races_with_the_close_is_reset),
     TEST_CASE(test_waitall_takes_the_reset),
