@@ -2163,6 +2163,64 @@ static int test_sendmmsg_and_recvmmsg_with_descriptors(void) {
     return 0;
 }
 
+// ---------------------------------------------------------------------------------------------
+// Credentials of connections that are not accepted yet, the slots of the queue, the limit of the
+// descriptors of a send, and the credentials of a thread
+// ---------------------------------------------------------------------------------------------
+
+// Bytes that a client sends before accept() returns the connection carry its credentials, whether
+// the sockets ask for them or not: Linux records them for a connection whose socket has no file
+// yet. The receiver gets them if it has SO_PASSCRED when it receives, which it may set on the
+// listener (the accepted socket inherits it), or on the accepted socket after accept().
+static int test_credentials_of_bytes_sent_before_accept(void) {
+    static const char *names[] = {
+        "SO_PASSCRED on the listener", "SO_PASSCRED on the client", "SO_PASSCRED set after accept",
+        "no SO_PASSCRED",
+    };
+    for (int variant = 0; variant < 4; variant++) {
+        struct sockaddr_un addr;
+        socklen_t addr_len;
+        int l = listener(&addr, &addr_len);
+        CHECK(l >= 0, "failed to listen");
+        if (variant == 0) {
+            CHECK(set_int_opt(l, SO_PASSCRED, 1) == 0, "failed to set SO_PASSCRED");
+        }
+        int c = socket(AF_UNIX, SOCK_STREAM, 0);
+        CHECK(c >= 0, "failed to create a socket");
+        if (variant == 1) {
+            CHECK(set_int_opt(c, SO_PASSCRED, 1) == 0, "failed to set SO_PASSCRED");
+        }
+        CHECK(connect(c, (struct sockaddr *)&addr, addr_len) == 0, "failed to connect");
+        CHECK(write(c, "x", 1) == 1, "failed to write before accept");
+        int a = accept(l, NULL, NULL);
+        CHECK(a >= 0, "failed to accept");
+        set_timeout(a, RECV_TIMEOUT_MS);
+        if (variant == 2) {
+            CHECK(set_int_opt(a, SO_PASSCRED, 1) == 0, "failed to set SO_PASSCRED");
+        }
+        got_t got;
+        recv_ctl(a, 8, 128, 0, &got);
+        CHECK_GOT(&got, 1, "x");
+        if (variant == 0 || variant == 2) {
+            CHECK(got.has_cred, "%s: no credentials", names[variant]);
+            CHECK(check_own_cred(&got, names[variant]) == 0,
+                  "%s: wrong credentials for bytes sent before accept", names[variant]);
+        } else {
+            CHECK(!got.has_cred, "%s: credentials that nobody asked for", names[variant]);
+        }
+        // the bytes that follow accept() are the same
+        CHECK(write(c, "y", 1) == 1, "failed to write after accept");
+        recv_ctl(a, 8, 128, 0, &got);
+        CHECK_GOT(&got, 1, "y");
+        if (variant == 0 || variant == 2) {
+            CHECK(check_own_cred(&got, names[variant]) == 0, "%s: wrong credentials after accept",
+                  names[variant]);
+        }
+        close_files(3, a, c, l);
+    }
+    return 0;
+}
+
 // A connection that is reset, whose reader has bytes and a message with a descriptor queued: a
 // receive that waits for all its bytes stops after the message with the descriptor, as always, and
 // does not look at the queue again, so it does not take the error of the connection with it. The
@@ -2240,6 +2298,7 @@ static test_case_t test_cases[] = {
     TEST_CASE(test_passcred_before_connect),
     TEST_CASE(test_passcred_of_two_senders),
     TEST_CASE(test_passcred_peek_does_not_look_past_another_sender),
+    TEST_CASE(test_credentials_of_bytes_sent_before_accept),
     TEST_CASE(test_waitall_that_stops_at_a_descriptor_does_not_take_the_reset),
     TEST_CASE(test_nothing_is_left_behind),
     TEST_CASE(test_a_chain_of_sockets_is_released),
