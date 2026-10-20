@@ -1,3 +1,4 @@
+use super::control::{ControlQueue, Mark, Outgoing, Received};
 use super::*;
 use events::{Event, EventFilter, Notifier, Observer};
 use fs::channel::{Channel, Consumer, IoOpts, Producer};
@@ -19,11 +20,18 @@ pub fn end_pair(nonblocking: bool) -> Result<(Endpoint, Endpoint)> {
     let name_b = Arc::new(RwLock::new(None));
     let flags = Arc::new(AtomicU16::new(0));
 
+    // The control messages of each channel, which the end that writes into it and the end that
+    // reads from it share
+    let ctl_a = ControlQueue::new();
+    let ctl_b = ControlQueue::new();
+
     let mut end_a = Arc::new(Inner {
         addr: name_a.clone(),
         peer_addr: name_b.clone(),
         reader: con_a,
         writer: pro_b,
+        control_in: ctl_a.clone(),
+        control_out: ctl_b.clone(),
         peer: Weak::default(),
         flags: flags.clone(),
         flags_shift: 0,
@@ -36,6 +44,8 @@ pub fn end_pair(nonblocking: bool) -> Result<(Endpoint, Endpoint)> {
         peer_addr: name_a,
         reader: con_b,
         writer: pro_a,
+        control_in: ctl_b,
+        control_out: ctl_a,
         peer: Arc::downgrade(&end_a),
         flags,
         flags_shift: 8,
@@ -73,6 +83,9 @@ pub struct Inner {
     peer_addr: Arc<RwLock<Option<UnixAddr>>>,
     reader: Consumer<u8>,
     writer: Producer<u8>,
+    // The control messages that the peer sends to this end, and those that this end sends
+    control_in: Arc<ControlQueue>,
+    control_out: Arc<ControlQueue>,
     peer: Weak<Self>,
     // The flags of the shutdown of both ends, which a poll tells (see `RCV_SHUTDOWN`): each end
     // has a byte of the word, at `flags_shift`. A shutdown changes the flags of both ends in one
@@ -115,14 +128,27 @@ impl Inner {
         cons_nonblocking
     }
 
-    pub fn read(&self, bufs: &mut [&mut [u8]], opts: &IoOpts) -> Result<usize> {
-        let result = self.reader.pop_slices_with(bufs, opts);
+    /// Reads the bytes, and the control messages that belong to them
+    pub fn read(
+        &self,
+        bufs: &mut [&mut [u8]],
+        opts: &IoOpts,
+        received: &mut Received,
+    ) -> Result<usize> {
+        let mut gate = self.control_in.gate(received, false);
+        let result = self.reader.pop_slices_gated(bufs, opts, Some(&mut gate));
         self.fail_if_reset(result, bufs)
     }
 
-    /// Reads the bytes without taking them
-    pub fn peek(&self, bufs: &mut [&mut [u8]], opts: &IoOpts) -> Result<usize> {
-        let result = self.reader.peek_slices_with(bufs, opts);
+    /// Reads the bytes without taking them, and the files of their control messages as copies
+    pub fn peek(
+        &self,
+        bufs: &mut [&mut [u8]],
+        opts: &IoOpts,
+        received: &mut Received,
+    ) -> Result<usize> {
+        let mut gate = self.control_in.gate(received, true);
+        let result = self.reader.peek_slices_gated(bufs, opts, Some(&mut gate));
         self.fail_if_reset(result, bufs)
     }
 
@@ -137,9 +163,16 @@ impl Inner {
         }
     }
 
-    pub fn write(&self, bufs: &[&[u8]], opts: &IoOpts) -> Result<usize> {
+    /// Writes the bytes with the control messages
+    pub fn write(&self, bufs: &[&[u8]], opts: &IoOpts, control: Option<Outgoing>) -> Result<usize> {
         let was_shutdown = self.is_write_shutdown();
-        let result = self.writer.push_slices_with(bufs, opts);
+        let result = match control {
+            None => self.writer.push_slices_with(bufs, opts),
+            Some(control) => {
+                let mut mark = Mark::new(&self.control_out, control);
+                self.writer.push_slices_marked(bufs, opts, Some(&mut mark))
+            }
+        };
         // A write that waited, and finds that the peer is closed, fails with the error of the
         // socket first, like in Linux. A write that finds it closed at once fails with EPIPE, and
         // leaves the error for the next read.
@@ -298,40 +331,24 @@ impl Drop for Inner {
         }
         self.flags
             .fetch_or(self.peer_flags(flags), Ordering::SeqCst);
+        // The control messages that nobody reads any more: their files are released
+        self.control_in.close();
     }
 }
 
-/// Ancillary data of connected unix socket's sent/received control message.
+/// The process that connected, accepted or created the socket pair, which SO_PEERCRED shows to
+/// the peer.
 #[derive(Clone, Debug)]
 pub struct Ancillary {
-    pub(super) tid: pid_t, // currently store tid to locate file table
     pid: pid_t,
 }
 
 impl Ancillary {
-    /// The ancillary data of the current thread, which connects or accepts
+    /// The ancillary data of the current process
     pub fn of_current() -> Self {
-        let current = current!();
         Self {
-            tid: current.tid(),
-            pid: current.process().pid(),
-        }
-    }
-
-    /// The ancillary data of the current process without a thread, for the ends
-    /// of a socket pair. recvmsg() looks up the descriptors that the peer sends
-    /// in the file table of the thread of the peer's ancillary data, which
-    /// connect() and accept() set. A socket pair has no such thread, so the tid
-    /// is 0: no thread.
-    pub fn of_current_process() -> Self {
-        Self {
-            tid: 0,
             pid: current!().process().pid(),
         }
-    }
-
-    pub fn tid(&self) -> pid_t {
-        self.tid
     }
 
     pub fn pid(&self) -> pid_t {

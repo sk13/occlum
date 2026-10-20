@@ -1,11 +1,11 @@
 use super::address_space::ADDRESS_SPACE;
+use super::control::{Outgoing, Received};
 use super::endpoint::{end_pair, Ancillary, Endpoint, RelayNotifier};
 use super::options::{AtomicTimeouts, SockOptions};
 use super::*;
 use events::{Event, EventFilter, Notifier, Observer};
 use fs::channel::IoOpts;
 use fs::{FileMode, IoEvents, SocketInode};
-use net::socket::{CMessages, CmsgData};
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -74,8 +74,8 @@ impl Stream {
         let (end_a, end_b) = end_pair(nonblocking)?;
         // The process that creates the sockets is the peer of both ends, like
         // in Linux
-        end_a.set_ancillary(Ancillary::of_current_process());
-        end_b.set_ancillary(Ancillary::of_current_process());
+        end_a.set_ancillary(Ancillary::of_current());
+        end_b.set_ancillary(Ancillary::of_current());
         let notifier_a = Arc::new(RelayNotifier::new());
         let notifier_b = Arc::new(RelayNotifier::new());
         notifier_a.observe_endpoint(&end_a);
@@ -343,64 +343,23 @@ impl Stream {
         Ok((data_len, addr))
     }
 
-    pub fn sendmsg(
-        &self,
-        bufs: &[&[u8]],
-        flags: SendFlags,
-        addr: Option<&AnyAddr>,
-        control: Option<&[u8]>,
-    ) -> Result<usize> {
-        self.check_no_addr(addr.is_some())?;
-        let data_len = self.send(bufs, flags)?;
-        if let Some(msg_control) = control {
-            self.send(&[msg_control], flags)?;
-        }
-
-        Ok(data_len)
-    }
-
-    pub fn recvmsg(
-        &self,
-        bufs: &mut [&mut [u8]],
-        flags: RecvFlags,
-        control: Option<&mut [u8]>,
-    ) -> Result<(usize, Option<AnyAddr>, MsgFlags, usize)> {
-        let data_len = self.recv(bufs, flags)?;
-
-        // The name of the peer is the only other field that is supported
-        let mut msg_flags = MsgFlags::empty();
-        let control_len = if let Some(msg_control) = control {
-            let control_len = self.read(msg_control)?;
-
-            // For each control message that contains file descriptors (SOL_SOCKET and SCM_RIGHTS),
-            // reassign each fd in the message in receive end. If that is not possible, the
-            // control data is dropped.
-            match self.reassign_fds(&mut msg_control[..control_len]) {
-                Ok(()) => control_len,
-                Err(e) => {
-                    warn!("drop the control data: {:?}", e);
-                    msg_flags |= MsgFlags::MSG_CTRUNC;
-                    0
-                }
-            }
-        } else {
-            0
-        };
-
-        Ok((
-            data_len,
-            self.recv_addr().map(AnyAddr::Unix),
-            msg_flags,
-            control_len,
-        ))
-    }
-
     /// Receives bytes into the buffers, which is what all the calls that read from the socket do.
     /// Unless the socket is nonblocking, or the call has MSG_DONTWAIT, it waits for bytes as long
     /// as SO_RCVTIMEO says, which ends with EAGAIN. MSG_PEEK does not take the bytes. MSG_WAITALL
     /// waits until the buffers are full, but a peek returns the bytes that are queued, like in
     /// Linux.
     pub(super) fn recv(&self, bufs: &mut [&mut [u8]], flags: RecvFlags) -> Result<usize> {
+        self.recv_with(bufs, flags, &mut Received::default())
+    }
+
+    /// Receives like `recv`, and takes the control messages that belong to the bytes, which go to
+    /// `received`. A receive that does not look at them drops them.
+    pub(super) fn recv_with(
+        &self,
+        bufs: &mut [&mut [u8]],
+        flags: RecvFlags,
+        received: &mut Received,
+    ) -> Result<usize> {
         let endpoint = self.recv_endpoint()?;
         let opts = IoOpts {
             nonblocking: flags.contains(RecvFlags::MSG_DONTWAIT),
@@ -411,12 +370,14 @@ impl Stream {
         // Like Linux, a receive into no bytes waits for the bytes of the socket, or its end, which
         // it does not take: EAGAIN if there are none and the call does not wait
         if bufs.iter().all(|buf| buf.is_empty()) {
-            return endpoint.peek(&mut [&mut [0]], &opts).map(|_| 0);
+            return endpoint
+                .peek(&mut [&mut [0]], &opts, &mut Received::default())
+                .map(|_| 0);
         }
         if flags.contains(RecvFlags::MSG_PEEK) {
-            endpoint.peek(bufs, &opts)
+            endpoint.peek(bufs, &opts, received)
         } else {
-            endpoint.read(bufs, &opts)
+            endpoint.read(bufs, &opts, received)
         }
     }
 
@@ -436,6 +397,16 @@ impl Stream {
     /// fits. If a signal or the timeout ends the wait, the call returns the number of the bytes
     /// that it has written, or fails with EINTR or EAGAIN if it has written none.
     pub(super) fn send(&self, bufs: &[&[u8]], flags: SendFlags) -> Result<usize> {
+        self.send_with(bufs, flags, None)
+    }
+
+    /// Sends like `send`, with control messages that belong to the bytes
+    pub(super) fn send_with(
+        &self,
+        bufs: &[&[u8]],
+        flags: SendFlags,
+        control: Option<Outgoing>,
+    ) -> Result<usize> {
         let endpoint = self.connected_endpoint()?;
         let opts = IoOpts {
             nonblocking: flags.contains(SendFlags::MSG_DONTWAIT),
@@ -446,7 +417,7 @@ impl Stream {
         // Like Linux, SIGPIPE is for the call that finds that the socket cannot send, not for the
         // call that has waited for room, and then has found it
         let sigpipe = !flags.contains(SendFlags::MSG_NOSIGNAL) && endpoint.is_write_shutdown();
-        let result = endpoint.write(bufs, &opts);
+        let result = endpoint.write(bufs, &opts, control);
         if sigpipe && result.has_errno(EPIPE) {
             crate::signal::raise_sigpipe();
         }
@@ -484,7 +455,7 @@ impl Stream {
 
     /// Returns the address that a receive tells: the name of the peer, if it has one. Like in
     /// Linux, there is no address for an unnamed peer, nor for a TCP socket.
-    fn recv_addr(&self) -> Option<UnixAddr> {
+    pub(super) fn recv_addr(&self) -> Option<UnixAddr> {
         self.peer_addr()
             .ok()
             .filter(|addr| *addr != UnixAddr::Unnamed && self.inet_view().is_none())
@@ -493,7 +464,7 @@ impl Stream {
     /// Fails if a send has an address, as the sockets of a stream have no address to send to,
     /// like in Linux: EISCONN if the socket is connected, else EOPNOTSUPP. A socket that replaces
     /// a TCP socket ignores the address, as TCP does.
-    fn check_no_addr(&self, has_addr: bool) -> Result<()> {
+    pub(super) fn check_no_addr(&self, has_addr: bool) -> Result<()> {
         if !has_addr || self.inet_view().is_some() {
             return Ok(());
         }
@@ -501,46 +472,6 @@ impl Stream {
             Status::Connected(_) => return_errno!(EISCONN, "the socket is connected"),
             _ => return_errno!(EOPNOTSUPP, "a stream socket has no address to send to"),
         }
-    }
-
-    /// Replaces the file descriptors in the control messages, which are those
-    /// of the sender, by descriptors of the current process for the same files.
-    /// Either all of them are replaced, or the current process has none of
-    /// the files.
-    fn reassign_fds(&self, msg_control: &mut [u8]) -> Result<()> {
-        let mut received_fds = Vec::new();
-        let result = (|| {
-            for cmsg in CMessages::from_bytes(msg_control) {
-                if let CmsgData::ScmRights(mut scm_rights) = cmsg {
-                    scm_rights.iter_and_reassign_fds(|send_fd| {
-                        let ipc_file = self.sender_file(send_fd)?;
-                        let fd = current!().add_file(ipc_file, false);
-                        received_fds.push(fd);
-                        Ok(fd)
-                    })?;
-                }
-                // Unix credentials need not to be handled here
-            }
-            Ok(())
-        })();
-        if result.is_err() {
-            for fd in received_fds {
-                let _ = current!().close_file(fd);
-            }
-        }
-        result
-    }
-
-    /// Returns the file of a file descriptor of the sender, which is the
-    /// thread that connected or accepted. As this is looked up when the
-    /// message is received, the thread may have exited, or closed the
-    /// descriptor, meanwhile. A socket pair does not know its sender.
-    fn sender_file(&self, fd: FileDesc) -> Result<FileRef> {
-        let send_tid = self
-            .peer_ancillary()
-            .ok_or_else(|| errno!(ESRCH, "the sender is unknown"))?
-            .tid();
-        process::table::get_thread(send_tid)?.file(fd)
     }
 
     /// perform shutdown on the socket.
