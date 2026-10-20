@@ -2221,6 +2221,114 @@ static int test_credentials_of_bytes_sent_before_accept(void) {
     return 0;
 }
 
+// The queue of control messages gives its slots back: far more messages with a descriptor than it
+// has slots go through a connection one after the other, each one received before the next is
+// sent, and again with other bytes in between. The queue is full only if the messages are queued.
+static int test_the_slots_of_the_queue_are_given_back(void) {
+    int a, b;
+    CHECK(create_pair(PAIR_SOCKETPAIR, &a, &b) == 0, "failed to create a pair");
+    set_nonblocking(a, 1);
+    set_nonblocking(b, 1);
+    pipe_t p;
+    CHECK(make_pipe(&p) == 0, "failed to create a pipe");
+    for (int i = 0; i < 12000; i++) {
+        CHECK(send_fd(a, "x", 1, p.rd) == 1, "send %d with a descriptor failed", i);
+        got_t got;
+        recv_now(b, 1, 128, 0, &got);
+        CHECK(got.ret == 1 && got.num_fds == 1, "receive %d: %ld bytes, %d descriptors", i,
+              got.ret, got.num_fds);
+        close(got.fds[0]);
+    }
+    for (int i = 0; i < 6000; i++) {
+        CHECK(send_fd(a, "ab", 2, p.rd) == 2 && write(a, "c", 1) == 1, "send %d failed", i);
+        got_t got;
+        recv_now(b, 8, 128, 0, &got);
+        CHECK(got.ret == 2 &&
+              got.num_fds == 1, "receive %d: %ld bytes, %d descriptors", i, got.ret,
+              got.num_fds);
+        close(got.fds[0]);
+        char c;
+        CHECK(read(b, &c, 1) == 1 && c == 'c', "the byte after message %d is wrong", i);
+    }
+    close_files(4, a, b, p.rd, p.wr);
+    return 0;
+}
+
+// A send takes 253 descriptors at the most in all its control messages, not in each one
+static int test_the_limit_of_descriptors_counts_all_messages_of_a_send(void) {
+    int a, b;
+    CHECK(create_pair(PAIR_SOCKETPAIR, &a, &b) == 0, "failed to create a pair");
+    pipe_t p;
+    CHECK(make_pipe(&p) == 0, "failed to create a pipe");
+    enum { NUM = 200 };
+    int fds[NUM];
+    for (int i = 0; i < NUM; i++) {
+        fds[i] = p.rd;
+    }
+    static char ctl[2 * CMSG_SPACE(sizeof(int) * NUM)];
+    memset(ctl, 0, sizeof(ctl));
+    struct cmsghdr *c = (struct cmsghdr *)ctl;
+    for (int i = 0; i < 2; i++) {
+        c->cmsg_level = SOL_SOCKET;
+        c->cmsg_type = SCM_RIGHTS;
+        c->cmsg_len = CMSG_LEN(sizeof(int) * NUM);
+        memcpy(CMSG_DATA(c), fds, sizeof(fds));
+        c = (struct cmsghdr *)((char *)c + CMSG_SPACE(sizeof(int) * NUM));
+    }
+    CHECK(send_ctl(a, "x", 1, ctl, sizeof(ctl), MSG_DONTWAIT) == -EINVAL,
+          "two messages of %d descriptors each were sent", NUM);
+    got_t got;
+    recv_now(b, 8, 128, 0, &got);
+    CHECK(got.ret == -EAGAIN, "a failed send has sent %ld bytes", got.ret);
+    // one message of that size is as many as fit, and is sent
+    CHECK(send_ctl(a, "y", 1, ctl, CMSG_SPACE(sizeof(int) * NUM), MSG_DONTWAIT) == 1,
+          "a message of %d descriptors failed", NUM);
+    recv_now(b, 8, 4096, 0, &got);
+    CHECK_GOT(&got, 1, "y");
+    CHECK(got.num_fds == NUM, "%d descriptors arrived", got.num_fds);
+    close_got_fds(&got);
+    close_files(4, a, b, p.rd, p.wr);
+    return 0;
+}
+
+static int cred_thread_sock;
+
+// Sends bytes, and bytes with SCM_CREDENTIALS that name the process, from a thread that is not
+// the first thread of the process
+static void *cred_thread_main(void *arg) {
+    long *result = arg;
+    long first = write(cred_thread_sock, "t", 1);
+    long second = send_own_cred(cred_thread_sock, "u", 1);
+    *result = first == 1 ? second : -1000;
+    return NULL;
+}
+
+// The credentials that a message carries are those of the process, whichever of its threads sends
+// it: the pid is that of getpid(), not the id of the thread, and a thread may name it
+static int test_credentials_of_a_thread_of_the_process(void) {
+    int a, b;
+    CHECK(create_pair(PAIR_SOCKETPAIR, &a, &b) == 0, "failed to create a pair");
+    CHECK(set_int_opt(b, SO_PASSCRED, 1) == 0, "failed to set SO_PASSCRED");
+    cred_thread_sock = a;
+    long result = -1;
+    pthread_t thread;
+    CHECK(pthread_create(&thread, NULL, cred_thread_main, &result) == 0,
+          "failed to start a thread");
+    pthread_join(thread, NULL);
+    CHECK(result == 1, "the thread could not name the credentials of its process: %ld",
+          result);
+    for (int i = 0; i < 2; i++) {
+        got_t got;
+        recv_now(b, 1, 128, 0, &got);
+        CHECK(got.ret == 1, "message %d: received %ld bytes", i, got.ret);
+        CHECK(check_own_cred(&got, i == 0 ? "bytes from a thread" : "credentials from a thread")
+              ==
+              0, "wrong credentials in message %d", i);
+    }
+    close_files(2, a, b);
+    return 0;
+}
+
 // A connection that is reset, whose reader has bytes and a message with a descriptor queued: a
 // receive that waits for all its bytes stops after the message with the descriptor, as always, and
 // does not look at the queue again, so it does not take the error of the connection with it. The
@@ -2299,6 +2407,9 @@ static test_case_t test_cases[] = {
     TEST_CASE(test_passcred_of_two_senders),
     TEST_CASE(test_passcred_peek_does_not_look_past_another_sender),
     TEST_CASE(test_credentials_of_bytes_sent_before_accept),
+    TEST_CASE(test_the_slots_of_the_queue_are_given_back),
+    TEST_CASE(test_the_limit_of_descriptors_counts_all_messages_of_a_send),
+    TEST_CASE(test_credentials_of_a_thread_of_the_process),
     TEST_CASE(test_waitall_that_stops_at_a_descriptor_does_not_take_the_reset),
     TEST_CASE(test_nothing_is_left_behind),
     TEST_CASE(test_a_chain_of_sockets_is_released),
