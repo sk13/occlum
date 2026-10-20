@@ -264,6 +264,7 @@ impl Stream {
                 // The socket may have set the size of its send buffer before it connects. It is
                 // read with the status locked, see `setsockopt`.
                 end_self.set_send_buf_size(self.send_buf_size());
+                end_self.set_passcred(self.passcred());
                 // A socket that was shut down stays so, like in Linux
                 if let Some(how) = info.shut_down_for() {
                     end_self.shutdown(how)?;
@@ -312,6 +313,7 @@ impl Stream {
                 let timeouts = AtomicTimeouts::of(&options);
                 // So has the size of the send buffer, which a TCP socket passes on, too
                 endpoint.set_send_buf_size(options.send_buf_size());
+                endpoint.set_passcred(self.inet_view().is_none() && options.passcred());
                 Ok((
                     Self {
                         ino: next_ino(),

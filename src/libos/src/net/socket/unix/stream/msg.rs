@@ -1,5 +1,6 @@
 //! The sending and receiving of messages with control data, `sendmsg` and `recvmsg`: the file
-//! descriptors that SCM_RIGHTS sends (see `control.rs`).
+//! descriptors that SCM_RIGHTS sends, and the credentials of SCM_CREDENTIALS and SO_PASSCRED (see
+//! `control.rs`).
 
 use super::control::{Outgoing, Received};
 use super::*;
@@ -26,8 +27,9 @@ impl Stream {
     }
 
     /// Receives bytes into the buffers, and the control messages that belong to them into the
-    /// buffer of the control messages: the files of SCM_RIGHTS get new file descriptors. A control
-    /// message that does not fit, or that has no buffer, is dropped, and MSG_CTRUNC tells so.
+    /// buffer of the control messages: the files of SCM_RIGHTS get new file descriptors, and the
+    /// credentials of the sender come if the socket has SO_PASSCRED. A control message that does
+    /// not fit, or that has no buffer, is dropped, and MSG_CTRUNC tells so.
     pub fn recvmsg(
         &self,
         bufs: &mut [&mut [u8]],
@@ -39,7 +41,7 @@ impl Stream {
 
         // The name of the peer is the only other field that is supported
         let cloexec = flags.contains(RecvFlags::MSG_CMSG_CLOEXEC);
-        let (control_len, truncated) = received.write_control(control, cloexec);
+        let (control_len, truncated) = received.write_control(control, self.passcred(), cloexec);
         let mut msg_flags = MsgFlags::empty();
         if truncated {
             msg_flags |= MsgFlags::MSG_CTRUNC;

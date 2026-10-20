@@ -238,6 +238,11 @@ impl SockOptions {
         self.sndbuf as usize
     }
 
+    /// Returns whether SO_PASSCRED is set
+    pub fn passcred(&self) -> bool {
+        self.flags.contains(Flags::PASSCRED)
+    }
+
     /// Sets an option. The errors are those of Linux. `tcp` is whether the
     /// socket shows to be a TCP socket, which may set SO_REUSEPORT.
     fn set(&mut self, optname: i32, optval: &[u8], tcp: bool) -> Result<()> {
@@ -666,6 +671,14 @@ impl Stream {
                 endpoint.notify_send_room();
             }
         }
+        // The same for SO_PASSCRED, which the connection needs to know to queue the credentials
+        // of the sender
+        if result.is_ok() && matches!(SockOptName::try_from(optname), Ok(SockOptName::SO_PASSCRED))
+        {
+            if let Status::Connected(endpoint) = &*self.inner() {
+                endpoint.set_passcred(self.passcred());
+            }
+        }
         if tcp {
             return Ok(());
         }
@@ -717,8 +730,9 @@ impl Stream {
     }
 
     /// Returns whether the socket receives the credentials of the sender
-    /// (SO_PASSCRED). The LibOS does not send them yet.
+    /// (SO_PASSCRED). A socket that replaces a TCP socket does not, as TCP has
+    /// no credentials to send.
     pub fn passcred(&self) -> bool {
-        self.options.lock().unwrap().flags.contains(Flags::PASSCRED)
+        self.inet_view().is_none() && self.options.lock().unwrap().passcred()
     }
 }

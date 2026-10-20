@@ -1,11 +1,13 @@
-//! The control messages of a unix stream socket: the file descriptors of SCM_RIGHTS.
+//! The control messages of a unix stream socket: the file descriptors of SCM_RIGHTS and the
+//! credentials of SCM_CREDENTIALS and SO_PASSCRED.
 //!
 //! They do not travel in the bytes of the stream, but next to them, in a queue per direction of
 //! the connection, and the offsets of the bytes tell which of them a message belongs to (see
-//! `entries.rs` for the rules, which are those of Linux). The sender puts the files into the
-//! queue when it sends, so the receiver does not depend on the descriptors or the thread of the
-//! sender any more: the files stay open as long as they are queued, also if the sender closes its
-//! descriptors or exits, and they are released when the receiver takes them or is closed.
+//! `entries.rs` for the rules, which are those of Linux). The sender puts the files and the
+//! credentials into the queue when it sends, so the receiver does not depend on the descriptors
+//! or the thread of the sender any more: the files stay open as long as they are queued, also if
+//! the sender closes its descriptors or exits, and they are released when the receiver takes them
+//! or is closed.
 //!
 //! A queue is shared by the sending end and the receiving end of one direction. The locks are
 //! taken in this order: that of the stream, which is the producer for a sender and the consumer
@@ -23,7 +25,7 @@ use entries::{Call, Entries, Message};
 use fs::channel::PushMark;
 use std::cell::RefCell;
 use std::mem::size_of;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 
 mod entries;
 
@@ -77,11 +79,60 @@ fn release(mut files: Vec<FileRef>) {
 /// The size of the header of a control message: struct cmsghdr
 const CMSG_HDR_LEN: usize = size_of::<libc::cmsghdr>();
 const SCM_RIGHTS: i32 = libc::SCM_RIGHTS;
+const SCM_CREDENTIALS: i32 = libc::SCM_CREDENTIALS;
 /// The most descriptors that a message holds, in all its control messages (SCM_MAX_FD)
 const MAX_FDS: usize = 253;
 
-/// The control data has no credentials yet
-type Queue = Entries<FileRef, ()>;
+/// The credentials of a process, which a message carries: struct ucred
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Ucred {
+    pid: u32,
+    uid: u32,
+    gid: u32,
+}
+
+impl Ucred {
+    /// What a receiver sees for bytes that were sent without credentials: nobody
+    const UNKNOWN: Ucred = Ucred {
+        pid: 0,
+        uid: 65534,
+        gid: 65534,
+    };
+    /// What it sees when the call received no bytes at all
+    const ZERO: Ucred = Ucred {
+        pid: 0,
+        uid: 0,
+        gid: 0,
+    };
+
+    /// The credentials of the current process
+    pub fn of_current() -> Self {
+        Self {
+            pid: current!().process().pid(),
+            uid: process::do_getuid().unwrap() as u32,
+            gid: process::do_getgid().unwrap() as u32,
+        }
+    }
+
+    fn to_bytes(&self) -> [u8; 12] {
+        let mut bytes = [0; 12];
+        bytes[0..4].copy_from_slice(&(self.pid as i32).to_ne_bytes());
+        bytes[4..8].copy_from_slice(&self.uid.to_ne_bytes());
+        bytes[8..12].copy_from_slice(&self.gid.to_ne_bytes());
+        bytes
+    }
+
+    fn from_bytes(bytes: &[u8]) -> Self {
+        let word = |i: usize| u32::from_ne_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap());
+        Self {
+            pid: word(0),
+            uid: word(1),
+            gid: word(2),
+        }
+    }
+}
+
+type Queue = Entries<FileRef, Ucred>;
 
 /// The control messages that travel in one direction of a connection
 pub struct ControlQueue {
@@ -89,18 +140,50 @@ pub struct ControlQueue {
     /// that it takes have no control data. A sender changes it before the bytes that its entry
     /// belongs to become visible, and the receiver reads it after it has seen the bytes.
     len: AtomicUsize,
+    /// Whether the receiver (`RECV`) or the sender (`SEND`) has SO_PASSCRED
+    passcred: AtomicU8,
     /// Whether the receiver is closed, so that nobody looks at the entries any more
     closed: AtomicBool,
     entries: SgxMutex<Queue>,
 }
 
+const RECV: u8 = 1;
+const SEND: u8 = 2;
+
 impl ControlQueue {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             len: AtomicUsize::new(0),
+            passcred: AtomicU8::new(0),
             closed: AtomicBool::new(false),
             entries: SgxMutex::new(Queue::default()),
         })
+    }
+
+    pub fn set_recv_passcred(&self, on: bool) {
+        self.set_passcred(RECV, on)
+    }
+
+    pub fn set_send_passcred(&self, on: bool) {
+        self.set_passcred(SEND, on)
+    }
+
+    fn set_passcred(&self, who: u8, on: bool) {
+        if on {
+            self.passcred.fetch_or(who, Ordering::Release);
+        } else {
+            self.passcred.fetch_and(!who, Ordering::Release);
+        }
+    }
+
+    /// Whether the receiver gets the credentials of the sender
+    fn recv_passcred(&self) -> bool {
+        self.passcred.load(Ordering::Acquire) & RECV != 0
+    }
+
+    /// Whether a send has to tell its credentials: the receiver or the sender has SO_PASSCRED
+    pub fn records_creds(&self) -> bool {
+        self.passcred.load(Ordering::Acquire) != 0
     }
 
     /// Drops the queued files, for the receiver is closed. A sender that is still there does not
@@ -124,13 +207,14 @@ impl ControlQueue {
         peek: bool,
     ) -> impl FnMut(usize, usize, usize) -> (usize, bool) + 'a {
         move |at, queued, want| {
+            let passcred = self.recv_passcred();
             // Nothing is queued after the bytes that the receive sees now, as an entry is queued
             // before its bytes
-            if received.call.is_new() && self.len.load(Ordering::Acquire) == 0 {
+            if received.call.is_new() && !passcred && self.len.load(Ordering::Acquire) == 0 {
                 return (queued.min(want), false);
             }
             let mut entries = self.entries.lock().unwrap();
-            let result = entries.take(at, queued, want, false, peek, &mut received.call);
+            let result = entries.take(at, queued, want, passcred, peek, &mut received.call);
             self.len.store(entries.len(), Ordering::Release);
             result
         }
@@ -140,25 +224,39 @@ impl ControlQueue {
 /// The control data that a receive has taken
 #[derive(Default)]
 pub struct Received {
-    call: Call<FileRef, ()>,
+    call: Call<FileRef, Ucred>,
 }
 
 impl Received {
-    /// Writes the control messages of a receive into the buffer of the program, as Linux does: the
-    /// files get new descriptors in the current process. What does not fit, or has no buffer, is
-    /// dropped. Returns the length of the control messages, and whether any were dropped
-    /// (MSG_CTRUNC).
-    pub fn write_control(self, control: Option<&mut [u8]>, cloexec: bool) -> (usize, bool) {
-        let fds = self.call.fds;
+    /// Writes the control messages of a receive into the buffer of the program, as Linux does:
+    /// the credentials if the socket has SO_PASSCRED, and the files, which get new descriptors in
+    /// the current process. What does not fit, or has no buffer, is dropped. Returns the length of
+    /// the control messages, and whether any were dropped (MSG_CTRUNC).
+    pub fn write_control(
+        self,
+        control: Option<&mut [u8]>,
+        passcred: bool,
+        cloexec: bool,
+    ) -> (usize, bool) {
+        let Received { call } = self;
+        let fds = call.fds;
         let control = match control {
             Some(control) => control,
-            None => return (0, !fds.is_empty()),
+            None => return (0, passcred || !fds.is_empty()),
         };
         let mut writer = CmsgWriter {
             buf: control,
             len: 0,
             truncated: false,
         };
+        if passcred {
+            let cred = match call.cred {
+                Some(Some(cred)) => cred,
+                Some(None) => Ucred::UNKNOWN,
+                None => Ucred::ZERO,
+            };
+            writer.put(libc::SOL_SOCKET, SCM_CREDENTIALS, &cred.to_bytes());
+        }
         if !fds.is_empty() {
             writer.put_files(fds, cloexec);
         }
@@ -222,24 +320,25 @@ fn cmsg_align(len: usize) -> usize {
     (len + size_of::<usize>() - 1) & !(size_of::<usize>() - 1)
 }
 
-/// The control data that a send attaches to its bytes: the files that its control messages name
+/// The control data that a send attaches to its bytes: the files and the credentials that its
+/// control messages name
 #[derive(Default)]
 pub struct Outgoing {
-    msg: Message<FileRef, ()>,
+    msg: Message<FileRef, Ucred>,
 }
 
 impl Outgoing {
     /// Whether the send has nothing to tell the receiver
     pub fn is_empty(&self) -> bool {
-        self.msg.fds.is_empty()
+        self.msg.fds.is_empty() && self.msg.cred.is_none()
     }
 
     /// Reads the control messages of a send, and takes the files of the descriptors, which must be
     /// open in the current process, as the sender may close them as soon as the call returns.
     /// Like Linux, it fails for a control message that has an invalid length (EINVAL), a
-    /// descriptor that is not open (EBADF), too many descriptors in all (EINVAL), and a control
-    /// message of SOL_SOCKET of another type (EINVAL). It ignores the control messages of other
-    /// levels.
+    /// descriptor that is not open (EBADF), too many descriptors in all (EINVAL), credentials of
+    /// another process (EPERM), and a control message of SOL_SOCKET that is neither of the two
+    /// (EINVAL). It ignores the control messages of other levels.
     pub fn parse(control: &[u8]) -> Result<Self> {
         let mut msg = Message::default();
         let mut offset = 0;
@@ -256,8 +355,7 @@ impl Outgoing {
             if level == libc::SOL_SOCKET {
                 match type_ {
                     SCM_RIGHTS => Self::parse_rights(data, &mut msg.fds)?,
-                    // The credentials are not delivered yet
-                    libc::SCM_CREDENTIALS => (),
+                    SCM_CREDENTIALS => msg.cred = Some(Self::parse_credentials(data)?),
                     _ => return_errno!(EINVAL, "the type of the control message is unknown"),
                 }
             }
@@ -280,13 +378,31 @@ impl Outgoing {
         }
         Ok(())
     }
+
+    /// A process may name its own credentials only: in this single-user LibOS, nobody may be
+    /// anybody else
+    fn parse_credentials(data: &[u8]) -> Result<Ucred> {
+        if data.len() != size_of::<libc::ucred>() {
+            return_errno!(EINVAL, "the credentials have a wrong length");
+        }
+        let cred = Ucred::from_bytes(data);
+        if cred.uid == u32::MAX || cred.gid == u32::MAX {
+            return_errno!(EINVAL, "the user or group is invalid");
+        }
+        if cred != Ucred::of_current() {
+            return_errno!(EPERM, "the credentials are those of another process");
+        }
+        Ok(cred)
+    }
 }
 
 /// Tells the queue of the connection about the bytes of a send, which `Producer` calls with the
 /// producer locked (see `PushMark`)
 pub struct Mark<'a> {
     queue: &'a ControlQueue,
-    msg: Message<FileRef, ()>,
+    msg: Message<FileRef, Ucred>,
+    /// The credentials of the current process, as soon as a send has to tell them
+    own: Option<Ucred>,
 }
 
 impl<'a> Mark<'a> {
@@ -294,6 +410,7 @@ impl<'a> Mark<'a> {
         Self {
             queue,
             msg: outgoing.msg,
+            own: None,
         }
     }
 }
@@ -305,10 +422,14 @@ impl PushMark for Mark<'_> {
         if self.queue.closed.load(Ordering::Acquire) {
             return true;
         }
+        // The credentials that the send names, or else its own, if a side wants them
         let mut msg = Message {
-            cred: None,
+            cred: self.msg.cred,
             fds: std::mem::take(&mut self.msg.fds),
         };
+        if msg.cred.is_none() && self.queue.records_creds() {
+            msg.cred = Some(*self.own.get_or_insert_with(Ucred::of_current));
+        }
         let registered = entries.register(at, room, &mut msg);
         // The files stay with the send if the entries are full, for the next attempt
         self.msg.fds = msg.fds;

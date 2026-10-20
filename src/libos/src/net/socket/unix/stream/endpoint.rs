@@ -166,12 +166,11 @@ impl Inner {
     /// Writes the bytes with the control messages
     pub fn write(&self, bufs: &[&[u8]], opts: &IoOpts, control: Option<Outgoing>) -> Result<usize> {
         let was_shutdown = self.is_write_shutdown();
-        let result = match control {
-            None => self.writer.push_slices_with(bufs, opts),
-            Some(control) => {
-                let mut mark = Mark::new(&self.control_out, control);
-                self.writer.push_slices_marked(bufs, opts, Some(&mut mark))
-            }
+        let result = if control.is_none() && !self.control_out.records_creds() {
+            self.writer.push_slices_with(bufs, opts)
+        } else {
+            let mut mark = Mark::new(&self.control_out, control.unwrap_or_default());
+            self.writer.push_slices_marked(bufs, opts, Some(&mut mark))
         };
         // A write that waited, and finds that the peer is closed, fails with the error of the
         // socket first, like in Linux. A write that finds it closed at once fails with EPIPE, and
@@ -194,6 +193,13 @@ impl Inner {
         let reset = self.own_flags(RESET);
         self.flags.load(Ordering::SeqCst) & reset != 0
             && self.flags.fetch_and(!reset, Ordering::SeqCst) & reset != 0
+    }
+
+    /// Tells whether the socket has SO_PASSCRED, which makes the receiver get the credentials of
+    /// the sender
+    pub fn set_passcred(&self, on: bool) {
+        self.control_in.set_recv_passcred(on);
+        self.control_out.set_send_passcred(on);
     }
 
     /// Changes the number of bytes that the endpoint may have in flight to its peer. If it can take
