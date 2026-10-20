@@ -146,9 +146,13 @@ impl Inner {
         received: &mut Received,
     ) -> Result<usize> {
         let eof = self.reads_eof();
-        let mut gate = self.control_in().gate(received, false);
-        let result = self.reader.pop_slices_gated(bufs, opts, Some(&mut gate));
-        self.fail_if_reset(Self::eof_for_eagain(result, eof), bufs)
+        let len = bufs.iter().map(|buf| buf.len()).sum();
+        let result = {
+            let mut gate = self.control_in().gate(received, false);
+            self.reader.pop_slices_gated(bufs, opts, Some(&mut gate))
+        };
+        let result = Self::eof_for_eagain(result, eof);
+        self.fail_if_reset(result, len, opts, !received.stopped_at_control())
     }
 
     /// Reads the bytes without taking them, and the files of their control messages as copies
@@ -159,9 +163,11 @@ impl Inner {
         received: &mut Received,
     ) -> Result<usize> {
         let eof = self.reads_eof();
+        let len = bufs.iter().map(|buf| buf.len()).sum();
         let mut gate = self.control_in().gate(received, true);
         let result = self.reader.peek_slices_gated(bufs, opts, Some(&mut gate));
-        self.fail_if_reset(Self::eof_for_eagain(result, eof), bufs)
+        let result = Self::eof_for_eagain(result, eof);
+        self.fail_if_reset(result, len, opts, false)
     }
 
     /// Whether the shared flags say that the end reads nothing more, which is what a poll tells
@@ -183,11 +189,29 @@ impl Inner {
     }
 
     /// The end of the file that a read finds is an error, once, if the connection was reset. The
-    /// bytes that were sent before come first.
-    fn fail_if_reset(&self, result: Result<usize>, bufs: &[&mut [u8]]) -> Result<usize> {
+    /// bytes that were sent before come first. `len` is the room for bytes that the call had.
+    ///
+    /// A call that waits for all its bytes (`MSG_WAITALL`) and finds the queue empty before it has
+    /// them takes the error with it, as in Linux: it returns the bytes that it has, and the next
+    /// call finds the end of the file. `empty_ends_it` tells whether the call may find the queue
+    /// empty: a peek does not take the error, and nor does a call that stopped at control data
+    /// before it looked at the queue again.
+    fn fail_if_reset(
+        &self,
+        result: Result<usize>,
+        len: usize,
+        opts: &IoOpts,
+        empty_ends_it: bool,
+    ) -> Result<usize> {
         match result {
-            Ok(0) if bufs.iter().any(|buf| !buf.is_empty()) && self.take_reset() => {
+            Ok(0) if len > 0 && self.take_reset() => {
                 return_errno!(ECONNRESET, "the connection was reset")
+            }
+            Ok(bytes) if opts.all && empty_ends_it && bytes > 0 && bytes < len => {
+                if self.bytes_to_read() == 0 {
+                    self.take_reset();
+                }
+                Ok(bytes)
             }
             result => result,
         }

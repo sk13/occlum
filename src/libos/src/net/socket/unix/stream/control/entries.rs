@@ -95,6 +95,12 @@ impl<F, C: Copy + PartialEq> Call<F, C> {
         self.cred.is_none() && !self.ended
     }
 
+    /// Whether the call is over because of the control data: it has taken descriptors, or the next
+    /// bytes are from another sender
+    pub fn is_over(&self) -> bool {
+        self.ended
+    }
+
     /// Returns whether the bytes of the sender `cred` are those that the call delivers credentials
     /// for, or the call delivers none
     fn is_sender(&self, cred: Option<C>) -> bool {

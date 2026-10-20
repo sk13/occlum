@@ -263,6 +263,12 @@ pub struct Received {
 }
 
 impl Received {
+    /// Whether the receive stopped at control data: it has taken descriptors, or it stopped before
+    /// the bytes of another sender
+    pub fn stopped_at_control(&self) -> bool {
+        self.call.is_over()
+    }
+
     /// Writes the control messages of a receive into the buffer of the program, as Linux does:
     /// the credentials if the socket has SO_PASSCRED, and the files, which get new descriptors in
     /// the current process. What does not fit, or has no buffer, is dropped. Returns the length of
