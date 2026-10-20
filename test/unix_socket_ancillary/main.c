@@ -1,6 +1,7 @@
-// The control messages of unix stream sockets: the file descriptors of SCM_RIGHTS. The
-// expectations are the behavior of Linux: the test passes there, too (gcc -pthread
-// -I../include main.c), and what differs for Occlum is marked in the code. What it checks:
+// The control messages of unix stream sockets: the file descriptors of SCM_RIGHTS, and the
+// credentials of SCM_CREDENTIALS and SO_PASSCRED. The expectations are the behavior of Linux: the
+// test passes there, too (gcc -pthread -I../include main.c), and what differs for Occlum is marked
+// in the code. What it checks:
 //
 //  - a descriptor arrives as a new descriptor of the receiver for the same file, over a socket
 //    pair and over a connection, also if the sender has closed its descriptor, or its thread has
@@ -11,6 +12,7 @@
 //  - a descriptor that is not delivered (no buffer, a buffer that is too small, a plain read) is
 //    closed, MSG_CTRUNC tells the program, and a peek delivers the descriptors again and again;
 //  - the control messages of a send are validated, before anything is sent;
+//  - SO_PASSCRED makes the receiver get the credentials of the sender, SCM_CREDENTIALS names them;
 //  - nothing is left behind: not a descriptor, not memory, also if the receiver is closed with
 //    control messages that nobody has received.
 //
@@ -25,6 +27,7 @@
 #include <poll.h>
 #include <pthread.h>
 #include <signal.h>
+#include <spawn.h>
 #include <stdatomic.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -40,6 +43,7 @@
 #include <sys/types.h>
 #include <sys/uio.h>
 #include <sys/un.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -63,6 +67,7 @@
 
 static atomic_long watchdog_deadline;
 static const char *current_case = "";
+static const char *self_path;
 
 static long now_ms(void) {
     struct timespec ts;
@@ -102,6 +107,19 @@ static void set_timeout(int fd, int ms) {
 static void set_nonblocking(int fd, int nonblocking) {
     int flags = fcntl(fd, F_GETFL);
     fcntl(fd, F_SETFL, nonblocking ? (flags | O_NONBLOCK) : (flags & ~O_NONBLOCK));
+}
+
+static int set_int_opt(int fd, int opt, int val) {
+    return setsockopt(fd, SOL_SOCKET, opt, &val, sizeof(val)) < 0 ? -errno : 0;
+}
+
+static int get_int_opt(int fd, int opt) {
+    int val = -1;
+    socklen_t len = sizeof(val);
+    if (getsockopt(fd, SOL_SOCKET, opt, &val, &len) < 0) {
+        return -errno;
+    }
+    return val;
 }
 
 // The number of the open descriptors
@@ -194,6 +212,24 @@ static long send_fds(int fd, const void *data, size_t len, const int *fds, int n
 
 static long send_fd(int fd, const void *data, size_t len, int send_fd) {
     return send_fds(fd, data, len, &send_fd, 1);
+}
+
+// Sends bytes with SCM_CREDENTIALS
+static long send_cred(int fd, const void *data, size_t len, pid_t pid, uid_t uid,
+                      gid_t gid) {
+    struct ucred cred = { pid, uid, gid };
+    char ctl[CMSG_SPACE(sizeof(cred))];
+    memset(ctl, 0, sizeof(ctl));
+    struct cmsghdr *c = (struct cmsghdr *)ctl;
+    c->cmsg_level = SOL_SOCKET;
+    c->cmsg_type = SCM_CREDENTIALS;
+    c->cmsg_len = CMSG_LEN(sizeof(cred));
+    memcpy(CMSG_DATA(c), &cred, sizeof(cred));
+    return send_ctl(fd, data, len, ctl, sizeof(ctl), 0);
+}
+
+static long send_own_cred(int fd, const void *data, size_t len) {
+    return send_cred(fd, data, len, getpid(), getuid(), getgid());
 }
 
 // What a receive got
@@ -1161,6 +1197,10 @@ static int test_invalid_control_messages(void) {
           "a length beyond the control messages");
     CHECK(SEND_RAW(SOL_SOCKET, SCM_RIGHTS, CMSG_LEN(4), CMSG_LEN(4) - 1) == -EINVAL,
           "a length beyond the buffer");
+    CHECK(SEND_RAW(SOL_SOCKET, SCM_CREDENTIALS, CMSG_LEN(8), CMSG_SPACE(8)) == -EINVAL,
+          "credentials that are short");
+    CHECK(SEND_RAW(SOL_SOCKET, SCM_CREDENTIALS, CMSG_LEN(20), CMSG_SPACE(20)) == -EINVAL,
+          "credentials that are long");
     recv_now(b, 8, 128, 0, &got);
     CHECK(got.ret == -EAGAIN, "a failed send has sent %ld bytes", got.ret);
 
@@ -1204,6 +1244,382 @@ static int test_invalid_control_messages(void) {
     recv_ctl(b, 8, 128, 0, &got);
     CHECK_GOT(&got, 4, "bbbb");
     CHECK(got.num_cmsgs == 0, "the bytes have control messages");
+    close_files(4, a, b, p.rd, p.wr);
+    return 0;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Credentials
+// ---------------------------------------------------------------------------------------------
+
+static int check_own_cred(const got_t *got, const char *what) {
+    CHECK(got->has_cred, "%s: no credentials", what);
+    CHECK(got->cred.pid == getpid() && got->cred.uid == getuid() && got->cred.gid == getgid(),
+          "%s: the credentials are pid %d, uid %u, gid %u", what, got->cred.pid, got->cred.uid,
+          got->cred.gid);
+    CHECK(got->cred_cmsg_len == CMSG_LEN(sizeof(struct ucred)),
+          "%s: the message is %zu bytes",
+          what, got->cred_cmsg_len);
+    return 0;
+}
+
+// The credentials of a sender that has not named them, which the receiver asks for
+static int test_passcred(void) {
+    for (int kind = 0; kind < NUM_PAIR_KINDS; kind++) {
+        int a, b;
+        CHECK(create_pair(kind, &a, &b) == 0, "failed to create a %s pair", pair_names[kind]);
+        CHECK(get_int_opt(b, SO_PASSCRED) == 0, "SO_PASSCRED is set by default");
+        CHECK(set_int_opt(b, SO_PASSCRED, 1) == 0, "failed to set SO_PASSCRED");
+        CHECK(get_int_opt(b, SO_PASSCRED) == 1, "SO_PASSCRED is not set");
+        got_t got;
+        // without credentials of the sender, in two sends that the receiver gets together
+        CHECK(write(a, "p", 1) == 1 && write(a, "q", 1) == 1, "failed to write");
+        recv_ctl(b, 8, 128, 0, &got);
+        CHECK_GOT(&got, 2, "pq");
+        CHECK(got.controllen == CMSG_SPACE(sizeof(struct ucred)) && got.num_cmsgs == 1 &&
+              got.flags == 0, "%s: controllen %zu, %d messages, flags %#x", pair_names[kind],
+              got.controllen, got.num_cmsgs, got.flags);
+        CHECK(check_own_cred(&got, pair_names[kind]) == 0, "wrong credentials");
+        // the other direction, which has not asked for them, gets none
+        CHECK(write(b, "r", 1) == 1, "failed to write");
+        recv_ctl(a, 8, 128, 0, &got);
+        CHECK_GOT(&got, 1, "r");
+        CHECK(got.num_cmsgs == 0 && got.controllen == 0, "%s: the peer got control messages",
+              pair_names[kind]);
+        // turned off again
+        CHECK(set_int_opt(b, SO_PASSCRED, 0) == 0, "failed to reset SO_PASSCRED");
+        CHECK(write(a, "s", 1) == 1, "failed to write");
+        recv_ctl(b, 8, 128, 0, &got);
+        CHECK_GOT(&got, 1, "s");
+        CHECK(got.num_cmsgs == 0, "%s: credentials without SO_PASSCRED", pair_names[kind]);
+        close_files(2, a, b);
+    }
+    return 0;
+}
+
+// The credentials come once for each receive, and with each peek
+static int test_passcred_with_peek_and_plain_reads(void) {
+    int a, b;
+    CHECK(create_pair(PAIR_SOCKETPAIR, &a, &b) == 0, "failed to create a pair");
+    CHECK(set_int_opt(b, SO_PASSCRED, 1) == 0, "failed to set SO_PASSCRED");
+    CHECK(write(a, "abc", 3) == 3, "failed to write");
+    got_t got;
+    for (int i = 0; i < 2; i++) {
+        recv_ctl(b, 8, 128, MSG_PEEK, &got);
+        CHECK_GOT(&got, 3, "abc");
+        CHECK(check_own_cred(&got, "peek") == 0, "wrong credentials");
+    }
+    recv_ctl(b, 1, 128, 0, &got);
+    CHECK_GOT(&got, 1, "a");
+    CHECK(check_own_cred(&got, "the first byte") == 0, "wrong credentials");
+    recv_ctl(b, 8, 128, 0, &got);
+    CHECK_GOT(&got, 2, "bc");
+    CHECK(check_own_cred(&got, "the rest") == 0, "wrong credentials");
+    // a plain read gets nothing but the bytes
+    CHECK(write(a, "d", 1) == 1, "failed to write");
+    char c;
+    CHECK(read(b, &c, 1) == 1 && c == 'd', "the read failed");
+    close_files(2, a, b);
+    return 0;
+}
+
+// The receiver that has not asked for the credentials when the bytes were sent gets the credentials
+// of nobody: pid 0, and the user and group that Linux uses for the unknown
+static int test_passcred_after_the_send_shows_nobody(void) {
+    int a, b;
+    CHECK(create_pair(PAIR_SOCKETPAIR, &a, &b) == 0, "failed to create a pair");
+    CHECK(write(a, "p", 1) == 1, "failed to write");
+    CHECK(set_int_opt(b, SO_PASSCRED, 1) == 0, "failed to set SO_PASSCRED");
+    got_t got;
+    recv_ctl(b, 8, 128, 0, &got);
+    CHECK_GOT(&got, 1, "p");
+    CHECK(got.has_cred, "no credentials");
+    CHECK(got.cred.pid == 0 && got.cred.uid == 65534 && got.cred.gid == 65534,
+          "the credentials are pid %d, uid %u, gid %u", got.cred.pid, got.cred.uid, got.cred.gid);
+    close_files(2, a, b);
+    return 0;
+}
+
+// The credentials that the sender asked to send, SO_PASSCRED of the sender, are queued with the
+// bytes, and the receiver gets them when it asks later
+static int test_passcred_of_the_sender(void) {
+    int a, b;
+    CHECK(create_pair(PAIR_SOCKETPAIR, &a, &b) == 0, "failed to create a pair");
+    CHECK(set_int_opt(a, SO_PASSCRED, 1) == 0, "failed to set SO_PASSCRED");
+    CHECK(write(a, "p", 1) == 1, "failed to write");
+    got_t got;
+    recv_ctl(b, 8, 128, MSG_PEEK, &got);
+    CHECK_GOT(&got, 1, "p");
+    CHECK(got.num_cmsgs == 0, "the receiver has not asked for credentials");
+    CHECK(set_int_opt(b, SO_PASSCRED, 1) == 0, "failed to set SO_PASSCRED");
+    recv_ctl(b, 8, 128, 0, &got);
+    CHECK_GOT(&got, 1, "p");
+    CHECK(check_own_cred(&got, "the credentials of the sender") == 0, "wrong credentials");
+    close_files(2, a, b);
+    return 0;
+}
+
+// Credentials that the sender names are those of the sender, and are queued, whatever the receiver
+// has asked for
+static int test_scm_credentials(void) {
+    for (int kind = 0; kind < NUM_PAIR_KINDS; kind++) {
+        int a, b;
+        CHECK(create_pair(kind, &a, &b) == 0, "failed to create a %s pair", pair_names[kind]);
+        got_t got;
+        CHECK(send_own_cred(a, "q", 1) == 1, "failed to send");
+        recv_ctl(b, 8, 128, 0, &got);
+        CHECK_GOT(&got, 1, "q");
+        CHECK(got.num_cmsgs == 0, "%s: credentials without SO_PASSCRED", pair_names[kind]);
+        CHECK(send_own_cred(a, "q", 1) == 1, "failed to send");
+        CHECK(set_int_opt(b, SO_PASSCRED, 1) == 0, "failed to set SO_PASSCRED");
+        recv_ctl(b, 8, 128, 0, &got);
+        CHECK_GOT(&got, 1, "q");
+        CHECK(check_own_cred(&got, pair_names[kind]) == 0, "wrong credentials");
+        close_files(2, a, b);
+    }
+    return 0;
+}
+
+// A process names its own credentials only. Linux lets a privileged process name other ones, and
+// Occlum does not: all its processes run as root, but none may be somebody else
+static int test_scm_credentials_of_others(void) {
+    int a, b;
+    CHECK(create_pair(PAIR_SOCKETPAIR, &a, &b) == 0, "failed to create a pair");
+    // the user and the group must be valid, also for a privileged process
+    CHECK(send_cred(a, "q", 1, getpid(), -1, getgid()) == -EINVAL, "an invalid user");
+    CHECK(send_cred(a, "q", 1, getpid(), getuid(), -1) == -EINVAL, "an invalid group");
+    if (in_occlum() || geteuid() != 0) {
+        CHECK(send_cred(a, "q", 1, getpid() + 1, getuid(), getgid()) == -EPERM, "another pid");
+        CHECK(send_cred(a, "q", 1, 0, getuid(), getgid()) == -EPERM, "pid 0");
+        CHECK(send_cred(a, "q", 1, getppid(), getuid(), getgid()) == -EPERM, "the parent");
+        CHECK(send_cred(a, "q", 1, getpid(), getuid() + 1, getgid()) == -EPERM, "another user");
+        CHECK(send_cred(a, "q", 1, getpid(), getuid(), getgid() + 1) == -EPERM, "another group");
+        got_t got;
+        recv_now(b, 8, 128, 0, &got);
+        CHECK(got.ret == -EAGAIN, "a failed send has sent %ld bytes", got.ret);
+    } else {
+        printf("\t\tnote: privileged, which may name other credentials: skipped\n");
+    }
+    close_files(2, a, b);
+    return 0;
+}
+
+// What a receive does if the buffer is too small for the credentials, like Linux
+static int test_passcred_with_a_small_buffer(void) {
+    int a, b;
+    CHECK(create_pair(PAIR_SOCKETPAIR, &a, &b) == 0, "failed to create a pair");
+    CHECK(set_int_opt(b, SO_PASSCRED, 1) == 0, "failed to set SO_PASSCRED");
+    got_t got;
+    struct {
+        size_t size;
+        size_t controllen;
+        int cmsgs;
+        int ctrunc;
+    } cases[] = {
+        { NO_BUFFER, 0, 0, 1 }, { 0, 0, 0, 1 }, { 12, 0, 0, 1 },
+        { 16, 16, 1, 1 }, { 20, 20, 1, 1 }, { 27, 27, 1, 1 },
+        { 28, 28, 1, 0 }, { 32, 32, 1, 0 }, { 100, 32, 1, 0 },
+    };
+    for (size_t i = 0; i < ARRAY_SIZE(cases); i++) {
+        CHECK(write(a, "x", 1) == 1, "failed to write");
+        recv_ctl(b, 8, cases[i].size, 0, &got);
+        CHECK_GOT(&got, 1, "x");
+        CHECK(got.controllen == cases[i].controllen && got.num_cmsgs == cases[i].cmsgs &&
+              ((got.flags & MSG_CTRUNC) != 0) == cases[i].ctrunc,
+              "a buffer of %zd bytes: controllen %zu, %d messages, flags %#x",
+              cases[i].size, got.controllen, got.num_cmsgs, got.flags);
+    }
+    close_files(2, a, b);
+    return 0;
+}
+
+// The credentials come before the descriptors, and what does not fit is dropped
+static int test_passcred_with_descriptors(void) {
+    int a, b;
+    CHECK(create_pair(PAIR_SOCKETPAIR, &a, &b) == 0, "failed to create a pair");
+    pipe_t p;
+    CHECK(make_pipe(&p) == 0, "failed to create a pipe");
+    CHECK(set_int_opt(b, SO_PASSCRED, 1) == 0, "failed to set SO_PASSCRED");
+    got_t got;
+    CHECK(send_fd(a, "x", 1, p.rd) == 1, "failed to send");
+    recv_ctl(b, 8, 128, 0, &got);
+    CHECK_GOT(&got, 1, "x");
+    CHECK(got.controllen == CMSG_SPACE(sizeof(struct ucred)) + CMSG_SPACE(sizeof(int)),
+          "controllen %zu", got.controllen);
+    CHECK(got.num_cmsgs == 2 && got.num_fds == 1 && got.cred_first, "wrong control messages");
+    CHECK(check_own_cred(&got, "with a descriptor") == 0, "wrong credentials");
+    CHECK(is_read_end_of(got.fds[0], &p), "the descriptor is wrong");
+    close(got.fds[0]);
+
+    // no room for the descriptor after the credentials
+    int base = count_fds();
+    CHECK(send_fd(a, "x", 1, p.rd) == 1, "failed to send");
+    recv_ctl(b, 8, CMSG_SPACE(sizeof(struct ucred)) + CMSG_LEN(0), 0, &got);
+    CHECK_GOT(&got, 1, "x");
+    CHECK(got.has_cred && got.num_fds == 0 &&
+          (got.flags & MSG_CTRUNC), "flags %#x", got.flags);
+    CHECK(count_fds() == base, "a descriptor is open");
+
+    // a sender that names its credentials and sends a descriptor in one message
+    char ctl[CMSG_SPACE(sizeof(struct ucred)) + CMSG_SPACE(sizeof(int))];
+    memset(ctl, 0, sizeof(ctl));
+    struct cmsghdr *c = (struct cmsghdr *)ctl;
+    c->cmsg_level = SOL_SOCKET;
+    c->cmsg_type = SCM_RIGHTS;
+    c->cmsg_len = CMSG_LEN(sizeof(int));
+    memcpy(CMSG_DATA(c), &p.rd, sizeof(int));
+    c = (struct cmsghdr *)(ctl + CMSG_SPACE(sizeof(int)));
+    struct ucred cred = { getpid(), getuid(), getgid() };
+    c->cmsg_level = SOL_SOCKET;
+    c->cmsg_type = SCM_CREDENTIALS;
+    c->cmsg_len = CMSG_LEN(sizeof(cred));
+    memcpy(CMSG_DATA(c), &cred, sizeof(cred));
+    CHECK(send_ctl(a, "y", 1, ctl, sizeof(ctl), 0) == 1, "failed to send");
+    recv_ctl(b, 8, 128, 0, &got);
+    CHECK_GOT(&got, 1, "y");
+    CHECK(got.num_fds == 1 && got.has_cred && got.cred_first, "wrong control messages");
+    close(got.fds[0]);
+    close_files(4, a, b, p.rd, p.wr);
+    return 0;
+}
+
+// At the end of the file, the credentials are zero
+static int test_passcred_at_the_end_of_the_file(void) {
+    int a, b;
+    CHECK(create_pair(PAIR_SOCKETPAIR, &a, &b) == 0, "failed to create a pair");
+    CHECK(set_int_opt(b, SO_PASSCRED, 1) == 0, "failed to set SO_PASSCRED");
+    close(a);
+    got_t got;
+    recv_ctl(b, 8, 128, 0, &got);
+    CHECK(got.ret == 0, "the receive returned %ld", got.ret);
+    CHECK(got.has_cred && got.cred.pid == 0 && got.cred.uid == 0 && got.cred.gid == 0,
+          "the credentials at the end of the file: %d, pid %d, uid %u, gid %u", got.has_cred,
+          got.cred.pid, got.cred.uid, got.cred.gid);
+    close(b);
+    return 0;
+}
+
+// The socket that accept() returns has SO_PASSCRED of the listening one, and no other option
+static int test_passcred_of_an_accepted_socket(void) {
+    struct sockaddr_un addr;
+    socklen_t addr_len;
+    int l = listener(&addr, &addr_len);
+    CHECK(l >= 0, "failed to listen");
+    CHECK(set_int_opt(l, SO_PASSCRED, 1) == 0, "failed to set SO_PASSCRED");
+    int a = socket(AF_UNIX, SOCK_STREAM, 0);
+    CHECK(connect(a, (struct sockaddr *)&addr, addr_len) == 0, "failed to connect");
+    int b = accept(l, NULL, NULL);
+    CHECK(b >= 0, "failed to accept");
+    set_timeout(b, RECV_TIMEOUT_MS);
+    CHECK(get_int_opt(b, SO_PASSCRED) == 1, "the accepted socket does not have SO_PASSCRED");
+    CHECK(get_int_opt(a, SO_PASSCRED) == 0, "the client has SO_PASSCRED");
+    CHECK(write(a, "x", 1) == 1, "failed to write");
+    got_t got;
+    recv_ctl(b, 8, 128, 0, &got);
+    CHECK_GOT(&got, 1, "x");
+    // Linux: the sender has no credentials to tell about the bytes that it sent before the
+    // connection was accepted: those of nobody
+    CHECK(got.has_cred, "no credentials");
+    CHECK(write(a, "y", 1) == 1, "failed to write");
+    recv_ctl(b, 8, 128, 0, &got);
+    CHECK_GOT(&got, 1, "y");
+    CHECK(check_own_cred(&got, "the accepted socket") == 0, "wrong credentials");
+    close_files(3, a, b, l);
+    return 0;
+}
+
+// SO_PASSCRED that is set before the socket connects holds for the connection
+static int test_passcred_before_connect(void) {
+    struct sockaddr_un addr;
+    socklen_t addr_len;
+    int l = listener(&addr, &addr_len);
+    CHECK(l >= 0, "failed to listen");
+    int a = socket(AF_UNIX, SOCK_STREAM, 0);
+    CHECK(set_int_opt(a, SO_PASSCRED, 1) == 0, "failed to set SO_PASSCRED");
+    CHECK(connect(a, (struct sockaddr *)&addr, addr_len) == 0, "failed to connect");
+    int b = accept(l, NULL, NULL);
+    CHECK(b >= 0, "failed to accept");
+    set_timeout(a, RECV_TIMEOUT_MS);
+    set_timeout(b, RECV_TIMEOUT_MS);
+    CHECK(get_int_opt(a, SO_PASSCRED) == 1, "SO_PASSCRED is gone");
+    CHECK(write(b, "x", 1) == 1, "failed to write");
+    got_t got;
+    recv_ctl(a, 8, 128, 0, &got);
+    CHECK_GOT(&got, 1, "x");
+    CHECK(check_own_cred(&got, "the connected socket") == 0, "wrong credentials");
+    // the socket that has been accepted did not ask for them
+    CHECK(write(a, "y", 1) == 1, "failed to write");
+    recv_ctl(b, 8, 128, 0, &got);
+    CHECK_GOT(&got, 1, "y");
+    CHECK(got.num_cmsgs == 0, "the accepted socket got control messages");
+    close_files(3, a, b, l);
+    return 0;
+}
+
+// The credentials of a process that is another one than the receiver: a child process writes to
+// an end of a socket pair that it has inherited, and so does the parent. The receiver does not
+// glue the bytes of the two together
+static int test_passcred_of_two_senders(void) {
+    int a, b;
+    CHECK(create_pair(PAIR_SOCKETPAIR, &a, &b) == 0, "failed to create a pair");
+    CHECK(set_int_opt(b, SO_PASSCRED, 1) == 0, "failed to set SO_PASSCRED");
+    char fd_arg[16];
+    snprintf(fd_arg, sizeof(fd_arg), "%d", a);
+    char *argv[] = { (char *)self_path, "--child-write", fd_arg, NULL };
+    pid_t child;
+    CHECK(posix_spawn(&child, self_path, NULL, NULL, argv, environ) == 0,
+          "failed to spawn the child process");
+    int status;
+    CHECK(waitpid(child, &status, 0) == child && WIFEXITED(status) &&
+          WEXITSTATUS(status) == 0,
+          "the child process failed");
+    CHECK(write(a, "PQ", 2) == 2, "failed to write");
+    got_t got;
+    recv_ctl(b, 8, 128, 0, &got);
+    CHECK_GOT(&got, 1, "C");
+    CHECK(got.has_cred && got.cred.pid == child && got.cred.uid == getuid(),
+          "the credentials are those of pid %d, not of the child %d", got.cred.pid, child);
+    recv_ctl(b, 8, 128, 0, &got);
+    CHECK_GOT(&got, 2, "PQ");
+    CHECK(check_own_cred(&got, "the parent") == 0, "wrong credentials");
+    close_files(2, a, b);
+    return 0;
+}
+
+// A peek that delivers credentials does not look ahead past the bytes of another sender: a child
+// process writes a byte, the parent sends a descriptor, and the peek of the byte shows the
+// credentials of the child, and no descriptor
+static int test_passcred_peek_does_not_look_past_another_sender(void) {
+    int a, b;
+    CHECK(create_pair(PAIR_SOCKETPAIR, &a, &b) == 0, "failed to create a pair");
+    pipe_t p;
+    CHECK(make_pipe(&p) == 0, "failed to create a pipe");
+    CHECK(set_int_opt(b, SO_PASSCRED, 1) == 0, "failed to set SO_PASSCRED");
+    char fd_arg[16];
+    snprintf(fd_arg, sizeof(fd_arg), "%d", a);
+    char *argv[] = { (char *)self_path, "--child-write", fd_arg, NULL };
+    pid_t child;
+    CHECK(posix_spawn(&child, self_path, NULL, NULL, argv, environ) == 0,
+          "failed to spawn the child process");
+    int status;
+    CHECK(waitpid(child, &status, 0) == child && WIFEXITED(status) &&
+          WEXITSTATUS(status) == 0,
+          "the child process failed");
+    CHECK(send_fd(a, "d", 1, p.rd) == 1, "failed to send");
+    got_t got;
+    recv_ctl(b, 1, 128, MSG_PEEK, &got);
+    CHECK_GOT(&got, 1, "C");
+    CHECK(got.has_cred &&
+          got.cred.pid == child, "the credentials are not those of the child");
+    CHECK(got.num_fds == 0 &&
+          !(got.flags & MSG_CTRUNC), "the peek shows %d descriptors, flags %#x",
+          got.num_fds, got.flags);
+    // without credentials, the same peek shows the descriptor of the parent
+    CHECK(set_int_opt(b, SO_PASSCRED, 0) == 0, "failed to reset SO_PASSCRED");
+    recv_ctl(b, 1, 128, MSG_PEEK, &got);
+    CHECK_GOT(&got, 1, "C");
+    CHECK(got.num_fds == 1 && is_read_end_of(got.fds[0], &p), "the peek has no descriptor");
+    close_got_fds(&got);
     close_files(4, a, b, p.rd, p.wr);
     return 0;
 }
@@ -1751,6 +2167,11 @@ static int test_sendmmsg_and_recvmmsg_with_descriptors(void) {
 // A child process that writes to the end of a socket pair that it has inherited
 // ---------------------------------------------------------------------------------------------
 
+static int child_write(const char *fd_arg) {
+    int fd = atoi(fd_arg);
+    return write(fd, "C", 1) == 1 ? 0 : 1;
+}
+
 static test_case_t test_cases[] = {
     TEST_CASE(test_rights_arrive),
     TEST_CASE(test_rights_after_the_sender_closed_the_descriptor),
@@ -1775,6 +2196,19 @@ static test_case_t test_cases[] = {
     TEST_CASE(test_receive_again_with_the_same_message),
     TEST_CASE(test_cloexec_of_received_descriptors),
     TEST_CASE(test_invalid_control_messages),
+    TEST_CASE(test_passcred),
+    TEST_CASE(test_passcred_with_peek_and_plain_reads),
+    TEST_CASE(test_passcred_after_the_send_shows_nobody),
+    TEST_CASE(test_passcred_of_the_sender),
+    TEST_CASE(test_scm_credentials),
+    TEST_CASE(test_scm_credentials_of_others),
+    TEST_CASE(test_passcred_with_a_small_buffer),
+    TEST_CASE(test_passcred_with_descriptors),
+    TEST_CASE(test_passcred_at_the_end_of_the_file),
+    TEST_CASE(test_passcred_of_an_accepted_socket),
+    TEST_CASE(test_passcred_before_connect),
+    TEST_CASE(test_passcred_of_two_senders),
+    TEST_CASE(test_passcred_peek_does_not_look_past_another_sender),
     TEST_CASE(test_nothing_is_left_behind),
     TEST_CASE(test_a_chain_of_sockets_is_released),
     TEST_CASE(test_queued_messages_are_not_bound_to_the_sender),
@@ -1788,6 +2222,13 @@ static test_case_t test_cases[] = {
 };
 
 int main(int argc, const char *argv[]) {
+    if (argc > 2 && strcmp(argv[1], "--child-write") == 0) {
+        return child_write(argv[2]);
+    }
+    // the program that the test spawns: itself
+    static char path[PATH_MAX];
+    ssize_t path_len = readlink("/proc/self/exe", path, sizeof(path) - 1);
+    self_path = path_len > 0 ? path : argv[0];
     // a write to a pipe that has no reader fails with EPIPE
     signal(SIGPIPE, SIG_IGN);
 
