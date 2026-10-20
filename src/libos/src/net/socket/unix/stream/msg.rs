@@ -41,7 +41,7 @@ impl Stream {
 
         // The name of the peer is the only other field that is supported
         let cloexec = flags.contains(RecvFlags::MSG_CMSG_CLOEXEC);
-        let (control_len, truncated) = received.write_control(control, self.passcred(), cloexec);
+        let (control_len, truncated) = received.write_control(control, cloexec);
         let mut msg_flags = MsgFlags::empty();
         if truncated {
             msg_flags |= MsgFlags::MSG_CTRUNC;

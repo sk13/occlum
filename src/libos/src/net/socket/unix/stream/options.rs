@@ -733,6 +733,6 @@ impl Stream {
     /// (SO_PASSCRED). A socket that replaces a TCP socket does not, as TCP has
     /// no credentials to send.
     pub fn passcred(&self) -> bool {
-        self.inet_view().is_none() && self.options.lock().unwrap().passcred()
+        self.options.lock().unwrap().passcred() && self.inet_view().is_none()
     }
 }

@@ -23,6 +23,7 @@
 use super::*;
 use entries::{Call, Entries, Message};
 use fs::channel::PushMark;
+use spin::Once;
 use std::cell::RefCell;
 use std::mem::size_of;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
@@ -134,7 +135,27 @@ impl Ucred {
 
 type Queue = Entries<FileRef, Ucred>;
 
-/// The control messages that travel in one direction of a connection
+/// The queues of the control messages of a connection, one for each end: that of the bytes that
+/// the end receives. The two ends share them in one allocation.
+pub struct ControlPair {
+    queues: [ControlQueue; 2],
+}
+
+impl ControlPair {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            queues: [ControlQueue::new(), ControlQueue::new()],
+        })
+    }
+
+    /// Returns the queue of the bytes that the end `side` (0 or 1) receives
+    pub fn queue(&self, side: usize) -> &ControlQueue {
+        &self.queues[side]
+    }
+}
+
+/// The control messages that travel in one direction of a connection. Most connections never carry
+/// one, so the entries are allocated when the first message or credentials are queued.
 pub struct ControlQueue {
     /// The number of entries, which a receive reads without the lock: if it is zero, the bytes
     /// that it takes have no control data. A sender changes it before the bytes that its entry
@@ -144,20 +165,25 @@ pub struct ControlQueue {
     passcred: AtomicU8,
     /// Whether the receiver is closed, so that nobody looks at the entries any more
     closed: AtomicBool,
-    entries: SgxMutex<Queue>,
+    entries: Once<Box<SgxMutex<Queue>>>,
 }
 
 const RECV: u8 = 1;
 const SEND: u8 = 2;
 
 impl ControlQueue {
-    pub fn new() -> Arc<Self> {
-        Arc::new(Self {
+    fn new() -> Self {
+        Self {
             len: AtomicUsize::new(0),
             passcred: AtomicU8::new(0),
             closed: AtomicBool::new(false),
-            entries: SgxMutex::new(Queue::default()),
-        })
+            entries: Once::new(),
+        }
+    }
+
+    fn entries(&self) -> &SgxMutex<Queue> {
+        self.entries
+            .call_once(|| Box::new(SgxMutex::new(Queue::default())))
     }
 
     pub fn set_recv_passcred(&self, on: bool) {
@@ -189,11 +215,17 @@ impl ControlQueue {
     /// Drops the queued files, for the receiver is closed. A sender that is still there does not
     /// queue any more.
     pub fn close(&self) {
-        let fds = {
-            let mut entries = self.entries.lock().unwrap();
-            self.closed.store(true, Ordering::Release);
-            self.len.store(0, Ordering::Release);
-            entries.drain_fds()
+        self.closed.store(true, Ordering::Release);
+        // The entries are there if a message was queued, or a receive asked for credentials. A
+        // send that creates them just now may still queue a message, which goes when its sender is
+        // closed, too.
+        let fds = match self.entries.get() {
+            Some(entries) => {
+                let mut entries = entries.lock().unwrap();
+                self.len.store(0, Ordering::Release);
+                entries.drain_fds()
+            }
+            None => Vec::new(),
         };
         release(fds);
     }
@@ -208,12 +240,13 @@ impl ControlQueue {
     ) -> impl FnMut(usize, usize, usize) -> (usize, bool) + 'a {
         move |at, queued, want| {
             let passcred = self.recv_passcred();
+            received.passcred = passcred;
             // Nothing is queued after the bytes that the receive sees now, as an entry is queued
             // before its bytes
             if received.call.is_new() && !passcred && self.len.load(Ordering::Acquire) == 0 {
                 return (queued.min(want), false);
             }
-            let mut entries = self.entries.lock().unwrap();
+            let mut entries = self.entries().lock().unwrap();
             let result = entries.take(at, queued, want, passcred, peek, &mut received.call);
             self.len.store(entries.len(), Ordering::Release);
             result
@@ -225,6 +258,8 @@ impl ControlQueue {
 #[derive(Default)]
 pub struct Received {
     call: Call<FileRef, Ucred>,
+    /// Whether the socket had SO_PASSCRED when the receive last asked for bytes
+    passcred: bool,
 }
 
 impl Received {
@@ -232,13 +267,8 @@ impl Received {
     /// the credentials if the socket has SO_PASSCRED, and the files, which get new descriptors in
     /// the current process. What does not fit, or has no buffer, is dropped. Returns the length of
     /// the control messages, and whether any were dropped (MSG_CTRUNC).
-    pub fn write_control(
-        self,
-        control: Option<&mut [u8]>,
-        passcred: bool,
-        cloexec: bool,
-    ) -> (usize, bool) {
-        let Received { call } = self;
+    pub fn write_control(self, control: Option<&mut [u8]>, cloexec: bool) -> (usize, bool) {
+        let Received { call, passcred } = self;
         let fds = call.fds;
         let control = match control {
             Some(control) => control,
@@ -417,7 +447,7 @@ impl<'a> Mark<'a> {
 
 impl PushMark for Mark<'_> {
     fn before(&mut self, at: usize, room: usize) -> bool {
-        let mut entries = self.queue.entries.lock().unwrap();
+        let mut entries = self.queue.entries().lock().unwrap();
         // The receiver is closed: the bytes go nowhere, nor do the files
         if self.queue.closed.load(Ordering::Acquire) {
             return true;
@@ -438,7 +468,7 @@ impl PushMark for Mark<'_> {
     }
 
     fn after(&mut self, pushed: usize) {
-        let mut entries = self.queue.entries.lock().unwrap();
+        let mut entries = self.queue.entries().lock().unwrap();
         // The descriptors of a send that pushed no bytes are dropped with the send, not here
         self.msg.fds = entries.pushed(pushed);
         self.queue.len.store(entries.len(), Ordering::Release);

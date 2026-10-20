@@ -1,4 +1,4 @@
-use super::control::{ControlQueue, Mark, Outgoing, Received};
+use super::control::{ControlPair, ControlQueue, Mark, Outgoing, Received};
 use super::*;
 use events::{Event, EventFilter, Notifier, Observer};
 use fs::channel::{Channel, Consumer, IoOpts, Producer};
@@ -20,18 +20,17 @@ pub fn end_pair(nonblocking: bool) -> Result<(Endpoint, Endpoint)> {
     let name_b = Arc::new(RwLock::new(None));
     let flags = Arc::new(AtomicU16::new(0));
 
-    // The control messages of each channel, which the end that writes into it and the end that
-    // reads from it share
-    let ctl_a = ControlQueue::new();
-    let ctl_b = ControlQueue::new();
+    // The control messages of the two channels, which the end that writes into a channel and the
+    // end that reads from it share
+    let control = ControlPair::new();
 
     let mut end_a = Arc::new(Inner {
         addr: name_a.clone(),
         peer_addr: name_b.clone(),
         reader: con_a,
         writer: pro_b,
-        control_in: ctl_a.clone(),
-        control_out: ctl_b.clone(),
+        control: control.clone(),
+        side: 0,
         peer: Weak::default(),
         flags: flags.clone(),
         flags_shift: 0,
@@ -44,8 +43,8 @@ pub fn end_pair(nonblocking: bool) -> Result<(Endpoint, Endpoint)> {
         peer_addr: name_a,
         reader: con_b,
         writer: pro_a,
-        control_in: ctl_b,
-        control_out: ctl_a,
+        control,
+        side: 1,
         peer: Arc::downgrade(&end_a),
         flags,
         flags_shift: 8,
@@ -83,9 +82,10 @@ pub struct Inner {
     peer_addr: Arc<RwLock<Option<UnixAddr>>>,
     reader: Consumer<u8>,
     writer: Producer<u8>,
-    // The control messages that the peer sends to this end, and those that this end sends
-    control_in: Arc<ControlQueue>,
-    control_out: Arc<ControlQueue>,
+    // The control messages of the connection: the queue of the end `side` (0 or 1) holds those that
+    // the peer sends to this end, and that of the other end those that this end sends
+    control: Arc<ControlPair>,
+    side: usize,
     peer: Weak<Self>,
     // The flags of the shutdown of both ends, which a poll tells (see `RCV_SHUTDOWN`): each end
     // has a byte of the word, at `flags_shift`. A shutdown changes the flags of both ends in one
@@ -128,6 +128,16 @@ impl Inner {
         cons_nonblocking
     }
 
+    /// The control messages that the peer sends to this end
+    fn control_in(&self) -> &ControlQueue {
+        self.control.queue(self.side)
+    }
+
+    /// The control messages that this end sends to its peer
+    fn control_out(&self) -> &ControlQueue {
+        self.control.queue(1 - self.side)
+    }
+
     /// Reads the bytes, and the control messages that belong to them
     pub fn read(
         &self,
@@ -135,7 +145,7 @@ impl Inner {
         opts: &IoOpts,
         received: &mut Received,
     ) -> Result<usize> {
-        let mut gate = self.control_in.gate(received, false);
+        let mut gate = self.control_in().gate(received, false);
         let result = self.reader.pop_slices_gated(bufs, opts, Some(&mut gate));
         self.fail_if_reset(result, bufs)
     }
@@ -147,7 +157,7 @@ impl Inner {
         opts: &IoOpts,
         received: &mut Received,
     ) -> Result<usize> {
-        let mut gate = self.control_in.gate(received, true);
+        let mut gate = self.control_in().gate(received, true);
         let result = self.reader.peek_slices_gated(bufs, opts, Some(&mut gate));
         self.fail_if_reset(result, bufs)
     }
@@ -166,10 +176,10 @@ impl Inner {
     /// Writes the bytes with the control messages
     pub fn write(&self, bufs: &[&[u8]], opts: &IoOpts, control: Option<Outgoing>) -> Result<usize> {
         let was_shutdown = self.is_write_shutdown();
-        let result = if control.is_none() && !self.control_out.records_creds() {
+        let result = if control.is_none() && !self.control_out().records_creds() {
             self.writer.push_slices_with(bufs, opts)
         } else {
-            let mut mark = Mark::new(&self.control_out, control.unwrap_or_default());
+            let mut mark = Mark::new(self.control_out(), control.unwrap_or_default());
             self.writer.push_slices_marked(bufs, opts, Some(&mut mark))
         };
         // A write that waited, and finds that the peer is closed, fails with the error of the
@@ -198,8 +208,8 @@ impl Inner {
     /// Tells whether the socket has SO_PASSCRED, which makes the receiver get the credentials of
     /// the sender
     pub fn set_passcred(&self, on: bool) {
-        self.control_in.set_recv_passcred(on);
-        self.control_out.set_send_passcred(on);
+        self.control_in().set_recv_passcred(on);
+        self.control_out().set_send_passcred(on);
     }
 
     /// Changes the number of bytes that the endpoint may have in flight to its peer. If it can take
@@ -338,7 +348,7 @@ impl Drop for Inner {
         self.flags
             .fetch_or(self.peer_flags(flags), Ordering::SeqCst);
         // The control messages that nobody reads any more: their files are released
-        self.control_in.close();
+        self.control_in().close();
     }
 }
 
