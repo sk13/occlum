@@ -10,10 +10,12 @@
 // The sockets are given a buffer of megabytes, so that one call copies for milliseconds, with
 // SO_SNDBUFFORCE, which Linux allows root only. Without the privilege the test takes the greatest
 // buffer that SO_SNDBUF sets, which does not copy long on Linux, and the test has little to
-// measure there. A thread asks the socket again and again meanwhile, and the test counts the
-// answers that come while the call copies: there are hundreds if the call does not wait, and one or
-// none if it does. The test does not look at the time that a call takes, which varies with the load
-// of the machine.
+// measure there. A thread asks the socket again and again meanwhile (poll(), ioctl(FIONREAD), or
+// setsockopt() of the size of the send buffer, which changes a limit of the queue that the LibOS
+// used to change with the lock of the end that the call has), and the test counts the answers
+// that come while the call copies: there are hundreds if the call does not wait, and one or none
+// if it does. The test does not look at the time that a call takes, which varies with the load of
+// the machine.
 //
 // Usage: unix_socket_speed [test case name | --list] [-v]
 #define _GNU_SOURCE
@@ -40,6 +42,9 @@
 #define MAX_STAMPS      (1L << 20)
 #define TRIES           3
 
+// What the thread that asks does
+enum { ASK_POLL, ASK_FIONREAD, ASK_SNDBUF };
+
 #define CHECK(cond, fmt, ...) do { \
         if (!(cond)) { \
             THROW_ERROR(fmt, ##__VA_ARGS__); \
@@ -54,12 +59,13 @@ static long now_ns(void) {
     return ts.tv_sec * 1000000000L + ts.tv_nsec;
 }
 
-// A thread that asks a file descriptor about its state until it is told to stop, with poll(), or
-// with ioctl(FIONREAD), and notes the times at which the answers come
+// A thread that asks a file descriptor about its state until it is told to stop, with poll(), with
+// ioctl(FIONREAD), or by setting the size of the send buffer again, and notes the times at which
+// the answers come
 typedef struct {
     int fd;
     short events;
-    int use_ioctl;
+    int ask;
     atomic_int stop;
     atomic_long answers;
     long *stamps;
@@ -69,10 +75,13 @@ typedef struct {
 static void *observer_main(void *arg) {
     observer_t *o = arg;
     struct pollfd pfd = { o->fd, o->events, 0 };
-    while (!atomic_load(&o->stop)) {
-        int bytes;
-        if (o->use_ioctl) {
+    for (int i = 0; !atomic_load(&o->stop); i++) {
+        int bytes = 2 * BYTES + (i & 1) * 4096;
+        if (o->ask == ASK_FIONREAD) {
             ioctl(o->fd, FIONREAD, &bytes);
+        } else if (o->ask == ASK_SNDBUF) {
+            // The size that the socket has already, or a little more
+            setsockopt(o->fd, SOL_SOCKET, SO_SNDBUFFORCE, &bytes, sizeof(bytes));
         } else {
             poll(&pfd, 1, 0);
         }
@@ -85,11 +94,11 @@ static void *observer_main(void *arg) {
     return NULL;
 }
 
-static int observer_start(observer_t *o, int fd, short events, int use_ioctl) {
+static int observer_start(observer_t *o, int fd, short events, int ask) {
     memset(o, 0, sizeof(*o));
     o->fd = fd;
     o->events = events;
-    o->use_ioctl = use_ioctl;
+    o->ask = ask;
     o->stamps = malloc(MAX_STAMPS * sizeof(long));
     if (o->stamps == NULL || pthread_create(&o->thread, NULL, observer_main, o) != 0) {
         return -1;
@@ -157,7 +166,7 @@ static int check_answers(const char *what, long answers, long call_ns, long move
 }
 
 // The call asks the end of the socket that a thread reads from, or the one that it writes to
-static int ask_while_a_call_copies(int use_ioctl, int reads) {
+static int ask_while_a_call_copies(int ask, int reads) {
     int sv[2];
     long bytes = make_pair_with_big_buffer(sv);
     CHECK(bytes >= 0, "failed to create a socket pair");
@@ -178,15 +187,16 @@ static int ask_while_a_call_copies(int use_ioctl, int reads) {
 
     observer_t observer;
     CHECK(observer_start(&observer, reads ? sv[1] : sv[0], reads ? POLLIN : POLLOUT,
-                         use_ioctl) == 0, "failed to start the observer");
+                         ask) == 0, "failed to start the observer");
     usleep(10000);
     long start = now_ns();
     ssize_t n = reads ? read(sv[1], buf, bytes) : write(sv[0], buf, bytes);
     long end = now_ns();
     long answers = observer_stop(&observer, start, end);
     CHECK(n > 0, "failed to %s", reads ? "read" : "write");
-    int ret = check_answers(use_ioctl ? "FIONREAD" : (reads ? "poll of the reader" :
-                            "poll of the writer"), answers, end - start, n, bytes);
+    const char *what = ask == ASK_FIONREAD ? "FIONREAD" : ask == ASK_SNDBUF ? "SO_SNDBUF" :
+                       (reads ? "poll of the reader" : "poll of the writer");
+    int ret = check_answers(what, answers, end - start, n, bytes);
     close(sv[0]);
     close(sv[1]);
     free(buf);
@@ -212,7 +222,8 @@ static int ask_a_pipe_while_a_call_reads(void) {
     }
     fcntl(fds[0], F_SETFL, fcntl(fds[0], F_GETFL) & ~O_NONBLOCK);
     observer_t observer;
-    CHECK(observer_start(&observer, fds[0], POLLIN, 1) == 0, "failed to start the observer");
+    CHECK(observer_start(&observer, fds[0], POLLIN, ASK_FIONREAD) == 0,
+          "failed to start the observer");
     usleep(10000);
     long start = now_ns();
     ssize_t n = read(fds[0], buf, size);
@@ -237,42 +248,47 @@ static int ask_a_pipe_while_a_call_reads(void) {
 
 // A moment of the machine that is slow for the test, not for the LibOS, is not a failure: it has
 // to happen in all the tries
-static int try_again(int (*test)(int, int), int use_ioctl, int reads) {
+static int try_again(int (*test)(int, int), int ask, int reads) {
     // The observer has to run while the call copies
     if (sysconf(_SC_NPROCESSORS_ONLN) < 2) {
         return 0;
     }
     int ret = -1;
     for (int i = 0; i < TRIES && ret != 0; i++) {
-        ret = test(use_ioctl, reads);
+        ret = test(ask, reads);
     }
     return ret;
 }
 
 static int test_poll_does_not_wait_for_a_read(void) {
-    return try_again(ask_while_a_call_copies, 0, 1);
+    return try_again(ask_while_a_call_copies, ASK_POLL, 1);
 }
 
 static int test_poll_does_not_wait_for_a_write(void) {
-    return try_again(ask_while_a_call_copies, 0, 0);
+    return try_again(ask_while_a_call_copies, ASK_POLL, 0);
 }
 
 static int test_fionread_does_not_wait_for_a_read(void) {
-    return try_again(ask_while_a_call_copies, 1, 1);
+    return try_again(ask_while_a_call_copies, ASK_FIONREAD, 1);
 }
 
-static int pipe_wrapper(int use_ioctl, int reads) {
+static int test_sndbuf_does_not_wait_for_a_write(void) {
+    return try_again(ask_while_a_call_copies, ASK_SNDBUF, 0);
+}
+
+static int pipe_wrapper(int ask, int reads) {
     return ask_a_pipe_while_a_call_reads();
 }
 
 static int test_fionread_of_a_pipe_does_not_wait_for_a_read(void) {
-    return try_again(pipe_wrapper, 1, 1);
+    return try_again(pipe_wrapper, ASK_FIONREAD, 1);
 }
 
 static test_case_t test_cases[] = {
     TEST_CASE(test_poll_does_not_wait_for_a_read),
     TEST_CASE(test_poll_does_not_wait_for_a_write),
     TEST_CASE(test_fionread_does_not_wait_for_a_read),
+    TEST_CASE(test_sndbuf_does_not_wait_for_a_write),
     TEST_CASE(test_fionread_of_a_pipe_does_not_wait_for_a_read),
 };
 

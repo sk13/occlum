@@ -188,7 +188,8 @@ impl<T> Ring<T> {
 }
 
 /// A view of how many items a queue holds, for the threads that only want to know that, e.g., to
-/// poll a channel. It takes no lock of the ends, which are held while the items are copied.
+/// poll a channel, and that change how many it holds at most. It takes no lock of the ends, which
+/// are held while the items are copied.
 pub struct RingStatus<T> {
     shared: Arc<Shared<T>>,
 }
@@ -225,6 +226,12 @@ impl<T> RingStatus<T> {
     /// Returns the number of items that the queue has room for.
     pub fn remaining(&self) -> usize {
         self.capacity().saturating_sub(self.len())
+    }
+
+    /// Changes the capacity, and returns the one that the queue had. A queue that holds more items
+    /// than the new capacity keeps them, but it takes no more until it holds fewer.
+    pub fn set_capacity(&self, capacity: usize) -> usize {
+        self.shared.capacity.swap(capacity, Ordering::AcqRel)
     }
 }
 
@@ -440,12 +447,6 @@ impl<T> RingProducer<T> {
     /// Returns the largest number of items that the queue holds.
     pub fn capacity(&self) -> usize {
         self.shared.capacity.load(Ordering::Acquire)
-    }
-
-    /// Changes the capacity. A queue that holds more items than the new capacity keeps them, but
-    /// it takes no more until it holds fewer.
-    pub fn set_capacity(&self, capacity: usize) {
-        self.shared.capacity.store(capacity, Ordering::Release);
     }
 
     /// Returns the number of items in the queue.

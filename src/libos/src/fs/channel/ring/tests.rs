@@ -169,8 +169,10 @@ fn the_chunks_and_the_spares_follow_the_capacity() {
     let ring = Ring::<u64>::new(208 * 1024);
     assert_eq!(ring.shared.largest_chunk_bytes(), 64 * 1024);
     // And it can change
-    let (p, c) = Ring::<u8>::new(1 << 20).split();
-    p.set_capacity(100_000);
+    let ring = Ring::<u8>::new(1 << 20);
+    let status = ring.status();
+    let (p, c) = ring.split();
+    status.set_capacity(100_000);
     assert_eq!(p.shared.largest_chunk_bytes(), 16 * 1024);
     assert_eq!(p.shared.spare_budget(), 75_000);
     drop(c);
@@ -624,12 +626,12 @@ fn status_follows_the_queue() {
     assert_eq!(c.pop_slice(&mut buf), 300);
     assert_eq!((status.len(), status.remaining()), (700, 300));
     // a queue that is above its capacity has no room, and keeps its items
-    p.set_capacity(10);
+    assert_eq!(status.set_capacity(10), 1000);
     assert_eq!(
         (status.len(), status.remaining(), status.capacity()),
         (700, 0, 10)
     );
-    p.set_capacity(2000);
+    assert_eq!(status.set_capacity(2000), 10);
     assert_eq!(
         (status.len(), status.remaining(), status.capacity()),
         (700, 1300, 2000)
@@ -710,13 +712,15 @@ fn zero_capacity_takes_nothing() {
 #[test]
 fn set_capacity_changes_the_limit() {
     track();
-    let (mut p, mut c) = Ring::<u8>::new(100).split();
+    let ring = Ring::<u8>::new(100);
+    let status = ring.status();
+    let (mut p, mut c) = ring.split();
     assert_eq!(p.push_slice(&[7u8; 300]), Ok(100));
-    p.set_capacity(150);
+    status.set_capacity(150);
     assert_eq!(c.capacity(), 150);
     assert_eq!(p.push_slice(&[8u8; 300]), Ok(50));
     // shrinking below the content keeps the items, and takes no more until they are fewer
-    p.set_capacity(10);
+    status.set_capacity(10);
     assert_eq!(p.len(), 150);
     assert!(p.is_full());
     assert_eq!(p.push_slice(&[9u8; 5]), Ok(0));

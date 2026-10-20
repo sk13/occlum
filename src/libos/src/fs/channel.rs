@@ -437,12 +437,11 @@ impl<I> Producer<I> {
     /// the new capacity keeps them, but it takes no more until it holds fewer. If the channel can
     /// take more now, it returns true, and the caller has to call `notify_room()`, which wakes up
     /// the threads that wait for room and those that poll the channel. It is a call of its own, so
-    /// that the caller can do it without holding the locks that those threads need.
+    /// that the caller can do it without holding the locks that those threads need. It does not
+    /// take the lock of the end either, which a writer holds while it copies, so the caller does
+    /// not wait for a copy.
     pub fn set_capacity(&self, capacity: usize) -> bool {
-        let rb_producer = self.inner.lock().unwrap();
-        let grown = capacity > rb_producer.capacity();
-        rb_producer.set_capacity(capacity);
-        grown
+        capacity > self.status.set_capacity(capacity)
     }
 
     /// Wakes up the threads that wait for room and those that poll the channel, after
