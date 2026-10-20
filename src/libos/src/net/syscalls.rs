@@ -663,11 +663,10 @@ pub fn do_recvmsg(fd: c_int, msg_mut_ptr: *mut libc::msghdr, flags_c: c_int) -> 
         }
     }
 
+    // Like Linux, recvmsg changes the length of the control messages, but not their buffer, which
+    // the program may use for the next call with the same message
     msg.msg_flags = msg_flags.bits();
     msg.msg_controllen = msg_controllen;
-    if msg_controllen == 0 {
-        msg.msg_control = ptr::null_mut();
-    }
 
     Ok(bytes_recv as isize)
 }
@@ -1543,14 +1542,12 @@ fn extract_msghdr_from_user<'a>(
     let msg_control = msg.msg_control;
     let msg_controllen = msg.msg_controllen;
 
-    if msg_control.is_null() ^ (msg_controllen == 0) {
-        return_errno!(
-            EINVAL,
-            "message control and controllen should be both null and 0 or not"
-        );
+    // Like Linux, a buffer of no bytes is no buffer, but a length needs a buffer
+    if msg_control.is_null() && msg_controllen != 0 {
+        return_errno!(EINVAL, "message controllen should be 0 if control is null");
     }
 
-    let control = if msg_control.is_null() {
+    let control = if msg_controllen == 0 {
         None
     } else {
         Some(from_user::make_slice(
@@ -1606,14 +1603,11 @@ fn extract_msghdr_mut_from_user<'a>(
     let msg_control = msg_mut.msg_control;
     let msg_controllen = msg_mut.msg_controllen;
 
-    if msg_control.is_null() ^ (msg_controllen == 0) {
-        return_errno!(
-            EINVAL,
-            "message control and controllen should be both null and 0 or not"
-        );
+    if msg_control.is_null() && msg_controllen != 0 {
+        return_errno!(EINVAL, "message controllen should be 0 if control is null");
     }
 
-    let control = if msg_control.is_null() {
+    let control = if msg_controllen == 0 {
         None
     } else {
         Some(from_user::make_mut_slice(
