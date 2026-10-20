@@ -65,6 +65,7 @@ LIBOS_CORE_RS_A := $(OBJ_DIR)/libos/lib/libocclum_libos_core_rs.a
 
 # All source code
 RUST_SRCS := $(wildcard src/*.rs src/*/*.rs src/*/*/*.rs src/*/*/*/*.rs src/*/*/*/*/*.rs \
+				src/*/*/*/*/*/*.rs src/*/*/*/*/*/*/*.rs \
 				crates/*/src/*.rs crates/*/src/*/*.rs crates/*/src/*/*/*.rs crates/*/src/*/*/*/*.rs)
 RUST_TARGET_DIR := $(OBJ_DIR)/libos/cargo-target
 RUST_OUT_DIR := $(OBJ_DIR)/libos/lib
