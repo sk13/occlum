@@ -555,8 +555,12 @@ impl<I: Copy> Producer<I> {
             if copying {
                 self.state.set_producer_copying(true);
             }
+            // The mark knows about `room` items at the most: an attempt with a mark pushes no more,
+            // though the capacity may have grown since `room` was read, as a thread that changes
+            // it does not wait for the lock of the producer
+            let mut budget = if mark.is_some() { room } else { usize::MAX };
             for items in slices {
-                if refused {
+                if refused || budget == 0 {
                     break;
                 }
                 if skip >= items.len() {
@@ -565,6 +569,7 @@ impl<I: Copy> Producer<I> {
                 }
                 let items = &items[skip..];
                 skip = 0;
+                let items = &items[..items.len().min(budget)];
                 let count = match rb_producer.push_slice(items) {
                     Ok(count) => count,
                     Err(NoMemory) => {
@@ -573,6 +578,7 @@ impl<I: Copy> Producer<I> {
                     }
                 };
                 pushed += count;
+                budget -= count;
                 if count < items.len() {
                     break;
                 }
