@@ -14,6 +14,7 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <pthread.h>
+#include <sched.h>
 #include <signal.h>
 #include <stdatomic.h>
 #include <stddef.h>
@@ -1271,6 +1272,102 @@ static int test_epoll_wait_is_woken_by_shutdown_rd_of_the_peer(void) {
     return 0;
 }
 
+// ---------------------------------------------------------------------------------------------
+// What a call finds right after poll() has told the end of the file, and a write that races with a
+// close
+// ---------------------------------------------------------------------------------------------
+
+typedef struct {
+    atomic_int go;
+    atomic_int done;
+    atomic_int quit;
+    atomic_int fd;
+    atomic_int spin;
+} closer_t;
+
+static void spin_for(int n) {
+    for (volatile int i = 0; i < n; i++) {
+    }
+}
+
+// Closes the socket that the main thread says, after a spin
+static void *closer_main(void *arg) {
+    closer_t *c = arg;
+    while (!atomic_load(&c->quit)) {
+        while (!atomic_load(&c->go) && !atomic_load(&c->quit)) {
+            sched_yield();
+        }
+        if (atomic_load(&c->quit)) {
+            break;
+        }
+        spin_for(atomic_load(&c->spin));
+        close(atomic_load(&c->fd));
+        atomic_store(&c->go, 0);
+        atomic_store(&c->done, 1);
+    }
+    return NULL;
+}
+
+// A write of one byte races with the close of the peer, which never reads. If the write returns 1,
+// the byte is not read when the peer closes, so the next read fails with ECONNRESET. If it fails
+// with EPIPE, the peer was closed before, with nothing to read, so the next read returns the end of
+// the file. In Linux, a write and a close exclude each other, so there is no third case, such as a
+// byte that is lost and an end of the file.
+static int test_a_write_that_races_with_the_close_is_reset(void) {
+    static closer_t c;     // static: the thread uses it until it is joined
+    memset(&c, 0, sizeof(c));
+    pthread_t thread;
+    CHECK(pthread_create(&thread, NULL, closer_main, &c) == 0, "failed to start a thread");
+    unsigned seed = 4242;
+    long reset = 0, eof = 0, lost = 0, other = 0;
+    for (int i = 0; i < 5000; i++) {
+        int sv[2];
+        if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) {
+            atomic_store(&c.quit, 1);
+            pthread_join(thread, NULL);
+            CHECK(0, "failed to make a socket pair");
+        }
+        atomic_store(&c.done, 0);
+        atomic_store(&c.fd, sv[0]);
+        atomic_store(&c.spin, rand_r(&seed) % 3000);
+        int writer_spin = rand_r(&seed) % 3000;
+        atomic_store(&c.go, 1);
+        spin_for(writer_spin);
+        ssize_t written = send(sv[1], "w", 1, MSG_NOSIGNAL);
+        int write_errno = errno;
+        while (!atomic_load(&c.done)) {
+            sched_yield();
+        }
+        char buf[4];
+        ssize_t n = recv(sv[1], buf, sizeof(buf), 0);
+        int read_errno = errno;
+        if (written == 1) {
+            if (n < 0 && read_errno == ECONNRESET) {
+                reset++;
+            } else if (n == 0) {
+                lost++;
+            } else {
+                other++;
+            }
+        } else if (written < 0 && write_errno == EPIPE && n == 0) {
+            eof++;
+        } else {
+            other++;
+        }
+        close(sv[1]);
+    }
+    atomic_store(&c.quit, 1);
+    pthread_join(thread, NULL);
+    CHECK(lost == 0,
+          "the byte of %ld writes that succeeded was lost without a reset (the peer "
+          "read the end of the file); %ld writes were reset, %ld failed", lost, reset, eof);
+    CHECK(other == 0, "%ld writes or reads had another result", other);
+    CHECK(reset > 0 &&
+          eof > 0, "the close did not race with the write: %ld writes were reset, "
+          "%ld failed", reset, eof);
+    return 0;
+}
+
 static test_case_t test_cases[] = {
     TEST_CASE(test_shutdown_changes_the_events_at_once),
     TEST_CASE(test_full_buffer_is_not_writable_after_shutdown),
@@ -1295,6 +1392,7 @@ static test_case_t test_cases[] = {
     TEST_CASE(test_epoll_wait_is_woken_by_the_reset),
     TEST_CASE(test_epoll_edge_is_told_of_the_shutdown_of_the_peer),
     TEST_CASE(test_epoll_wait_is_woken_by_shutdown_rd_of_the_peer),
+    TEST_CASE(test_a_write_that_races_with_the_close_is_reset),
 };
 
 int main(int argc, const char *argv[]) {
