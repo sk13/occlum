@@ -561,6 +561,13 @@ static int test_open_and_truncate_of_a_socket_file(void) {
     EXPECT_ERR(truncate(path, 0), EINVAL);
     EXPECT_ERR(truncate(path, 100), EINVAL);
     EXPECT_OK(check_file(path, 0, S_IFSOCK, -1));
+    // A truncate that fails has not changed the size
+    struct stat size_st;
+    EXPECT_OK(stat(path, &size_st));
+    if (size_st.st_size != 0) {
+        THROW_ERROR("the failed truncate has changed the size of the socket file to %ld",
+                    (long)size_st.st_size);
+    }
 
     int fd = open(path, O_PATH);
     if (fd < 0) {
@@ -830,6 +837,95 @@ static int test_directory_entry_of_a_socket_file(void) {
 // A program that is killed
 // ---------------------------------------------------------------------------------------------
 
+// A socket that is connected already, from a socket pair or by connect(), has no name, so it may
+// bind to one: the path is its file, a socket file, as for any other socket that binds
+static int test_bind_of_a_connected_socket(void) {
+    char path[160];
+    make_path(path, "pair");
+    int sv[2];
+    EXPECT_OK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+    EXPECT_OK(bind_path(sv[0], path));
+    EXPECT_OK(check_file(path, 0, S_IFSOCK, -1));
+    EXPECT_OK(check_bind_fails(path, EADDRINUSE));
+    EXPECT_OK(check_connect_fails(path, ECONNREFUSED));
+    // The socket pair still works, and the file stays
+    if (write(sv[1], "x", 1) != 1) {
+        THROW_ERROR("a write to the socket pair failed");
+    }
+    char c;
+    if (read(sv[0], &c, 1) != 1 || c != 'x') {
+        THROW_ERROR("the socket pair does not work after bind()");
+    }
+    EXPECT_OK(check_file(path, 0, S_IFSOCK, -1));
+
+    char client_path[160], listen_path[160];
+    make_path(listen_path, "listen");
+    make_path(client_path, "client");
+    int l = listener_at(listen_path);
+    int client = client_to(listen_path);
+    if (l < 0 || client < 0) {
+        THROW_ERROR("failed to make a connection");
+    }
+    EXPECT_OK(bind_path(client, client_path));
+    EXPECT_OK(check_file(client_path, 0, S_IFSOCK, -1));
+    EXPECT_OK(check_bind_fails(client_path, EADDRINUSE));
+    // It is the file of a socket that does not listen
+    EXPECT_OK(check_connect_fails(client_path, ECONNREFUSED));
+    int accepted = accept(l, NULL, NULL);
+    if (accepted < 0) {
+        THROW_ERROR("failed to accept");
+    }
+    struct sockaddr_un peer;
+    socklen_t peer_len = sizeof(peer);
+    if (getpeername(accepted, (struct sockaddr *)&peer, &peer_len) < 0 ||
+            peer_len <= offsetof(struct sockaddr_un, sun_path) ||
+            strcmp(peer.sun_path, client_path) != 0) {
+        THROW_ERROR("the peer of the accepted socket does not have the name that the client bound");
+    }
+    close(accepted);
+    close(client);
+    close(l);
+    close(sv[0]);
+    close(sv[1]);
+    return 0;
+}
+
+// A socket that is bound already does not bind again: a path that exists is in use, as for any
+// socket, whether it is a dangling link, a file, or a directory, and a path that does not exist
+// is refused with EINVAL, as the socket has a name, and no file is made for it
+static int test_bind_of_a_bound_socket(void) {
+    char first[160], second[160], reg[160], dangling[160], missing[160], dir[160];
+    make_path(first, "first");
+    make_path(second, "second");
+    int fd = new_socket();
+    EXPECT_OK(bind_path(fd, first));
+    EXPECT_ERR(bind_path(fd, second), EINVAL);
+    EXPECT_OK(check_no_file(second));
+    // Its own path exists, which Linux finds out first
+    EXPECT_ERR(bind_path(fd, first), EADDRINUSE);
+    EXPECT_OK(check_file(first, 0, S_IFSOCK, -1));
+
+    make_path(reg, "reg");
+    EXPECT_OK(make_regular_file(reg, "data"));
+    EXPECT_ERR(bind_path(fd, reg), EADDRINUSE);
+    EXPECT_OK(check_content(reg, "data"));
+    make_path(dir, "dir");
+    EXPECT_OK(mkdir(dir, 0755));
+    EXPECT_ERR(bind_path(fd, dir), EADDRINUSE);
+    // The link is a file that exists: it is not followed, and the file that it names is not made
+    make_path(missing, "missing");
+    make_path(dangling, "dangling");
+    EXPECT_OK(symlink(missing, dangling));
+    EXPECT_ERR(bind_path(fd, dangling), EADDRINUSE);
+    EXPECT_OK(check_no_file(missing));
+    EXPECT_OK(check_file(dangling, 0, S_IFLNK, -1));
+    // The socket has its name, and keeps its file
+    EXPECT_OK(check_file(first, 0, S_IFSOCK, -1));
+    EXPECT_OK(check_bind_fails(first, EADDRINUSE));
+    close(fd);
+    return 0;
+}
+
 // The role of the child: listen at the path, until killed
 static int child_main(const char *path) {
     int l = listener_at(path);
@@ -986,11 +1082,14 @@ static int check_hostfs(void) {
     snprintf(path, sizeof(path), "%s/sock.%d", dir, getpid());
     remember_path(path);
 
+    // The file is a regular file there, with the mode of a new file, less the bits of the umask
+    mode_t old_mask = umask(077);
     int l = listener_at(path);
+    umask(old_mask);
     if (l < 0) {
         THROW_ERROR("failed to listen in the HostFS");
     }
-    EXPECT_OK(check_file(path, 0, S_IFREG, -1));
+    EXPECT_OK(check_file(path, 0, S_IFREG, 0700));
     EXPECT_OK(check_bind_fails(path, EADDRINUSE));
     int c = client_to(path);
     if (c < 0 || !accepts(l)) {
@@ -1063,6 +1162,8 @@ static test_case_t test_cases[] = {
     TEST_CASE(test_the_file_of_a_closed_socket),
     TEST_CASE(test_bind_races),
     TEST_CASE(test_bind_one_socket_twice_at_once),
+    TEST_CASE(test_bind_of_a_connected_socket),
+    TEST_CASE(test_bind_of_a_bound_socket),
     TEST_CASE(test_open_and_truncate_of_a_socket_file),
     TEST_CASE(test_unlink_and_rebind),
     TEST_CASE(test_rename_the_file),
