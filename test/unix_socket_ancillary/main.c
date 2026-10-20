@@ -2163,6 +2163,37 @@ static int test_sendmmsg_and_recvmmsg_with_descriptors(void) {
     return 0;
 }
 
+// A connection that is reset, whose reader has bytes and a message with a descriptor queued: a
+// receive that waits for all its bytes stops after the message with the descriptor, as always, and
+// does not look at the queue again, so it does not take the error of the connection with it. The
+// next receive gets the error, and the one after it the end of the file. (Without a descriptor, the
+// call that finds the queue empty takes the error: see test_waitall_takes_the_reset of the test
+// unix_socket_events.)
+static int test_waitall_that_stops_at_a_descriptor_does_not_take_the_reset(void) {
+    for (int kind = 0; kind < NUM_PAIR_KINDS; kind++) {
+        int a, b;
+        CHECK(create_pair(kind, &a, &b) == 0, "failed to create a %s pair", pair_names[kind]);
+        pipe_t p;
+        CHECK(make_pipe(&p) == 0, "failed to create a pipe");
+        CHECK(write(a, "ab", 2) == 2 && send_fd(a, "c", 1, p.rd) == 1, "failed to send");
+        CHECK(write(b, "u", 1) == 1, "failed to write");
+        close(a);   // it has a byte that it did not read: b is reset
+        got_t got;
+        recv_ctl(b, 8, 128, MSG_WAITALL | MSG_DONTWAIT, &got);
+        CHECK_GOT(&got, 3, "abc");
+        CHECK(got.num_fds == 1, "%s: %d descriptors arrived", pair_names[kind], got.num_fds);
+        close_got_fds(&got);
+        recv_now(b, 8, 128, 0, &got);
+        CHECK(got.ret == -ECONNRESET, "%s: the next receive returned %ld, not ECONNRESET",
+              pair_names[kind], got.ret);
+        recv_now(b, 8, 128, 0, &got);
+        CHECK(got.ret == 0, "%s: the receive after the error returned %ld", pair_names[kind],
+              got.ret);
+        close_files(3, b, p.rd, p.wr);
+    }
+    return 0;
+}
+
 // ---------------------------------------------------------------------------------------------
 // A child process that writes to the end of a socket pair that it has inherited
 // ---------------------------------------------------------------------------------------------
@@ -2209,6 +2240,7 @@ static test_case_t test_cases[] = {
     TEST_CASE(test_passcred_before_connect),
     TEST_CASE(test_passcred_of_two_senders),
     TEST_CASE(test_passcred_peek_does_not_look_past_another_sender),
+    TEST_CASE(test_waitall_that_stops_at_a_descriptor_does_not_take_the_reset),
     TEST_CASE(test_nothing_is_left_behind),
     TEST_CASE(test_a_chain_of_sockets_is_released),
     TEST_CASE(test_queued_messages_are_not_bound_to_the_sender),
