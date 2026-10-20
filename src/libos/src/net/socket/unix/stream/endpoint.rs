@@ -145,9 +145,10 @@ impl Inner {
         opts: &IoOpts,
         received: &mut Received,
     ) -> Result<usize> {
+        let eof = self.reads_eof();
         let mut gate = self.control_in().gate(received, false);
         let result = self.reader.pop_slices_gated(bufs, opts, Some(&mut gate));
-        self.fail_if_reset(result, bufs)
+        self.fail_if_reset(Self::eof_for_eagain(result, eof), bufs)
     }
 
     /// Reads the bytes without taking them, and the files of their control messages as copies
@@ -157,9 +158,28 @@ impl Inner {
         opts: &IoOpts,
         received: &mut Received,
     ) -> Result<usize> {
+        let eof = self.reads_eof();
         let mut gate = self.control_in().gate(received, true);
         let result = self.reader.peek_slices_gated(bufs, opts, Some(&mut gate));
-        self.fail_if_reset(result, bufs)
+        self.fail_if_reset(Self::eof_for_eagain(result, eof), bufs)
+    }
+
+    /// Whether the shared flags say that the end reads nothing more, which is what a poll tells
+    /// (see `poll`), also while the channel does not know it yet, which is so when the peer closes:
+    /// the drop of an endpoint changes the flags before its channels. The peer changes them after
+    /// its last write, so the bytes that it wrote are queued when this is true.
+    fn reads_eof(&self) -> bool {
+        self.flags.load(Ordering::SeqCst) & self.own_flags(RCV_SHUTDOWN) != 0
+    }
+
+    /// A read that finds no bytes, after it has seen the flags of the end of the file, is at the
+    /// end of the file, though the channel does not know yet that its peer is gone: poll() has told
+    /// it, and a read that does not wait must not answer EAGAIN then.
+    fn eof_for_eagain(result: Result<usize>, eof: bool) -> Result<usize> {
+        match result {
+            Err(_) if eof && result.has_errno(EAGAIN) => Ok(0),
+            result => result,
+        }
     }
 
     /// The end of the file that a read finds is an error, once, if the connection was reset. The
