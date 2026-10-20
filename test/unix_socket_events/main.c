@@ -1457,6 +1457,56 @@ static int test_a_write_that_races_with_the_close_is_reset(void) {
     return 0;
 }
 
+// A connection that is reset, whose reader has bytes that were queued before: the call that reads
+// them gets the bytes, and the next one gets the error, once. A call that waits for more bytes than
+// there are (MSG_WAITALL) finds the queue empty before it has them, and takes the error with it,
+// as in Linux: it returns the bytes, and the next call finds the end of the file. A call that gets
+// all the bytes that it waits for does not look at the queue again, and neither does a peek.
+static int test_waitall_takes_the_reset(void) {
+    static const struct {
+        const char *name;
+        int flags;
+        size_t len;
+        int error_taken;    // the call takes the error, so the next one finds the end of the file
+    } calls[] = {
+        { "recv", 0, 8, 0 },
+        { "recv of all the bytes", MSG_WAITALL, 2, 0 },
+        { "recv MSG_WAITALL for more", MSG_WAITALL, 8, 1 },
+        { "recv MSG_PEEK MSG_WAITALL for more", MSG_PEEK | MSG_WAITALL, 8, 0 },
+        { "recv MSG_PEEK", MSG_PEEK, 8, 0 },
+    };
+    for (int kind = 0; kind < NUM_PAIR_KINDS; kind++) {
+        for (size_t i = 0; i < ARRAY_SIZE(calls); i++) {
+            context = calls[i].name;
+            int a, b;
+            CHECK(make_pair(kind, &a, &b) == 0, "failed to make a connection");
+            CHECK(write(b, "ab", 2) == 2 && write(a, "u", 1) == 1, "failed to write");
+            close(b);   // with the byte "u" that it has not read: a is reset
+            char buf[8];
+            ssize_t n = recv(a, buf, calls[i].len, calls[i].flags | MSG_DONTWAIT);
+            CHECK(n == 2 && memcmp(buf, "ab", 2) == 0, "the call returned %zd bytes, not the 2 that "
+                  "were queued", n);
+            if (calls[i].flags & MSG_PEEK) {
+                // the bytes are still queued: take them
+                n = recv(a, buf, sizeof(buf), MSG_DONTWAIT);
+                CHECK(n == 2, "the bytes are not queued after the peek: %zd", n);
+            }
+            n = recv(a, buf, sizeof(buf), MSG_DONTWAIT);
+            if (calls[i].error_taken) {
+                CHECK(n == 0, "the next call returned %zd, errno %d, instead of the end of the file",
+                      n, n < 0 ? errno : 0);
+            } else {
+                CHECK(n == -1 && errno == ECONNRESET, "the next call returned %zd, errno %d, "
+                      "instead of ECONNRESET", n, n < 0 ? errno : 0);
+                n = recv(a, buf, sizeof(buf), MSG_DONTWAIT);
+                CHECK(n == 0, "the call after the error returned %zd", n);
+            }
+            close(a);
+        }
+    }
+    return 0;
+}
+
 static test_case_t test_cases[] = {
     TEST_CASE(test_shutdown_changes_the_events_at_once),
     TEST_CASE(test_full_buffer_is_not_writable_after_shutdown),
@@ -1483,6 +1533,7 @@ static test_case_t test_cases[] = {
     TEST_CASE(test_epoll_wait_is_woken_by_shutdown_rd_of_the_peer),
     TEST_CASE(test_a_read_after_poll_tells_the_end_finds_it),
     TEST_CASE(test_a_write_that_races_with_the_close_is_reset),
+    TEST_CASE(test_waitall_takes_the_reset),
 };
 
 int main(int argc, const char *argv[]) {
