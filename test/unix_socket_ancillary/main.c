@@ -36,6 +36,7 @@
 #include <string.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
+#include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
@@ -2361,6 +2362,214 @@ static int test_waitall_that_stops_at_a_descriptor_does_not_take_the_reset(void)
 }
 
 // ---------------------------------------------------------------------------------------------
+// Messages with descriptors while the size of the send buffer changes
+// ---------------------------------------------------------------------------------------------
+
+#define CHANGING_MESSAGES   300
+#define CHANGING_MAX_LEN    260000
+
+typedef struct {
+    int sock;       // the end that sends
+    int fd;         // the descriptor that every message carries
+    size_t starts[CHANGING_MESSAGES + 1];   // the offsets of the messages in the stream
+    atomic_int stop;
+    atomic_int failed;
+    int error;
+} changing_t;
+
+static unsigned changing_rand(unsigned *seed) {
+    *seed = *seed * 1103515245u + 12345u;
+    return (*seed >> 8) & 0xffffff;
+}
+
+static unsigned char changing_byte(size_t offset) {
+    return (unsigned char)((offset * 7 + 3) >> 1);
+}
+
+// The length of a message: a fifth of them are short
+static size_t changing_len(unsigned *seed) {
+    return changing_rand(seed) % 5 == 0 ? 1 + changing_rand(seed) % 100 :
+           1 + changing_rand(seed) % CHANGING_MAX_LEN;
+}
+
+// Sends the messages: each with its descriptor, and its bytes (whatever a blocking call sends
+// beyond the first part goes without a descriptor)
+static void *changing_sender_main(void *arg) {
+    changing_t *c = arg;
+    unsigned char *buf = malloc(CHANGING_MAX_LEN);
+    unsigned seed = 11;
+    size_t offset = 0;
+    for (int i = 0; buf != NULL && i < CHANGING_MESSAGES && !atomic_load(&c->failed); i++) {
+        size_t len = changing_len(&seed);
+        for (size_t k = 0; k < len; k++) {
+            buf[k] = changing_byte(offset + k);
+        }
+        long ret = send_fd(c->sock, buf, len, c->fd);
+        size_t done = ret > 0 ? ret : 0;
+        while (ret > 0 && done < len) {
+            ret = send(c->sock, buf + done, len - done, MSG_NOSIGNAL);
+            done += ret > 0 ? ret : 0;
+        }
+        if (ret < 0 || done < len) {
+            if (!atomic_load(&c->failed)) {
+                c->error = ret < 0 ? (int) - ret : EIO;
+                atomic_store(&c->failed, 2);
+            }
+            break;
+        }
+        offset += len;
+    }
+    free(buf);
+    shutdown(c->sock, SHUT_WR);
+    return NULL;
+}
+
+// Changes the size of the send buffer of the sending end, and asks what poll() and FIONREAD tell
+static void *changing_fiddler_main(void *arg) {
+    changing_t *c = arg;
+    static const int sizes[] = { 4096, 50000, 212992, 1000, 100000 };
+    unsigned seed = 5;
+    while (!atomic_load(&c->stop)) {
+        set_int_opt(c->sock, SO_SNDBUF, sizes[changing_rand(&seed) % 5]);
+        struct pollfd pfd = { .fd = c->sock, .events = POLLOUT };
+        poll(&pfd, 1, 0);
+        int n;
+        ioctl(c->sock, FIONREAD, &n);
+        usleep(changing_rand(&seed) % 300);
+    }
+    return NULL;
+}
+
+// Messages that carry a descriptor each, sent in pieces when the buffer is small, while the buffer
+// changes its size: the descriptor comes with the first byte of its message, whatever the sizes of
+// the sends and the receives are, and each receive takes the descriptor of one message at the most.
+// A send that is told of the room that it has, and then finds the buffer larger, must not take
+// bytes that the control message was not told of.
+static int changing_round(void) {
+    static changing_t c;
+    memset(&c, 0, sizeof(c));
+    int sv[2];
+    CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0, "failed to create a pair");
+    pipe_t p;
+    CHECK(make_pipe(&p) == 0, "failed to create a pipe");
+    set_timeout(sv[0], 30000);
+    set_timeout(sv[1], 30000);
+    c.sock = sv[0];
+    c.fd = p.rd;
+    unsigned seed = 11;
+    size_t offset = 0;
+    for (int i = 0; i < CHANGING_MESSAGES; i++) {
+        c.starts[i] = offset;
+        offset += changing_len(&seed);
+    }
+    c.starts[CHANGING_MESSAGES] = offset;
+
+    pthread_t sender, fiddler;
+    CHECK(pthread_create(&sender, NULL, changing_sender_main, &c) == 0,
+          "failed to start a thread");
+    CHECK(pthread_create(&fiddler, NULL, changing_fiddler_main, &c) == 0,
+          "failed to start a thread");
+
+    static unsigned char buf[70000];
+    size_t pos = 0;
+    int next_start = 0, fds = 0;
+    const char *problem = NULL;
+    char what[200];
+    seed = 77;
+    for (;;) {
+        size_t want = 1 + (changing_rand(&seed) % 4 == 0 ? changing_rand(&seed) % 70000 :
+                           changing_rand(&seed) % 3000);
+        int peek = changing_rand(&seed) % 6 == 0;
+        char ctl[CMSG_SPACE(sizeof(int) * 4)];
+        struct iovec iov = { buf, want };
+        struct msghdr msg;
+        memset(&msg, 0, sizeof(msg));
+        msg.msg_iov = &iov;
+        msg.msg_iovlen = 1;
+        msg.msg_control = ctl;
+        msg.msg_controllen = sizeof(ctl);
+        long ret = recvmsg(sv[1], &msg, peek ? MSG_PEEK : 0);
+        if (ret < 0) {
+            snprintf(what, sizeof(what), "recvmsg failed with errno %d at offset %zu", errno, pos);
+            problem = what;
+            break;
+        }
+        int got = 0;
+        for (struct cmsghdr *cm = CMSG_FIRSTHDR(&msg); cm; cm = CMSG_NXTHDR(&msg, cm)) {
+            if (cm->cmsg_level == SOL_SOCKET && cm->cmsg_type == SCM_RIGHTS) {
+                int n = (cm->cmsg_len - CMSG_LEN(0)) / sizeof(int);
+                for (int k = 0; k < n; k++) {
+                    int fd;
+                    memcpy(&fd, CMSG_DATA(cm) + k * sizeof(int), sizeof(fd));
+                    close(fd);
+                    got++;
+                }
+            }
+        }
+        if (ret == 0) {
+            break;
+        }
+        if (msg.msg_flags & MSG_CTRUNC) {
+            snprintf(what, sizeof(what), "the control messages were truncated at offset %zu", pos);
+            problem = what;
+            break;
+        }
+        for (long k = 0; k < ret; k++) {
+            if (buf[k] != changing_byte(pos + k)) {
+                snprintf(what, sizeof(what), "byte %zu is wrong", pos + k);
+                problem = what;
+                break;
+            }
+        }
+        if (problem != NULL) {
+            break;
+        }
+        if (peek) {
+            continue;   // a peek looks ahead for descriptors: only its bytes are checked
+        }
+        int starts_in = 0;
+        for (int i = next_start; i < CHANGING_MESSAGES && c.starts[i] < pos + ret; i++) {
+            starts_in += c.starts[i] >= pos;
+        }
+        if (starts_in > 1 || got != starts_in) {
+            snprintf(what, sizeof(what), "a receive of %ld bytes at offset %zu has %d "
+                     "descriptors, and %d messages start in it", ret, pos, got, starts_in);
+            problem = what;
+            break;
+        }
+        pos += ret;
+        fds += got;
+        while (next_start < CHANGING_MESSAGES && c.starts[next_start] < pos) {
+            next_start++;
+        }
+    }
+    atomic_store(&c.stop, 1);
+    atomic_store(&c.failed, 1);
+    close(sv[1]);   // a sender that waits for room gets EPIPE
+    pthread_join(sender, NULL);
+    pthread_join(fiddler, NULL);
+    CHECK(c.error == 0 || problem != NULL, "the sender failed with errno %d", c.error);
+    close(sv[0]);
+    close(p.rd);
+    close(p.wr);
+    CHECK(problem == NULL, "%s", problem);
+    CHECK(pos == c.starts[CHANGING_MESSAGES] && fds == CHANGING_MESSAGES,
+          "%zu of %zu bytes and %d of %d descriptors arrived", pos, c.starts[CHANGING_MESSAGES],
+          fds, CHANGING_MESSAGES);
+    return 0;
+}
+
+// A round fails with a probability that is high without the fix and not 1, so there are several
+static int test_descriptors_arrive_with_their_message_while_the_buffer_changes(void) {
+    for (int round = 0; round < 8; round++) {
+        if (changing_round() < 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------------------------------------
 // A child process that writes to the end of a socket pair that it has inherited
 // ---------------------------------------------------------------------------------------------
 
@@ -2411,6 +2620,7 @@ static test_case_t test_cases[] = {
     TEST_CASE(test_the_limit_of_descriptors_counts_all_messages_of_a_send),
     TEST_CASE(test_credentials_of_a_thread_of_the_process),
     TEST_CASE(test_waitall_that_stops_at_a_descriptor_does_not_take_the_reset),
+    TEST_CASE(test_descriptors_arrive_with_their_message_while_the_buffer_changes),
     TEST_CASE(test_nothing_is_left_behind),
     TEST_CASE(test_a_chain_of_sockets_is_released),
     TEST_CASE(test_queued_messages_are_not_bound_to_the_sender),
