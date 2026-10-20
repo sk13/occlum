@@ -239,6 +239,9 @@ impl Inner {
     /// returned it. If the endpoint is closed meanwhile, its peer gets a reset.
     pub fn set_embryo(&self, embryo: bool) {
         self.embryo.store(embryo, Ordering::Release);
+        // The peer sends to a socket that has no file yet, so Linux records its credentials, if
+        // the socket asks for them or not
+        self.control_in().set_embryo(embryo);
     }
 
     /// Reads the reset of the connection, if there is one, which clears it. Like Linux does with

@@ -161,7 +161,8 @@ pub struct ControlQueue {
     /// that it takes have no control data. A sender changes it before the bytes that its entry
     /// belongs to become visible, and the receiver reads it after it has seen the bytes.
     len: AtomicUsize,
-    /// Whether the receiver (`RECV`) or the sender (`SEND`) has SO_PASSCRED
+    /// Whether the receiver (`RECV`) or the sender (`SEND`) has SO_PASSCRED, or the receiver waits
+    /// in the queue of a listener (`EMBRYO`)
     passcred: AtomicU8,
     /// Whether the receiver is closed, so that nobody looks at the entries any more
     closed: AtomicBool,
@@ -170,6 +171,7 @@ pub struct ControlQueue {
 
 const RECV: u8 = 1;
 const SEND: u8 = 2;
+const EMBRYO: u8 = 4;
 
 impl ControlQueue {
     fn new() -> Self {
@@ -194,6 +196,12 @@ impl ControlQueue {
         self.set_passcred(SEND, on)
     }
 
+    /// Tells that the receiver has not been accepted yet: it has no socket file, so the sender's
+    /// credentials are recorded
+    pub fn set_embryo(&self, on: bool) {
+        self.set_passcred(EMBRYO, on)
+    }
+
     fn set_passcred(&self, who: u8, on: bool) {
         if on {
             self.passcred.fetch_or(who, Ordering::Release);
@@ -207,7 +215,8 @@ impl ControlQueue {
         self.passcred.load(Ordering::Acquire) & RECV != 0
     }
 
-    /// Whether a send has to tell its credentials: the receiver or the sender has SO_PASSCRED
+    /// Whether a send has to tell its credentials: the receiver or the sender has SO_PASSCRED, or
+    /// the receiver is not accepted yet
     pub fn records_creds(&self) -> bool {
         self.passcred.load(Ordering::Acquire) != 0
     }
