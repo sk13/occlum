@@ -23,7 +23,8 @@ Users could run the unit test manually as well.
 # OCCLUM_BIN_PATH=/opt/occlum/build/bin make test
 
 // run the unit tests of the LibOS code that needs no enclave, on the host (so far
-// the queue of the channels of pipes and unix sockets)
+// the queue of the channels of pipes and unix sockets, and the entries of the control
+// messages of unix sockets)
 # make test-host
 
 // run a test that is not in the default list, since it drives the kernel heap to its
