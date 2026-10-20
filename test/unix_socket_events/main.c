@@ -1278,6 +1278,95 @@ static int test_epoll_wait_is_woken_by_shutdown_rd_of_the_peer(void) {
 // ---------------------------------------------------------------------------------------------
 
 typedef struct {
+    int fd;
+    atomic_int started;
+    atomic_long eof;
+    atomic_long eagain;
+    atomic_long other;
+    int error;
+} poll_reader_t;
+
+#define POLLERS     3   // threads that poll the same socket
+
+// Polls until the end of the file is reported, and then reads without waiting
+static void *poll_then_read_main(void *arg) {
+    poll_reader_t *r = arg;
+    char buf[8];
+    atomic_store(&r->started, 1);
+    for (int i = 0; i < 2000000; i++) {
+        struct pollfd pfd = { .fd = r->fd, .events = POLLIN | POLLRDHUP };
+        poll(&pfd, 1, 0);
+        if (pfd.revents & (POLLRDHUP | POLLHUP)) {
+            ssize_t n = recv(r->fd, buf, sizeof(buf), MSG_DONTWAIT);
+            if (n == 0) {
+                atomic_fetch_add(&r->eof, 1);
+            } else if (n < 0 && errno == EAGAIN) {
+                atomic_fetch_add(&r->eagain, 1);
+            } else {
+                atomic_fetch_add(&r->other, 1);
+                r->error = n < 0 ? errno : 0;
+            }
+            return NULL;
+        }
+    }
+    return NULL;
+}
+
+// A thread that polls a socket until the end of the file is reported, and then reads without
+// waiting, finds the end of the file: Linux never answers EAGAIN there. The connection ends in
+// three ways: the peer shuts down writing, both ways, or closes.
+static int test_a_read_after_poll_tells_the_end_finds_it(void) {
+    static const char *how_names[] = { "shutdown(SHUT_WR)", "shutdown(SHUT_RDWR)", "close" };
+    long reads = 0;
+    for (int i = 0; i < 4000; i++) {
+        int how = i % 3;
+        context = how_names[how];
+        int sv[2];
+        CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0, "failed to make a socket pair");
+        static poll_reader_t r[POLLERS];    // static: a thread uses it until it is joined
+        pthread_t threads[POLLERS];
+        memset(r, 0, sizeof(r));
+        for (int t = 0; t < POLLERS; t++) {
+            r[t].fd = sv[1];
+            CHECK(pthread_create(&threads[t], NULL, poll_then_read_main, &r[t]) == 0,
+                  "failed to start a thread");
+        }
+        for (int t = 0; t < POLLERS; t++) {
+            while (!atomic_load(&r[t].started)) {
+                usleep(20);
+            }
+        }
+        // The end comes at another time of the loop of the pollers each time
+        usleep(i % 7 * 20);
+        if (how == 0) {
+            shutdown(sv[0], SHUT_WR);
+        } else if (how == 1) {
+            shutdown(sv[0], SHUT_RDWR);
+        } else {
+            close(sv[0]);
+        }
+        // All the threads are over before a failed check ends the test case, as they use `r`
+        for (int t = 0; t < POLLERS; t++) {
+            pthread_join(threads[t], NULL);
+        }
+        for (int t = 0; t < POLLERS; t++) {
+            reads += atomic_load(&r[t].eof);
+            CHECK(atomic_load(&r[t].eagain) == 0,
+                  "a read that does not wait failed with EAGAIN after poll() told the end of the "
+                  "file, in the %dth connection", i);
+            CHECK(atomic_load(&r[t].other) == 0, "a read after poll() returned an error: %d",
+                  r[t].error);
+        }
+        close(sv[1]);
+        if (how != 2) {
+            close(sv[0]);
+        }
+    }
+    CHECK(reads > 0, "no read reached the end of the file");
+    return 0;
+}
+
+typedef struct {
     atomic_int go;
     atomic_int done;
     atomic_int quit;
@@ -1392,6 +1481,7 @@ static test_case_t test_cases[] = {
     TEST_CASE(test_epoll_wait_is_woken_by_the_reset),
     TEST_CASE(test_epoll_edge_is_told_of_the_shutdown_of_the_peer),
     TEST_CASE(test_epoll_wait_is_woken_by_shutdown_rd_of_the_peer),
+    TEST_CASE(test_a_read_after_poll_tells_the_end_finds_it),
     TEST_CASE(test_a_write_that_races_with_the_close_is_reset),
 };
 
