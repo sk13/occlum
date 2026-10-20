@@ -476,6 +476,13 @@ impl<I> Producer<I> {
         capacity > self.status.set_capacity(capacity)
     }
 
+    /// Returns when the pushes that are going on are over, which hold the lock of the end while
+    /// they copy. A push that begins after the consumer is shut down fails, so after that the items
+    /// that are queued are the last ones.
+    pub fn wait_for_pushes(&self) {
+        drop(self.inner.lock().unwrap());
+    }
+
     /// Wakes up the threads that wait for room and those that poll the channel, after
     /// `set_capacity()` has returned true.
     pub fn notify_room(&self) {

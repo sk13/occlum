@@ -347,6 +347,19 @@ impl Drop for Inner {
         }
         self.flags
             .fetch_or(self.peer_flags(flags), Ordering::SeqCst);
+        // A write of the peer may be on its way: it has passed the check of the channel before the
+        // peer was shut out, and its bytes are not counted yet. Shut the peer out, and wait until
+        // the writes that began before are over, so that their bytes make the connection reset,
+        // as in Linux, where a write and a close exclude each other. A read of the peer may have
+        // seen the end of the file before it finds the reset in such a case.
+        self.reader.shutdown();
+        if let Some(peer) = self.peer.upgrade() {
+            peer.writer.wait_for_pushes();
+        }
+        if flags & RESET == 0 && self.bytes_to_read() > 0 {
+            self.flags
+                .fetch_or(self.peer_flags(RESET), Ordering::SeqCst);
+        }
         // The control messages that nobody reads any more: their files are released
         self.control_in().close();
     }
