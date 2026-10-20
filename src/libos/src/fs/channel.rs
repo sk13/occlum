@@ -145,6 +145,28 @@ pub struct IoOpts {
     pub atomic: usize,
 }
 
+/// Decides, before an attempt of a call that pops or peeks items, how many items the attempt takes
+/// at the most, and whether the call is over after it. It runs with the consumer locked, so what
+/// it decides holds for the items that the attempt takes. Its arguments are the offset of the first
+/// queued item (the number of the items that were popped from the channel since it was created),
+/// the number of the items that are queued, and the number that the call still wants. A call that
+/// is over returns the items that it has taken, and does not wait for more, even if it wants more
+/// (`IoOpts::all`).
+pub type PopGate<'a> = &'a mut dyn FnMut(usize, usize, usize) -> (usize, bool);
+
+/// Is told about the items that a call pushes before the receiver can see them, so that it can
+/// keep data that belongs to the items under the same offsets (see
+/// `Producer::push_slices_marked`).
+pub trait PushMark {
+    /// An attempt is about to push items, with the producer locked. `at` is the number of the
+    /// items that were pushed so far, `room` the number that it pushes at the most. Returns false
+    /// if it may not push now, which is as if there were no room.
+    fn before(&mut self, at: usize, room: usize) -> bool;
+    /// The attempt has pushed `pushed` items, none if the memory ran out, and still holds the lock
+    /// of the producer.
+    fn after(&mut self, pushed: usize);
+}
+
 /// What an attempt of a call that waits has come to.
 pub(crate) enum Attempt<T> {
     /// The call is over
@@ -475,6 +497,16 @@ impl<I: Copy> Producer<I> {
     /// the channel is shut down, also if there are no items, unless it has pushed items already,
     /// in which case it returns their number.
     pub fn push_slices_with(&self, item_slices: &[&[I]], opts: &IoOpts) -> Result<usize> {
+        self.push_slices_marked(item_slices, opts, None)
+    }
+
+    /// Pushes like `push_slices_with`, and tells the mark about each attempt that pushes items.
+    pub fn push_slices_marked(
+        &self,
+        item_slices: &[&[I]],
+        opts: &IoOpts,
+        mut mark: Option<&mut dyn PushMark>,
+    ) -> Result<usize> {
         let len: usize = item_slices.iter().map(|slice| slice.len()).sum();
         // The items that were pushed, which the call returns if it stops early
         let mut done = 0;
@@ -500,6 +532,16 @@ impl<I: Copy> Producer<I> {
                 } else {
                     item_slices
                 };
+            // The mark may know about the items before the receiver sees them
+            let room = (len - done).min(rb_producer.remaining());
+            let mut marked = false;
+            let mut refused = false;
+            if let Some(mark) = mark.as_mut() {
+                if room > 0 && !slices.is_empty() {
+                    marked = mark.before(rb_producer.total_pushed(), room);
+                    refused = !marked;
+                }
+            }
             // The slices begin with the items that were pushed by an earlier attempt
             let mut skip = done;
             let copying = rb_producer.remaining() > 0 && !slices.is_empty();
@@ -507,6 +549,9 @@ impl<I: Copy> Producer<I> {
                 self.state.set_producer_copying(true);
             }
             for items in slices {
+                if refused {
+                    break;
+                }
                 if skip >= items.len() {
                     skip -= items.len();
                     continue;
@@ -524,6 +569,9 @@ impl<I: Copy> Producer<I> {
                 if count < items.len() {
                     break;
                 }
+            }
+            if marked {
+                mark.as_mut().unwrap().after(pushed);
             }
             if copying {
                 self.state.set_producer_copying(false);
@@ -683,6 +731,17 @@ impl<I: Copy> Consumer<I> {
     /// stops at the first pop if the options do not say `all`. It returns 0 at the end of the
     /// channel, or the number of the items that it has popped if it reaches it.
     pub fn pop_slices_with(&self, item_slices: &mut [&mut [I]], opts: &IoOpts) -> Result<usize> {
+        self.pop_slices_gated(item_slices, opts, None)
+    }
+
+    /// Pops like `pop_slices_with`, but takes no more items in an attempt than the gate allows,
+    /// and the call is over after an attempt for which the gate says so.
+    pub fn pop_slices_gated(
+        &self,
+        item_slices: &mut [&mut [I]],
+        opts: &IoOpts,
+        mut gate: Option<PopGate<'_>>,
+    ) -> Result<usize> {
         let len: usize = item_slices.iter().map(|slice| slice.len()).sum();
         if len == 0 {
             return Ok(0);
@@ -697,6 +756,10 @@ impl<I: Copy> Consumer<I> {
             // Get the flag before the items, see pop()
             let is_peer_shutdown = self.is_peer_shutdown();
 
+            let (mut budget, last) = match gate.as_mut() {
+                Some(gate) => gate(rb_consumer.total_popped(), rb_consumer.len(), len - done),
+                None => (usize::MAX, false),
+            };
             // The slices begin with the items that were popped by an earlier attempt
             let mut skip = done;
             let mut popped = 0;
@@ -711,8 +774,10 @@ impl<I: Copy> Consumer<I> {
                 }
                 let items = &mut items[skip..];
                 skip = 0;
-                let count = rb_consumer.pop_slice(items);
+                let take = items.len().min(budget);
+                let count = rb_consumer.pop_slice(&mut items[..take]);
                 popped += count;
+                budget -= count;
                 if count < items.len() {
                     break;
                 }
@@ -728,7 +793,10 @@ impl<I: Copy> Consumer<I> {
 
             // The end of the file, see pop()
             let nonblocking = self.is_nonblocking() || opts.nonblocking;
-            if done == len || (done > 0 && !opts.all) || is_peer_shutdown || self.is_self_shutdown()
+            if done == len
+                || (done > 0 && (last || !opts.all))
+                || is_peer_shutdown
+                || self.is_self_shutdown()
             {
                 return Ok(Attempt::Done(done));
             }
@@ -752,6 +820,16 @@ impl<I: Copy> Consumer<I> {
     /// their number. It waits for items like `pop_slices_with` does, if there are none, but it
     /// does not wait for more than there are, whatever `opts.all` says.
     pub fn peek_slices_with(&self, item_slices: &mut [&mut [I]], opts: &IoOpts) -> Result<usize> {
+        self.peek_slices_gated(item_slices, opts, None)
+    }
+
+    /// Peeks like `peek_slices_with`, but looks at no more items than the gate allows.
+    pub fn peek_slices_gated(
+        &self,
+        item_slices: &mut [&mut [I]],
+        opts: &IoOpts,
+        mut gate: Option<PopGate<'_>>,
+    ) -> Result<usize> {
         let len: usize = item_slices.iter().map(|slice| slice.len()).sum();
         if len == 0 {
             return Ok(0);
@@ -762,10 +840,16 @@ impl<I: Copy> Consumer<I> {
             // Get the flag before the items, see pop()
             let is_peer_shutdown = self.is_peer_shutdown();
 
+            let (mut budget, _) = match gate.as_mut() {
+                Some(gate) => gate(rb_consumer.total_popped(), rb_consumer.len(), len),
+                None => (usize::MAX, false),
+            };
             let mut peeked = 0;
             for items in item_slices.iter_mut() {
-                let count = rb_consumer.peek_slice_at(peeked, items);
+                let take = items.len().min(budget);
+                let count = rb_consumer.peek_slice_at(peeked, &mut items[..take]);
                 peeked += count;
+                budget -= count;
                 if count < items.len() {
                     break;
                 }
