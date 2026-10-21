@@ -40,6 +40,7 @@ Table of Contents
    filesystem/fs_overview.md
    filesystem/mount.md
    filesystem/encrypted_image.md
+   unix_sockets.md
    remote_attestation.md
    init_ra.md
 
