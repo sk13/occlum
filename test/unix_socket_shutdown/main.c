@@ -1399,6 +1399,168 @@ static int test_shutdown_epoll_closed_by_waiter(void) {
     return 0;
 }
 
+// A write that races with shutdown(SHUT_WR) or shutdown(SHUT_RDWR) of the same socket: the bytes
+// that the write reports are in the queue before the peer reads the end of the file, so a peer
+// that polls, and then reads without waiting, gets them all, as in Linux. Three threads live for
+// all the rounds and meet at barriers, so that a round takes a few microseconds, and the shutdown
+// meets the copy of the big write now and then.
+#define RACE_SECONDS    3
+#define RACE_SPIN       40000
+#define RACE_GIVE_UP_MS 10000
+
+struct race {
+    pthread_barrier_t start, done;
+    int a, b;
+    int stop;
+    size_t written, got;
+    // 1: the bytes that were read are not those that were written, 2: no end of the file is told
+    int wrong;
+};
+
+static unsigned char race_byte(size_t i) {
+    return (unsigned char)((i * 7 + (i >> 8)) & 0xff);
+}
+
+static void *race_writer(void *arg) {
+    struct race *r = arg;
+    static unsigned char buf[150000];
+    unsigned seed = 1;
+    // The messages are made before the round begins, so that the shutdown, which comes a few
+    // microseconds after the start, meets the copy of the big one
+    while (1) {
+        seed = seed * 1103515245u + 12345u;
+        size_t big = 100000 + (seed >> 8) % 40000;
+        for (size_t k = 0; k < big; k++) {
+            buf[k] = race_byte(14 + k);
+        }
+        // the small message is behind the big one in the buffer
+        for (size_t k = 0; k < 14; k++) {
+            buf[140000 + k] = race_byte(k);
+        }
+        pthread_barrier_wait(&r->start);
+        if (r->stop) {
+            return NULL;
+        }
+        size_t total = 0;
+        ssize_t n = send(r->a, buf + 140000, 14, MSG_NOSIGNAL);
+        if (n > 0) {
+            total += n;
+            n = send(r->a, buf, big, MSG_NOSIGNAL);
+            if (n > 0) {
+                total += n;
+            }
+        }
+        r->written = total;
+        pthread_barrier_wait(&r->done);
+    }
+}
+
+static void *race_shutter(void *arg) {
+    struct race *r = arg;
+    unsigned seed = 2;
+    while (1) {
+        pthread_barrier_wait(&r->start);
+        if (r->stop) {
+            return NULL;
+        }
+        seed = seed * 1103515245u + 12345u;
+        for (volatile unsigned i = 0, n = (seed >> 8) % RACE_SPIN; i < n; i++) {
+        }
+        shutdown(r->a, (seed >> 24) & 1 ? SHUT_RDWR : SHUT_WR);
+        pthread_barrier_wait(&r->done);
+    }
+}
+
+static void *race_reader(void *arg) {
+    struct race *r = arg;
+    static unsigned char buf[100000];
+    while (1) {
+        pthread_barrier_wait(&r->start);
+        if (r->stop) {
+            return NULL;
+        }
+        size_t n = 0;
+        long give_up = now_ms() + RACE_GIVE_UP_MS;
+        while (1) {
+            struct pollfd p = { r->b, POLLIN | POLLRDHUP, 0 };
+            poll(&p, 1, 1000);
+            ssize_t k = recv(r->b, buf, sizeof(buf), MSG_DONTWAIT);
+            if (k > 0) {
+                for (ssize_t j = 0; j < k; j++) {
+                    if (buf[j] != race_byte(n + j)) {
+                        r->wrong = 1;
+                    }
+                }
+                n += k;
+            } else if (k == 0) {
+                break;
+            } else if (errno != EAGAIN && errno != EINTR) {
+                break;
+            }
+            // fail, rather than hang, if the end of the file is never told
+            if (now_ms() > give_up) {
+                r->wrong = 2;
+                break;
+            }
+        }
+        r->got = n;
+        pthread_barrier_wait(&r->done);
+    }
+}
+
+static int test_shutdown_races_with_write(void) {
+    struct race r;
+    memset(&r, 0, sizeof(r));
+    pthread_barrier_init(&r.start, NULL, 4);
+    pthread_barrier_init(&r.done, NULL, 4);
+    pthread_t threads[3];
+    void *(*bodies[3])(void *) = { race_writer, race_shutter, race_reader };
+    for (int i = 0; i < 3; i++) {
+        if (pthread_create(&threads[i], NULL, bodies[i], &r) != 0) {
+            THROW_ERROR("failed to create a thread");
+        }
+    }
+    long end = now_ms() + RACE_SECONDS * 1000;
+    long rounds = 0, bad = 0;
+    size_t bad_written = 0, bad_got = 0;
+    int bad_wrong = 0;
+    while (now_ms() < end && bad == 0) {
+        int sv[2];
+        if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) < 0) {
+            THROW_ERROR("failed to create a socket pair");
+        }
+        r.a = sv[0];
+        r.b = sv[1];
+        r.written = r.got = 0;
+        r.wrong = 0;
+        pthread_barrier_wait(&r.start);
+        pthread_barrier_wait(&r.done);
+        if (r.written != r.got || r.wrong) {
+            bad++;
+            bad_written = r.written;
+            bad_got = r.got;
+            bad_wrong = r.wrong;
+        }
+        close_files(2, sv[0], sv[1]);
+        rounds++;
+    }
+    r.stop = 1;
+    pthread_barrier_wait(&r.start);
+    for (int i = 0; i < 3; i++) {
+        pthread_join(threads[i], NULL);
+    }
+    if (bad_wrong == 2) {
+        THROW_ERROR("the peer did not read the end of the file in %d ms (round %ld)",
+                    RACE_GIVE_UP_MS, rounds);
+    }
+    if (bad) {
+        THROW_ERROR("the writes reported %zu bytes, but the peer read the end of the file "
+                    "after %zu of them%s (round %ld)", bad_written, bad_got,
+                    bad_wrong ? ", and some of them wrong" : "", rounds);
+    }
+    return 0;
+}
+
 static test_case_t test_cases[] = {
     TEST_CASE(test_shutdown_wakes_recv),
     TEST_CASE(test_shutdown_wakes_poll),
@@ -1420,6 +1582,7 @@ static test_case_t test_cases[] = {
     TEST_CASE(test_shutdown_twice),
     TEST_CASE(test_shutdown_after_peer_close),
     TEST_CASE(test_shutdown_epoll_edge),
+    TEST_CASE(test_shutdown_races_with_write),
 };
 
 int main(int argc, const char *argv[]) {
