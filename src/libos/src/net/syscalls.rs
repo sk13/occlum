@@ -759,8 +759,8 @@ pub fn do_sendmmsg(
     Ok(send_count as isize)
 }
 
-/// Receives messages from a unix socket with one call of recvmsg for each. The call stops early
-/// if the timeout is over, which is checked only after a message, like in Linux. With
+/// Receives messages from a socket, of any kind, with one call of recvmsg for each. The call stops
+/// early if the timeout is over, which is checked only after a message, like in Linux. With
 /// MSG_WAITFORONE, only the first message waits. If an error comes after some messages, the call
 /// returns their number, and the error is lost.
 pub fn do_recvmmsg(
@@ -775,8 +775,13 @@ pub fn do_recvmmsg(
         fd, msgvec_ptr, flags_c
     );
 
-    if !current!().file(fd as FileDesc)?.as_unix_socket().is_ok() {
-        return_errno!(ENOSYS, "recvmmsg is supported for unix sockets only");
+    // Like Linux, fail for a file that is not a socket even if there is nothing to receive
+    let file_ref = current!().file(fd as FileDesc)?;
+    if file_ref.as_host_socket().is_err()
+        && file_ref.as_unix_socket().is_err()
+        && file_ref.as_uring_socket().is_err()
+    {
+        return_errno!(ENOTSOCK, "not a socket");
     }
 
     // The flag of recvmmsg that recvmsg does not have
