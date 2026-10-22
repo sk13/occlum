@@ -20,7 +20,8 @@ impl SetSendBufSizeCmd {
             libc::SOL_SOCKET,
             super::SockOptName::SO_SNDBUF.into(),
             &host_call_buf_size,
-        )
+        )?;
+        Ok(())
     }
 }
 
@@ -35,6 +36,7 @@ impl SetRecvBufSizeCmd {
             libc::SOL_SOCKET,
             super::SockOptName::SO_RCVBUF.into(),
             &host_call_buf_size,
-        )
+        )?;
+        Ok(())
     }
 }

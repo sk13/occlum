@@ -678,9 +678,12 @@ pub fn check_setsockopt(level: i32, optname: i32, optval: &[u8]) -> Result<Optio
 pub fn check_getsockopt(level: i32, optname: i32) -> Result<()> {
     // SCTP_SOCKOPT_CONNECTX3, which connects to addresses in the option value.
     // Fail with ENOPROTOOPT, so that libsctp falls back to SCTP_SOCKOPT_CONNECTX,
-    // whose addresses are checked.
-    if is_enabled() && level == IPPROTO_SCTP && optname == 111 {
-        return_errno!(ENOPROTOOPT, "SCTP_SOCKOPT_CONNECTX3 with a network policy");
+    // whose addresses are checked: with a network policy, because the addresses
+    // are behind a pointer in the option value, and also without one, because the
+    // value is not passed to the host, which would fail it with EINVAL, and
+    // libsctp fails then, too, instead of falling back.
+    if level == IPPROTO_SCTP && optname == 111 {
+        return_errno!(ENOPROTOOPT, "SCTP_SOCKOPT_CONNECTX3 is not supported");
     }
     Ok(())
 }

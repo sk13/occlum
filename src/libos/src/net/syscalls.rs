@@ -356,6 +356,10 @@ pub fn do_setsockopt(
     if let Ok(host_socket) = file_ref.as_host_socket() {
         let mut cmd = new_host_setsockopt_cmd(level, optname, optval)?;
         host_socket.ioctl(cmd.as_mut())?;
+        // Like Linux, give the result of the option back: SCTP_SOCKOPT_CONNECTX, with which
+        // libsctp connects, returns the ID of the association, and libsctp takes 0 for "not
+        // supported"
+        return Ok(set_optval_result(cmd.as_ref()) as isize);
     } else if let Ok(unix_socket) = file_ref.as_unix_socket() {
         unix_socket.setsockopt(level, optname, optval)?;
     } else if let Ok(uring_socket) = file_ref.as_uring_socket() {
@@ -1463,6 +1467,19 @@ fn new_uring_setsockopt_cmd(
             }
         }
         _ => Box::new(SetSockOptRawCmd::new(level, optname, optval)),
+    })
+}
+
+/// The result that the host gave for an option that has been set, which is 0 for all options but
+/// SCTP_SOCKOPT_CONNECTX
+fn set_optval_result(cmd: &dyn IoctlCmd) -> i32 {
+    crate::match_ioctl_cmd_ref!(cmd, {
+        cmd : SetSockOptRawCmd => {
+            cmd.result()
+        },
+        _ => {
+            0
+        }
     })
 }
 

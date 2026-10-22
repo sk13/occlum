@@ -29,7 +29,7 @@ TESTS ?= env empty hello_world malloc mmap file fs_perms getpid spawn sched pipe
 	unix_socket_inodes \
 	stale_eintr unix_socket_names unix_socket_options unix_socket_memory unix_socket_listen \
 	unix_socket_io unix_socket_sndbuf unix_socket_speed unix_socket_events unix_socket_ancillary \
-	host_socket_mmsg host_socket_recvmsg
+	host_socket_mmsg host_socket_recvmsg sctp_connectx
 
 # Benchmarks: need to be compiled and run by bench-% target
 BENCHES := spawn_and_exit_latency pipe_throughput unix_socket_throughput
