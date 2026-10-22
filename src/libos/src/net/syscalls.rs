@@ -1591,13 +1591,17 @@ fn extract_msghdr_mut_from_user<'a>(
 )> {
     let msg_mut = from_user::make_mut_ref(msg_mut_ptr)?;
 
+    // Like Linux, a message without a name has no use for the length, which the call then leaves
+    // alone, and a name that has the length 0 has no room for the address: the call then tells the
+    // length that the address needs, as it does for a name that is too short. A program that gives
+    // the message of a stream socket to recvmsg again relies on this: the first call has set the
+    // length to 0, as there is no address.
     let msg_name = msg_mut.msg_name;
     let msg_namelen = msg_mut.msg_namelen;
-    if msg_name.is_null() ^ (msg_namelen == 0) {
-        return_errno!(EINVAL, "name and namelen should be both null and 0 or not");
-    }
     let name = if msg_name.is_null() {
         None
+    } else if msg_namelen == 0 {
+        Some(&mut [][..])
     } else {
         Some(from_user::make_mut_slice(
             msg_name as *mut u8,
