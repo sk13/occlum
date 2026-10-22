@@ -13,8 +13,12 @@
 
 // ============================================================================
 // recvmsg() on the sockets of the host: the name of the message, which the
-// call needs not to have
+// call needs not to have, and the flags that it takes and gives back
 // ============================================================================
+
+#ifndef MSG_CMSG_CLOEXEC
+#define MSG_CMSG_CLOEXEC 0x40000000
+#endif
 
 #define NAME_FILL   0x55
 
@@ -222,11 +226,62 @@ static int test_length_without_name(void) {
     return 0;
 }
 
+// MSG_CMSG_CLOEXEC is a flag of recvmsg for the descriptors of a control message, which an
+// Internet socket has not: the call takes it like Linux, and does not fail for the flags that
+// the host reports back
+static int test_cmsg_cloexec_flag(void) {
+    struct sockaddr_in rx_addr, tx_addr;
+    int rx = udp_socket(&rx_addr), tx = udp_socket(&tx_addr);
+    if (rx < 0 || tx < 0) {
+        THROW_ERROR("failed to create the sockets");
+    }
+    if (sendto(tx, "hello", 5, 0, (struct sockaddr *)&rx_addr, sizeof(rx_addr)) != 5) {
+        THROW_ERROR("sendto failed");
+    }
+    settle();
+
+    char buf[16];
+    struct iovec iov = { buf, sizeof(buf) };
+    struct msghdr msg;
+    memset(&msg, 0, sizeof(msg));
+    msg.msg_iov = &iov;
+    msg.msg_iovlen = 1;
+    ssize_t n = recvmsg(rx, &msg, MSG_DONTWAIT | MSG_CMSG_CLOEXEC);
+    if (n != 5 || memcmp(buf, "hello", 5) != 0) {
+        THROW_ERROR("UDP: recvmsg returns %zd, errno %d", n, errno);
+    }
+    if (msg.msg_flags & (MSG_TRUNC | MSG_CTRUNC)) {
+        THROW_ERROR("UDP: the message is cut: flags 0x%x", msg.msg_flags);
+    }
+    close(rx);
+    close(tx);
+
+    int client, server;
+    if (tcp_pair(&client, &server) < 0) {
+        THROW_ERROR("failed to create the sockets");
+    }
+    if (write(client, "hello", 5) != 5) {
+        THROW_ERROR("failed to write");
+    }
+    settle();
+    memset(&msg, 0, sizeof(msg));
+    msg.msg_iov = &iov;
+    msg.msg_iovlen = 1;
+    n = recvmsg(server, &msg, MSG_DONTWAIT | MSG_CMSG_CLOEXEC);
+    if (n != 5 || memcmp(buf, "hello", 5) != 0) {
+        THROW_ERROR("TCP: recvmsg returns %zd, errno %d", n, errno);
+    }
+    close(client);
+    close(server);
+    return 0;
+}
+
 static test_case_t test_cases[] = {
     TEST_CASE(test_stream_message_is_reused),
     TEST_CASE(test_stream_messages_are_reused_by_recvmmsg),
     TEST_CASE(test_name_without_room),
     TEST_CASE(test_length_without_name),
+    TEST_CASE(test_cmsg_cloexec_flag),
 };
 
 int main(void) {

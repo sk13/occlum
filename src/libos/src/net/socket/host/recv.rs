@@ -106,7 +106,9 @@ impl HostSocket {
             },
         )?;
 
-        let flags_recvd = MsgFlags::from_bits(msg_flags_recvd).unwrap();
+        // The host may report flags that MsgFlags does not know, e.g., that of the input flag
+        // MSG_CMSG_CLOEXEC, which Linux gives back in msg_flags; they do not matter here
+        let flags_recvd = MsgFlags::from_bits_truncate(msg_flags_recvd);
 
         // Check values returned from outside the enclave
         let bytes_recvd = {
