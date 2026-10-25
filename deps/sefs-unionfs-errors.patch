@@ -1,0 +1,367 @@
+diff --git a/rcore-fs-unionfs/src/lib.rs b/rcore-fs-unionfs/src/lib.rs
+index 8321632..d40e94a 100644
+--- a/rcore-fs-unionfs/src/lib.rs
++++ b/rcore-fs-unionfs/src/lib.rs
+@@ -274,11 +274,17 @@ impl UnionFS {
+ 
+ impl VirtualINode {
+     /// Walk this INode to './name'
+-    fn walk(&mut self, name: &str) {
++    ///
++    /// Only a missing entry makes the path virtual. Any other error of the
++    /// layer (e.g., an I/O error, as the disk is full) is returned: taking it
++    /// for a missing entry makes the name of an existing file look as if no
++    /// layer has it.
++    fn walk(&mut self, name: &str) -> Result<()> {
+         if self.distance == 0 {
+             match self.last_inode.find(name) {
+                 Ok(inode) => self.last_inode = inode,
+-                Err(_) => self.distance = 1,
++                Err(FsError::EntryNotFound) | Err(FsError::NotDir) => self.distance = 1,
++                Err(e) => return Err(e),
+             }
+         } else {
+             match name {
+@@ -287,13 +293,14 @@ impl VirtualINode {
+                 _ => self.distance += 1,
+             }
+         }
++        Ok(())
+     }
+ 
+     /// Find the next INode at './name'
+-    pub fn find(&self, name: &str) -> Self {
++    pub fn find(&self, name: &str) -> Result<Self> {
+         let mut inode = self.clone();
+-        inode.walk(name);
+-        inode
++        inode.walk(name)?;
++        Ok(inode)
+     }
+ 
+     /// Whether this is a real INode
+@@ -357,15 +364,15 @@ impl UnionINodeInner {
+     }
+ 
+     /// Get the merged directory entries, the upper INode must to be a directory
+-    pub fn entries(&mut self) -> &mut BTreeMap<String, Option<Entry>> {
++    pub fn entries(&mut self) -> Result<&mut BTreeMap<String, Option<Entry>>> {
+         let cache = &mut self.cached_children.map;
+         if !self.cached_children.is_merged {
+-            let entries = Self::merge_entries(&self.inners, self.opaque).unwrap();
++            let entries = Self::merge_entries(&self.inners, self.opaque)?;
+             //debug!("{:?} cached dirents: {:?}", self.path, entries.keys());
+             *cache = entries;
+             self.cached_children.is_merged = true;
+         }
+-        cache
++        Ok(cache)
+     }
+ 
+     /// Determine the upper INode
+@@ -537,15 +544,18 @@ impl UnionINode {
+         name: &str,
+         id: Option<usize>,
+         ext: Option<Extension>,
+-    ) -> Arc<UnionINode> {
++    ) -> Result<Arc<UnionINode>> {
+         let new_inode = {
+-            let inodes: Vec<_> = parent_guard.inners.iter().map(|x| x.find(name)).collect();
++            let inodes = parent_guard
++                .inners
++                .iter()
++                .map(|x| x.find(name))
++                .collect::<Result<Vec<_>>>()?;
+             let mode = inodes
+                 .iter()
+                 .find_map(|v| v.as_real())
+-                .unwrap()
+-                .metadata()
+-                .unwrap()
++                .ok_or(FsError::EntryNotFound)?
++                .metadata()?
+                 .mode;
+             let path_with_mode = parent_guard.path_with_mode.with_next(name, mode);
+             let opaque = {
+@@ -560,11 +570,11 @@ impl UnionINode {
+             let fs = fs.upgrade().unwrap();
+             fs.create_inode(inodes, path_with_mode, opaque, id, ext)
+         };
+-        if new_inode.metadata().unwrap().type_ == FileType::Dir {
++        if new_inode.metadata()?.type_ == FileType::Dir {
+             new_inode.inner.write().this = Arc::downgrade(&new_inode);
+             new_inode.inner.write().parent = Arc::downgrade(&parent_guard.this.upgrade().unwrap());
+         }
+-        new_inode
++        Ok(new_inode)
+     }
+ }
+ 
+@@ -635,7 +645,7 @@ impl INode for UnionINode {
+             return Err(FsError::EntryExist);
+         }
+         let mut inner = self.inner.write();
+-        if inner.entries().contains_key(name) {
++        if inner.entries()?.contains_key(name) {
+             return Err(FsError::EntryExist);
+         }
+         let container_inode = inner.container_inode()?;
+@@ -662,9 +672,9 @@ impl INode for UnionINode {
+                 }
+             }
+         }
+-        let new_inode = Self::new_inode(&self.fs, &inner, name, None, None);
++        let new_inode = Self::new_inode(&self.fs, &inner, name, None, None)?;
+         inner
+-            .entries()
++            .entries()?
+             .insert(String::from(name), Some(Entry::new(&new_inode)));
+         Ok(new_inode)
+     }
+@@ -679,7 +689,7 @@ impl INode for UnionINode {
+         if name.is_self() || name.is_parent() {
+             return Err(FsError::EntryExist);
+         }
+-        if self.inner.write().entries().contains_key(name) {
++        if self.inner.write().entries()?.contains_key(name) {
+             return Err(FsError::EntryExist);
+         }
+         let child = other
+@@ -693,7 +703,7 @@ impl INode for UnionINode {
+         let child_inode = child.inner.write().container_inode()?;
+         let mut inner = self.inner.write();
+         // when we got the lock, the name may have been created by another thread
+-        if inner.entries().contains_key(name) {
++        if inner.entries()?.contains_key(name) {
+             return Err(FsError::EntryExist);
+         }
+         let this = inner.container_inode()?;
+@@ -710,7 +720,7 @@ impl INode for UnionINode {
+         // add `name` to entry cache, with the id of the file: a hard link has
+         // the inode number of the file
+         inner
+-            .entries()
++            .entries()?
+             .insert(String::from(name), Some(Entry::File(Weak::new(), child.id)));
+         Ok(())
+     }
+@@ -729,7 +739,7 @@ impl INode for UnionINode {
+         }
+         let mut inner = self.inner.write();
+         // when we got the lock, the entry may have been removed by another thread
+-        if !inner.entries().contains_key(name) {
++        if !inner.entries()?.contains_key(name) {
+             return Err(FsError::EntryNotFound);
+         }
+         // if file is in container, remove directly
+@@ -762,7 +772,7 @@ impl INode for UnionINode {
+             dir_inode.create(&name.whiteout(), FileType::File, 0o777)?;
+         }
+         // remove `name` from entry cache
+-        inner.entries().remove(name);
++        inner.entries()?.remove(name);
+         Ok(())
+     }
+ 
+@@ -831,7 +841,7 @@ impl INode for UnionINode {
+         // self and target are the same INode
+         if self.metadata()?.inode == target.metadata()?.inode {
+             let mut self_inner = self.inner.write();
+-            let self_inode = self_inner.container_inode().unwrap();
++            let self_inode = self_inner.container_inode()?;
+             self_inode.move_(old_name, &self_inode, new_name)?;
+             if old.inner.read().has_image_inode() {
+                 match self_inode.create(&old_name.whiteout(), FileType::File, 0o777) {
+@@ -883,10 +893,10 @@ impl INode for UnionINode {
+                 new_name,
+                 Some(old.id),
+                 Some(old.ext.clone()),
+-            );
+-            self_inner.entries().remove(old_name);
++            )?;
++            self_inner.entries()?.remove(old_name);
+             self_inner
+-                .entries()
++                .entries()?
+                 .insert(String::from(new_name), Some(Entry::new(&new_inode)));
+         } else {
+             // self and target are different INodes
+@@ -901,7 +911,7 @@ impl INode for UnionINode {
+                     (self_inner, target_inner)
+                 }
+             };
+-            let self_inode = self_inner.container_inode().unwrap();
++            let self_inode = self_inner.container_inode()?;
+             let target_inode = target_inner.container_inode()?;
+             self_inode.move_(old_name, &target_inode, new_name)?;
+             if old.inner.read().has_image_inode() {
+@@ -952,10 +962,10 @@ impl INode for UnionINode {
+                 new_name,
+                 Some(old.id),
+                 Some(old.ext.clone()),
+-            );
+-            self_inner.entries().remove(old_name);
++            )?;
++            self_inner.entries()?.remove(old_name);
+             target_inner
+-                .entries()
++                .entries()?
+                 .insert(String::from(new_name), Some(Entry::new(&new_inode)));
+         }
+         Ok(())
+@@ -974,7 +984,7 @@ impl INode for UnionINode {
+             return Ok(inner.parent.upgrade().unwrap());
+         }
+ 
+-        let entry_op = inner.entries().get(name);
++        let entry_op = inner.entries()?.get(name);
+         if entry_op.is_none() {
+             return Err(FsError::EntryNotFound);
+         }
+@@ -986,9 +996,9 @@ impl INode for UnionINode {
+         } else {
+             None
+         };
+-        let new_inode = Self::new_inode(&self.fs, &inner, name, reused_id, None);
++        let new_inode = Self::new_inode(&self.fs, &inner, name, reused_id, None)?;
+         inner
+-            .entries()
++            .entries()?
+             .insert(String::from(name), Some(Entry::new(&new_inode)));
+         Ok(new_inode)
+     }
+@@ -1002,7 +1012,7 @@ impl INode for UnionINode {
+             1 => Ok(String::from("..")),
+             i => {
+                 let mut inner = self.inner.write();
+-                let entries = inner.entries();
++                let entries = inner.entries()?;
+                 if let Some(s) = entries.keys().nth(i - 2) {
+                     Ok(s.to_string())
+                 } else {
+@@ -1033,13 +1043,13 @@ impl INode for UnionINode {
+                 let mut inner = self.inner.write();
+                 let start_offset = *offset;
+                 let keys: Vec<_> = inner
+-                    .entries()
++                    .entries()?
+                     .keys()
+                     .skip(start_offset - 2)
+                     .cloned()
+                     .collect();
+                 for name in keys.iter() {
+-                    let entry_op = inner.entries().get(name).unwrap();
++                    let entry_op = inner.entries()?.get(name).unwrap();
+                     let inode = {
+                         let (inode_op, reused_id) = if let Some(entry) = entry_op {
+                             (entry.as_inode(), entry.id())
+@@ -1050,9 +1060,9 @@ impl INode for UnionINode {
+                             Some(inode) => inode,
+                             None => {
+                                 let new_inode =
+-                                    Self::new_inode(&self.fs, &inner, name, reused_id, None);
++                                    Self::new_inode(&self.fs, &inner, name, reused_id, None)?;
+                                 inner
+-                                    .entries()
++                                    .entries()?
+                                     .insert(String::from(name), Some(Entry::new(&new_inode)));
+                                 new_inode
+                             }
+diff --git a/rcore-fs-unionfs/src/tests.rs b/rcore-fs-unionfs/src/tests.rs
+index 4348f2d..eb44e4d 100644
+--- a/rcore-fs-unionfs/src/tests.rs
++++ b/rcore-fs-unionfs/src/tests.rs
+@@ -276,6 +276,93 @@ fn move_image() -> Result<()> {
+     Ok(())
+ }
+ 
++/// The root of a layer whose lookup of one name fails with an I/O error, as the
++/// lookup of an inode does when the disk is full
++struct FailRoot {
++    inner: Arc<dyn INode>,
++    fail_name: &'static str,
++}
++
++impl INode for FailRoot {
++    fn read_at(&self, offset: usize, buf: &mut [u8]) -> Result<usize> {
++        self.inner.read_at(offset, buf)
++    }
++    fn write_at(&self, offset: usize, buf: &[u8]) -> Result<usize> {
++        self.inner.write_at(offset, buf)
++    }
++    fn metadata(&self) -> Result<Metadata> {
++        self.inner.metadata()
++    }
++    fn create(&self, name: &str, type_: FileType, mode: u16) -> Result<Arc<dyn INode>> {
++        self.inner.create(name, type_, mode)
++    }
++    fn unlink(&self, name: &str) -> Result<()> {
++        self.inner.unlink(name)
++    }
++    fn find(&self, name: &str) -> Result<Arc<dyn INode>> {
++        if name == self.fail_name {
++            return Err(FsError::DeviceError(5));
++        }
++        self.inner.find(name)
++    }
++    fn get_entry(&self, id: usize) -> Result<String> {
++        self.inner.get_entry(id)
++    }
++    fn iterate_entries(&self, offset: usize, visitor: &mut dyn DirentVisitor) -> Result<usize> {
++        self.inner.iterate_entries(offset, visitor)
++    }
++    fn fs(&self) -> Arc<dyn FileSystem> {
++        self.inner.fs()
++    }
++    fn as_any_ref(&self) -> &dyn core::any::Any {
++        self
++    }
++}
++
++struct FailFS(Arc<FailRoot>);
++
++impl FileSystem for FailFS {
++    fn sync(&self) -> Result<()> {
++        Ok(())
++    }
++    fn root_inode(&self) -> Arc<dyn INode> {
++        self.0.clone()
++    }
++    fn info(&self) -> FsInfo {
++        Default::default()
++    }
++}
++
++/// An error of a layer is an error of the lookup, not a missing file: the name
++/// is listed by the layer, so no layer without the name must be assumed
++#[test]
++fn error_of_layer() -> Result<()> {
++    let container_fs = RamFS::new();
++    let root = container_fs.root_inode();
++    root.create("file1", FileType::File, MODE)?;
++    root.create("file2", FileType::File, MODE)?;
++    let layer = Arc::new(FailFS(Arc::new(FailRoot {
++        inner: root,
++        fail_name: "file2",
++    })));
++    let unionfs = UnionFS::new(vec![layer])?;
++    let root = unionfs.root_inode();
++
++    assert!(root.lookup("file1").is_ok());
++    assert_eq!(root.lookup("file2").err(), Some(FsError::DeviceError(5)));
++    // reading the directory (getdents) returns the entries before the name and
++    // fails at the name instead of panicking
++    let mut names: Vec<String> = Vec::new();
++    let offset = root.iterate_entries(0, &mut names)?;
++    assert_eq!(names, [".", "..", "file1"]);
++    assert_eq!(
++        root.iterate_entries(offset, &mut names).err(),
++        Some(FsError::DeviceError(5))
++    );
++    assert!(root.lookup("file3").is_not_found());
++    Ok(())
++}
++
+ const MODE: u16 = 0o777;
+ 
+ trait IsNotFound {

@@ -78,6 +78,7 @@ init-submodule:
 	cd deps/sefs && git apply ../sefs-cli.patch >/dev/null 2>&1 || git apply ../sefs-cli.patch -R --check
 	cd deps/sefs && git apply ../sefs.patch >/dev/null 2>&1 || git apply ../sefs.patch -R --check
 	cd deps/sefs && git apply ../sefs-unionfs.patch >/dev/null 2>&1 || git apply ../sefs-unionfs.patch -R --check
+	cd deps/sefs && git apply ../sefs-unionfs-errors.patch >/dev/null 2>&1 || git apply ../sefs-unionfs-errors.patch -R --check
 	cd deps/rust-sgx-sdk && git apply ../rust-sgx-sdk.patch >/dev/null 2>&1 || git apply ../rust-sgx-sdk.patch -R --check
 	cd deps/ext2-rs && git apply ../ext2-rs.patch >/dev/null 2>&1 || git apply ../ext2-rs.patch -R --check
 
