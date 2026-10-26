@@ -73,6 +73,11 @@ mod if_std {
 
     impl ToErrno for std::io::Error {
         fn errno(&self) -> Errno {
+            // The kind does not tell a full disk from other errors, and the
+            // programs need to
+            if self.raw_os_error() == Some(Errno::ENOSPC as i32) {
+                return Errno::ENOSPC;
+            }
             Errno::from(self.kind())
         }
     }
@@ -109,10 +114,11 @@ mod if_occlum {
                 FsError::EntryExist => EEXIST,
                 FsError::NotSameFs => EXDEV,
                 FsError::InvalidParam => EINVAL,
-                FsError::NoDeviceSpace => ENOMEM,
+                FsError::NoDeviceSpace => ENOSPC,
                 FsError::DirRemoved => ENOENT,
                 FsError::DirNotEmpty => ENOTEMPTY,
                 FsError::WrongFs => EINVAL,
+                FsError::DeviceError(err) if err == ENOSPC as i32 => ENOSPC,
                 FsError::DeviceError(_err) => EIO,
                 FsError::SymLoop => ELOOP,
                 FsError::NoDevice => ENXIO,
