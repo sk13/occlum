@@ -1,0 +1,478 @@
+diff --git a/rcore-fs-sefs/src/lib.rs b/rcore-fs-sefs/src/lib.rs
+index f250d29..e7256e2 100644
+--- a/rcore-fs-sefs/src/lib.rs
++++ b/rcore-fs-sefs/src/lib.rs
+@@ -153,11 +153,21 @@ impl INodeImpl {
+         if id != total - 1 {
+             self.file.write_direntry(id, &last_direntry)?;
+         }
+-        self.file.set_len((total - 1) * DIRENT_SIZE)?;
+         self.disk_inode.write().blocks -= 1;
++        // The size of the file is cosmetic, the number of entries counts: the
++        // disk may be full, and then the entry is gone all the same
++        if let Err(e) = self.file.set_len((total - 1) * DIRENT_SIZE) {
++            log::warn!("failed to shrink the directory file of the SEFS: {:?}", e);
++        }
+         Ok(())
+     }
+ 
++    /// Forget the entry that `dirent_append` has appended last. Nothing is
++    /// written, so that this works when the disk is full.
++    fn dirent_forget_last(&self) {
++        self.disk_inode.write().blocks -= 1;
++    }
++
+     /// Remove an INode entry from Dir entries, and decrease nlinks if success
+     fn dirent_inode_remove(&self, inode: Arc<INodeImpl>, entry_id: usize) -> vfs::Result<()> {
+         self.dirent_remove(entry_id)?;
+@@ -223,11 +233,11 @@ impl INodeImpl {
+         } else {
+             (range.start, range.len())
+         };
+-        self.file.write_zeros_at(offset, len).unwrap();
++        self.file.write_zeros_at(offset, len)?;
+ 
+         // May update file size
+         if !keep_size && range.end > file_size {
+-            self.file.set_len(range.end).unwrap();
++            self.file.set_len(range.end)?;
+             inode.size = range.end as u64;
+         }
+         Ok(())
+@@ -262,10 +272,10 @@ impl INodeImpl {
+         self.copy_range_to(&src_range, dst_offset)?;
+ 
+         // Insert zeros
+-        self.file.write_zeros_at(range.start, range.len()).unwrap();
++        self.file.write_zeros_at(range.start, range.len())?;
+ 
+         // Update file size
+-        self.file.set_len(new_file_size).unwrap();
++        self.file.set_len(new_file_size)?;
+         inode.size = new_file_size as u64;
+         Ok(())
+     }
+@@ -294,7 +304,7 @@ impl INodeImpl {
+ 
+         // Update file size
+         let new_file_size = file_size - range.len();
+-        self.file.set_len(new_file_size).unwrap();
++        self.file.set_len(new_file_size)?;
+         inode.size = new_file_size as u64;
+         Ok(())
+     }
+@@ -325,11 +335,9 @@ impl INodeImpl {
+         while remaining_size > 0 {
+             let len = remaining_size.min(BLKSIZE);
+             self.file
+-                .read_exact_at(&mut buf[..len], src_offset as usize)
+-                .unwrap();
++                .read_exact_at(&mut buf[..len], src_offset as usize)?;
+             self.file
+-                .write_all_at(&buf[..len], dst_offset as usize)
+-                .unwrap();
++                .write_all_at(&buf[..len], dst_offset as usize)?;
+             remaining_size -= len;
+             src_offset += offset_step;
+             dst_offset += offset_step;
+@@ -453,9 +461,7 @@ impl vfs::INode for INodeImpl {
+         // a huge amount of data.
+         //
+         // TODO: The robustness issue:
+-        // The current implementation will panic instead of reporting the
+-        // not-enough-space error if the underlying disk does not have enough space.
+-        // Also, for the sub-command of FallocateMode::Allocate with keep_size = true,
++        // For the sub-command of FallocateMode::Allocate with keep_size = true,
+         // the success of fallocate does not really mean future writes that fall
+         // inside the allocated range are guaranteed to succeed.
+         match mode {
+@@ -469,7 +475,7 @@ impl vfs::INode for INodeImpl {
+                     let mut inode = self.disk_inode.write();
+                     let file_size = inode.size as usize;
+                     if range.end > file_size {
+-                        self.file.set_len(range.end).unwrap();
++                        self.file.set_len(range.end)?;
+                         inode.size = range.end as u64;
+                     }
+                 }
+@@ -537,11 +543,25 @@ impl vfs::INode for INodeImpl {
+             self.nlinks_inc(); //for ..
+         }
+         // Update metadata file to make the INode valid
+-        self.fs.sync_metadata()?;
+-        inode.sync_all()?;
+         // Sync the dirINode's info into file
+         // MUST sync the INode's info first, or the entry maybe invalid
+-        self.sync_all()?;
++        let committed = (|| -> vfs::Result<()> {
++            self.fs.sync_metadata()?;
++            inode.sync_all()?;
++            self.sync_all()
++        })();
++        if let Err(e) = committed {
++            // E.g., the disk is full. Undo the creation in memory (writing may
++            // not be possible), so that no entry of the directory points to an
++            // INode that is not valid: the INode has no link, so that it is
++            // removed when it is dropped
++            self.dirent_forget_last();
++            inode.disk_inode.write().nlinks = 0;
++            if type_ == FileType::Dir {
++                self.nlinks_dec(); //for ..
++            }
++            return Err(e);
++        }
+ 
+         Ok(inode)
+     }
+@@ -612,9 +632,17 @@ impl vfs::INode for INodeImpl {
+         self.dirent_append(&entry)?;
+         // Increase nlinks
+         child.nlinks_inc();
+-        child.sync_metadata()?;
+-        // Now the INode info is valid, we can safely sync the dirINode's info
+-        self.sync_all()?;
++        let committed = (|| -> vfs::Result<()> {
++            child.sync_metadata()?;
++            // Now the INode info is valid, we can safely sync the dirINode's info
++            self.sync_all()
++        })();
++        if let Err(e) = committed {
++            // E.g., the disk is full: undo the link in memory
++            self.dirent_forget_last();
++            child.nlinks_dec();
++            return Err(e);
++        }
+         Ok(())
+     }
+ 
+@@ -810,21 +838,28 @@ impl Drop for INodeImpl {
+         self.update_mac()
+             .expect("failed to update mac when dropping the SEFS Inode");
+ 
+-        self.sync_all()
+-            .expect("failed to sync when dropping the SEFS Inode");
+-        if self.disk_inode.read().nlinks == 0 {
++        // A drop cannot fail: when the disk is full, writing the data and the
++        // metadata fails, and all that can be done is to say so. The data of an
++        // INode that is removed (no link is left) need not be written at all.
++        let removed = self.disk_inode.read().nlinks == 0;
++        if !removed {
++            if let Err(e) = self.sync_all() {
++                log::error!("failed to sync the SEFS INode {} when dropping it: {:?}", self.id, e);
++                // The changes are lost: the guard of Dirty must not abort as well
++                self.disk_inode.write().sync();
++            }
++        } else {
+             // Leave the inode info exists in metadata file, following new inode will override it
+             self.disk_inode.write().sync();
+             self.fs.free_block(self.id);
+-            self.fs
+-                .sync_metadata()
+-                .expect("failed to update metadata file when freeing the block");
++            if let Err(e) = self.fs.sync_metadata() {
++                log::error!("failed to update the metadata file when freeing the block {}: {:?}", self.id, e);
++            }
+             let disk_filename = &self.disk_inode.read().disk_filename;
+             let filename = disk_filename.to_string();
+-            self.fs
+-                .device
+-                .remove(filename.as_str())
+-                .expect("failed to remove file");
++            if let Err(e) = self.fs.device.remove(filename.as_str()) {
++                log::error!("failed to remove the file {} of the SEFS INode {}: {:?}", filename, self.id, e);
++            }
+         }
+     }
+ }
+@@ -996,20 +1031,26 @@ impl SEFS {
+         let id = free_map.alloc().or_else(|| {
+             // Allocate a new group
+             let new_group_id = super_block.groups as usize;
++            // Extend the meta file first: when the disk is full, nothing has changed
++            if let Err(e) = self
++                .meta_file
++                .set_len((new_group_id + 1) * BLKBITS * BLKSIZE)
++            {
++                log::error!("failed to extend the metadata file of the SEFS: {:?}", e);
++                return None;
++            }
+             super_block.groups += 1;
+             super_block.blocks += BLKBITS as u32;
+             super_block.unused_blocks += BLKBITS as u32 - 1;
+-            self.meta_file
+-                .set_len(super_block.groups as usize * BLKBITS * BLKSIZE)
+-                .expect("failed to extend meta file");
+             free_map.extend(core::iter::repeat(true).take(BLKBITS));
+             // Set the bit to false to avoid to allocate it as INode ID
+             free_map.set(Self::get_freemap_block_id_of_group(new_group_id), false);
+             // Allocate block id again
+             free_map.alloc()
+         });
+-        assert!(id.is_some(), "allocate block should always success");
+-        super_block.unused_blocks -= 1;
++        if id.is_some() {
++            super_block.unused_blocks -= 1;
++        }
+         id
+     }
+ 
+@@ -1165,7 +1206,12 @@ impl vfs::FileSystem for SEFS {
+ impl Drop for SEFS {
+     /// Auto sync when drop
+     fn drop(&mut self) {
+-        self.sync().expect("Failed to sync when dropping the SEFS");
++        if let Err(e) = self.sync() {
++            log::error!("failed to sync the SEFS when dropping it: {:?}", e);
++            // The changes are lost: the guard of Dirty must not abort as well
++            self.super_block.write().sync();
++            self.free_map.write().sync();
++        }
+     }
+ }
+ 
+@@ -1207,3 +1253,6 @@ impl From<FileType> for vfs::FileType {
+         }
+     }
+ }
++
++#[cfg(test)]
++mod tests;
+diff --git a/rcore-fs-sefs/src/tests.rs b/rcore-fs-sefs/src/tests.rs
+new file mode 100644
+index 0000000..0c3ad51
+--- /dev/null
++++ b/rcore-fs-sefs/src/tests.rs
+@@ -0,0 +1,233 @@
++extern crate std;
++
++use super::dev::std_impl::{StdStorage, StdUuidProvider};
++use super::dev::{File, SefsMac, Storage};
++use super::SEFS;
++use alloc::boxed::Box;
++use alloc::format;
++use alloc::string::String;
++use alloc::sync::Arc;
++use alloc::vec::Vec;
++use core::sync::atomic::{AtomicIsize, Ordering};
++use rcore_fs::dev::std_impl::StdTimeProvider;
++use rcore_fs::dev::{DevError, DevResult};
++use rcore_fs::vfs::*;
++
++const ENOSPC: i32 = 28;
++
++/// A storage whose disk can be full: writing needs `budget` bytes, a new file
++/// needs a positive budget
++struct LimitedStorage {
++    inner: StdStorage,
++    budget: Arc<AtomicIsize>,
++}
++
++struct LimitedFile {
++    inner: Box<dyn File>,
++    budget: Arc<AtomicIsize>,
++}
++
++impl Storage for LimitedStorage {
++    fn open(&self, file_id: &str) -> DevResult<Box<dyn File>> {
++        Ok(Box::new(LimitedFile {
++            inner: self.inner.open(file_id)?,
++            budget: self.budget.clone(),
++        }))
++    }
++    fn create(&self, file_id: &str) -> DevResult<Box<dyn File>> {
++        if self.budget.load(Ordering::SeqCst) <= 0 {
++            return Err(DevError(ENOSPC));
++        }
++        Ok(Box::new(LimitedFile {
++            inner: self.inner.create(file_id)?,
++            budget: self.budget.clone(),
++        }))
++    }
++    fn remove(&self, file_id: &str) -> DevResult<()> {
++        self.inner.remove(file_id)
++    }
++    fn clear(&self) -> DevResult<()> {
++        self.inner.clear()
++    }
++}
++
++impl File for LimitedFile {
++    fn read_at(&self, buf: &mut [u8], offset: usize) -> DevResult<usize> {
++        self.inner.read_at(buf, offset)
++    }
++    fn write_at(&self, buf: &[u8], offset: usize) -> DevResult<usize> {
++        let left = self.budget.fetch_sub(buf.len() as isize, Ordering::SeqCst);
++        if left < buf.len() as isize {
++            return Err(DevError(ENOSPC));
++        }
++        self.inner.write_at(buf, offset)
++    }
++    fn set_len(&self, len: usize) -> DevResult<()> {
++        if self.budget.load(Ordering::SeqCst) <= 0 {
++            return Err(DevError(ENOSPC));
++        }
++        self.inner.set_len(len)
++    }
++    fn flush(&self) -> DevResult<()> {
++        self.inner.flush()
++    }
++    fn get_file_mac(&self) -> DevResult<SefsMac> {
++        self.inner.get_file_mac()
++    }
++}
++
++fn create_fs(name: &str) -> (Arc<SEFS>, Arc<AtomicIsize>) {
++    let dir = std::env::temp_dir().join(format!("sefs-test-{}-{}", name, std::process::id()));
++    let _ = std::fs::remove_dir_all(&dir);
++    std::fs::create_dir_all(&dir).unwrap();
++    let budget = Arc::new(AtomicIsize::new(isize::MAX / 2));
++    let device = LimitedStorage {
++        inner: StdStorage::new(&dir),
++        budget: budget.clone(),
++    };
++    let fs = SEFS::create(Box::new(device), &StdTimeProvider, &StdUuidProvider).unwrap();
++    (fs, budget)
++}
++
++fn is_no_space(e: &FsError) -> bool {
++    *e == FsError::NoDeviceSpace || *e == FsError::DeviceError(ENOSPC)
++}
++
++/// Every name of the directory that is listed can be looked up, and none is
++/// listed twice
++fn check_dir(dir: &Arc<dyn INode>) -> Vec<String> {
++    let names = dir.list().unwrap();
++    for name in names.iter() {
++        dir.find(name)
++            .unwrap_or_else(|e| panic!("{} is listed, but not found: {:?}", name, e));
++    }
++    let mut sorted = names.clone();
++    sorted.sort();
++    sorted.dedup();
++    assert_eq!(sorted.len(), names.len(), "a name is listed twice: {:?}", names);
++    names
++}
++
++/// A full disk makes creating files fail with an error, which does not leave
++/// a name of a file that is not valid, and which does not panic when the INode
++/// of the failed file is dropped. After the space is back, all works
++#[test]
++fn create_with_full_disk() {
++    let (fs, budget) = create_fs("create");
++    let root = fs.root_inode();
++    root.create("keep", FileType::File, 0o644)
++        .unwrap()
++        .write_at(0, b"kept")
++        .unwrap();
++
++    budget.store(30_000, Ordering::SeqCst);
++    let mut failed = false;
++    let mut created = 0;
++    for i in 0..1000 {
++        match root.create(&format!("f{}", i), FileType::File, 0o644) {
++            Ok(file) => {
++                if let Err(e) = file.write_at(0, &[1u8; 3000]) {
++                    assert!(is_no_space(&e), "{:?}", e);
++                    failed = true;
++                    break;
++                }
++                created += 1;
++            }
++            Err(e) => {
++                assert!(is_no_space(&e), "{:?}", e);
++                failed = true;
++                break;
++            }
++        }
++    }
++    assert!(failed, "the disk was never full");
++    assert!(created > 0);
++    // the entries before the failure are valid
++    let names = check_dir(&root);
++    assert!(names.contains(&String::from("keep")));
++    assert!(names.contains(&String::from("f0")));
++
++    // the space is back: the FS is usable and consistent
++    budget.store(isize::MAX / 2, Ordering::SeqCst);
++    root.create("after", FileType::File, 0o644).unwrap();
++    let names = check_dir(&root);
++    assert!(names.contains(&String::from("after")));
++    assert_eq!(root.lookup("keep").unwrap().read_as_vec().unwrap(), b"kept");
++    fs.sync().unwrap();
++}
++
++/// The same for directories, which also change the link count of their parent
++#[test]
++fn mkdir_with_full_disk() {
++    let (fs, budget) = create_fs("mkdir");
++    let root = fs.root_inode();
++    let nlinks_before = root.metadata().unwrap().nlinks;
++
++    budget.store(20_000, Ordering::SeqCst);
++    let mut created = 0;
++    let mut failed = false;
++    for i in 0..1000 {
++        match root.create(&format!("d{}", i), FileType::Dir, 0o755) {
++            Ok(_) => created += 1,
++            Err(e) => {
++                assert!(is_no_space(&e), "{:?}", e);
++                failed = true;
++                break;
++            }
++        }
++    }
++    assert!(failed, "the disk was never full");
++    check_dir(&root);
++    // ".." of every directory that exists is counted, not of the failed one
++    assert_eq!(root.metadata().unwrap().nlinks, nlinks_before + created);
++
++    budget.store(isize::MAX / 2, Ordering::SeqCst);
++    root.create("d_after", FileType::Dir, 0o755).unwrap();
++    assert_eq!(root.metadata().unwrap().nlinks, nlinks_before + created + 1);
++    check_dir(&root);
++    fs.sync().unwrap();
++}
++
++/// Creating a hard link with a full disk fails and leaves no entry behind, also
++/// when the entry could be written (the disk has room for it, but not for the
++/// metadata of the file that follows)
++#[test]
++fn link_with_full_disk() {
++    let (fs, budget) = create_fs("link");
++    let root = fs.root_inode();
++    let file = root.create("file", FileType::File, 0o644).unwrap();
++    file.write_at(0, b"data").unwrap();
++
++    for i in 0..5 {
++        budget.store(300, Ordering::SeqCst);
++        let e = root.link(&format!("link{}", i), &file).unwrap_err();
++        assert!(is_no_space(&e), "{:?}", e);
++    }
++    let names = check_dir(&root);
++    assert!(!names.iter().any(|n| n.starts_with("link")), "{:?}", names);
++    assert_eq!(file.metadata().unwrap().nlinks, 1);
++
++    budget.store(isize::MAX / 2, Ordering::SeqCst);
++    root.link("link_after", &file).unwrap();
++    assert_eq!(file.metadata().unwrap().nlinks, 2);
++    check_dir(&root);
++    fs.sync().unwrap();
++}
++
++/// Dropping the INode of a removed file does not need the disk to have space
++#[test]
++fn drop_with_full_disk() {
++    let (fs, budget) = create_fs("drop");
++    let root = fs.root_inode();
++    {
++        let file = root.create("file", FileType::File, 0o644).unwrap();
++        file.write_at(0, &[7u8; 5000]).unwrap();
++        root.unlink("file").unwrap();
++        budget.store(0, Ordering::SeqCst);
++        // `file` is dropped here, while the disk is full
++    }
++    // and so is the SEFS, when the last reference to it is gone
++    budget.store(0, Ordering::SeqCst);
++    drop(root);
++    drop(fs);
++}

@@ -123,7 +123,7 @@ impl Storage for SgxStorage {
 
             // Check the MAC of the root file against the given root MAC of the storage
             if file_id == "metadata" && self.protect_integrity() {
-                let root_file_mac = file.get_mac().expect("Failed to get mac");
+                let root_file_mac = file.get_mac()?;
                 if root_file_mac != self.encrypt_mode.root_mac().unwrap() {
                     error!(
                         "MAC validation for metadata file failed: expected = {:#?}, found = {:?}",
@@ -269,6 +269,9 @@ impl File for LockedFile {
                 while remaining_len != 0 {
                     let l = remaining_len.min(0x1000);
                     let len = file.write(&ZEROS[..l])?;
+                    if len == 0 {
+                        return_errno!(ENOSPC, "failed to pad the file with null bytes");
+                    }
                     remaining_len -= len;
                 }
             }
@@ -297,11 +300,14 @@ impl File for LockedFile {
             static ZEROS: [u8; 0x1000] = [0; 0x1000];
             while reset_len != 0 {
                 let l = reset_len.min(0x1000);
-                // Probably there's not enough space on disk, let's panic here
-                let written_len = file.write(&ZEROS[..l]).unwrap_or_else(|e| {
+                // Probably there's not enough space on disk: report the error
+                let written_len = file.write(&ZEROS[..l]).map_err(|e| {
                     error!("failed to set null bytes: {}", e);
-                    panic!();
-                });
+                    e
+                })?;
+                if written_len == 0 {
+                    return_errno!(ENOSPC, "failed to set null bytes");
+                }
                 reset_len -= written_len;
             }
             Ok(())
@@ -317,7 +323,9 @@ impl File for LockedFile {
     }
 
     fn get_file_mac(&self) -> DevResult<SefsMac> {
-        let file = self.0.lock().unwrap();
-        Ok(SefsMac(file.get_mac().unwrap()))
+        convert_result!({
+            let file = self.0.lock().unwrap();
+            Ok(SefsMac(file.get_mac()?))
+        })
     }
 }
