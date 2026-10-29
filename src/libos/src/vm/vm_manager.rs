@@ -430,6 +430,54 @@ impl VMManager {
         Ok(())
     }
 
+    /// madvise(MADV_DONTNEED): the private anonymous memory of the range reads as zeros afterwards, as on Linux
+    /// (a runtime like Go's gives memory back this way and takes the pages again for zeroed ones).
+    pub fn madvise_dontneed(&self, addr: usize, size: usize) -> Result<()> {
+        if addr % PAGE_SIZE != 0 {
+            return_errno!(EINVAL, "the address is not page aligned");
+        }
+        let size = align_up(size, PAGE_SIZE);
+        if size == 0 {
+            return Ok(());
+        }
+        let range = VMRange::new_with_size(addr, size)?;
+        let chunks: Vec<ChunkRef> = {
+            let current = current!();
+            let process_mem_chunks = current.vm().mem_chunks().read().unwrap();
+            process_mem_chunks
+                .iter()
+                .filter(|chunk| chunk.range().overlap_with(&range))
+                .cloned()
+                .collect()
+        };
+        let mut to_zero: Vec<(usize, usize)> = Vec::new();
+        for chunk in chunks {
+            match chunk.internal() {
+                ChunkType::MultiVMA(manager) => {
+                    manager
+                        .lock()
+                        .unwrap()
+                        .chunk_manager_mut()
+                        .dontneed_ranges(&range, &mut to_zero);
+                }
+                ChunkType::SingleVMA(vma) => {
+                    let vma = vma.lock().unwrap();
+                    if let Some(part) = vma.intersect(&range) {
+                        if part.needs_zeroing_for_dontneed() {
+                            to_zero.push((part.start(), part.size()));
+                        }
+                    }
+                }
+            }
+        }
+        // No lock is held while the memory is written: a page that is not committed yet is committed by the page
+        // fault handler, which takes the locks of the chunks itself.
+        for (start, len) in to_zero {
+            unsafe { std::ptr::write_bytes(start as *mut u8, 0, len) };
+        }
+        Ok(())
+    }
+
     pub fn msync_by_file(&self, sync_file: &FileRef) {
         let current = current!();
         let process_mem_chunks = current.vm().mem_chunks().read().unwrap();

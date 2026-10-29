@@ -172,8 +172,14 @@ pub fn do_msync(addr: usize, size: usize, flags: MSyncFlags) -> Result<()> {
 }
 
 pub fn do_madvice(addr: usize, length: usize, advice: MadviceFlags) -> Result<()> {
-    warn!("madvice is not supported. madvice flags:{:?}", advice);
-    Ok(())
+    match advice {
+        // The memory of a private anonymous mapping reads as zeros afterwards
+        MadviceFlags::MADV_DONTNEED => current!().vm().madvise_dontneed(addr, length),
+        _ => {
+            warn!("madvice is not supported. madvice flags:{:?}", advice);
+            Ok(())
+        }
+    }
 }
 
 pub const PAGE_SIZE: usize = 4096;

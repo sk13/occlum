@@ -394,6 +394,17 @@ impl ChunkManager {
         Ok(())
     }
 
+    /// madvise(MADV_DONTNEED): adds the parts of the range that have to be zeroed to `ranges`.
+    pub fn dontneed_ranges(&self, range: &VMRange, ranges: &mut Vec<(usize, usize)>) {
+        for vma_obj in &self.vmas {
+            if let Some(vma) = vma_obj.vma().intersect(range) {
+                if vma.needs_zeroing_for_dontneed() {
+                    ranges.push((vma.start(), vma.size()));
+                }
+            }
+        }
+    }
+
     /// Sync all shared, file-backed memory mappings of the given file by flushing
     /// the memory content to the file.
     pub fn msync_by_file(&mut self, sync_file: &FileRef) {

@@ -609,6 +609,10 @@ impl ProcessVM {
         return USER_SPACE_VM_MANAGER.msync_by_file(sync_file);
     }
 
+    pub fn madvise_dontneed(&self, addr: usize, size: usize) -> Result<()> {
+        USER_SPACE_VM_MANAGER.madvise_dontneed(addr, size)
+    }
+
     // Return: a copy of the found region
     pub fn find_mmap_region(&self, addr: usize) -> Result<VMRange> {
         USER_SPACE_VM_MANAGER.find_mmap_region(addr)

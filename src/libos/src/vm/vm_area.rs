@@ -589,6 +589,15 @@ impl VMArea {
         Ok(())
     }
 
+    /// Whether madvise(MADV_DONTNEED) has to write zeros into this area: it is private, anonymous, writable and
+    /// has committed memory (memory that is not committed yet reads as zeros anyway).
+    pub fn needs_zeroing_for_dontneed(&self) -> bool {
+        self.file_backed.is_none()
+            && !self.is_shared()
+            && self.perms().can_write()
+            && !self.is_reserved_only()
+    }
+
     pub fn is_shared(&self) -> bool {
         match self.access {
             VMAccess::Private(_) => false,
