@@ -507,7 +507,9 @@ macro_rules! impl_syscall_nums {
 
         impl ToErrno for SyscallNumError {
             fn errno(&self) -> Errno {
-                EINVAL
+                // As Linux does: callers fall back when a system call is unknown (ENOSYS), for example
+                // Go's exec.LookPath with faccessat2 and glibc with clone3 and close_range.
+                ENOSYS
             }
         }
 
