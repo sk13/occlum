@@ -24,7 +24,7 @@ TESTS ?= env empty hello_world malloc mmap file fs_perms getpid spawn sched pipe
 	truncate readdir mkdir open stat link symlink chmod chown tls pthread system_info rlimit \
 	server server_epoll unix_socket cout hostfs cpuid rdtsc device sleep exit_group posix_flock \
 	ioctl fcntl eventfd emulate_syscall access signal sysinfo prctl rename procfs pselect sigsuspend \
-	wait spawn_attribute exec statfs random umask pgrp vfork mount flock utimes shm epoll brk posix_shm \
+	wait spawn_attribute exec statfs random umask pgrp vfork mount flock utimes shm epoll brk madvise posix_shm \
 	raw_socket sem network_policy network_redirect vector_regs unix_socket_shutdown waiter_leak \
 	unix_socket_inodes \
 	stale_eintr unix_socket_names unix_socket_options unix_socket_memory unix_socket_listen \
