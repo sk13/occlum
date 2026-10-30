@@ -21,6 +21,7 @@ pub use self::ioctl::{
 pub use self::link::{do_linkat, LinkFlags};
 pub use self::lseek::do_lseek;
 pub use self::mkdir::do_mkdirat;
+pub use self::mknod::do_mknodat;
 pub use self::open::do_openat;
 pub use self::read::{do_pread, do_preadv, do_read, do_readv};
 pub use self::rename::do_renameat;
@@ -51,6 +52,7 @@ mod ioctl;
 mod link;
 mod lseek;
 mod mkdir;
+mod mknod;
 mod open;
 mod read;
 mod rename;

@@ -4,6 +4,7 @@
 #include <unistd.h>
 #include <sys/ioctl.h>
 #include <sys/vfs.h>
+#include <sys/stat.h>
 
 void occlum_ocall_sync(void) {
     sync();
@@ -45,4 +46,8 @@ int occlum_ocall_ioctl(int fd, int request, void *arg, size_t len) {
 
 int occlum_ocall_statfs(const char *path, struct statfs *buf) {
     return statfs(path, buf);
+}
+
+int occlum_ocall_mkfifo(const char *path, unsigned int mode) {
+    return mkfifo(path, mode);
 }

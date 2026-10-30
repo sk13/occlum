@@ -4,6 +4,7 @@ use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use core::any::Any;
 use rcore_fs::vfs::*;
+use sgx_types::sgx_status_t;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{DirEntryExt, FileExt, FileTypeExt, PermissionsExt};
@@ -175,8 +176,12 @@ impl INode for HNode {
                 try_std!(fs::set_permissions(&new_path, perms));
                 None
             }
+            FileType::NamedPipe => {
+                make_host_fifo(&new_path, mode)?;
+                None
+            }
             _ => {
-                warn!("only support creating regular file or directory in HostFS");
+                warn!("only support creating regular file, directory or named pipe in HostFS");
                 return Err(FsError::PermError);
             }
         };
@@ -201,6 +206,12 @@ impl INode for HNode {
             try_std!(fs::remove_file(new_path));
         } else if new_path.is_dir() {
             try_std!(fs::remove_dir(new_path));
+        } else if new_path
+            .symlink_metadata()
+            .map(|metadata| metadata.file_type().is_fifo())
+            .unwrap_or(false)
+        {
+            try_std!(fs::remove_file(new_path));
         } else {
             return Err(FsError::EntryNotFound);
         }
@@ -328,6 +339,11 @@ impl HNode {
         self.type_ == FileType::Dir
     }
 
+    /// The path of the file at the host.
+    pub fn host_path(&self) -> &Path {
+        &self.path
+    }
+
     pub fn host_fd(&self) -> Result<i32> {
         let guard = self.file.lock().unwrap();
         match guard.as_ref() {
@@ -335,6 +351,24 @@ impl HNode {
             None => Err(FsError::EntryNotFound),
         }
     }
+}
+
+/// Makes a named pipe at the host.
+fn make_host_fifo(path: &Path, mode: u16) -> Result<()> {
+    extern "C" {
+        fn occlum_ocall_mkfifo(ret: *mut i32, path: *const i8, mode: u32) -> sgx_status_t;
+    }
+
+    let c_path = std::ffi::CString::new(path.to_string_lossy().as_bytes())
+        .map_err(|_| FsError::InvalidParam)?;
+    let mut ret: i32 = 0;
+    let status = unsafe { occlum_ocall_mkfifo(&mut ret, c_path.as_ptr(), mode as u32 & 0o777) };
+    assert!(status == sgx_status_t::SGX_SUCCESS);
+    if ret < 0 {
+        return Err(std::io::Error::from_raw_os_error(unsafe { sgx_trts::libc::errno() })
+            .into_fs_error());
+    }
+    Ok(())
 }
 
 pub trait IntoFsError {
@@ -415,6 +449,7 @@ impl IntoFsMetadata for fs::Metadata {
                 libc::S_IFREG => FileType::File,
                 libc::S_IFLNK => FileType::SymLink,
                 libc::S_IFSOCK => FileType::Socket,
+                libc::S_IFIFO => FileType::NamedPipe,
                 _ => unimplemented!("unknown file type"),
             },
             mode: self.st_mode() as u16 & 0o777,

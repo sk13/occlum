@@ -525,6 +525,19 @@ pub fn do_mkdirat(dirfd: i32, path: *const i8, mode: u16) -> Result<isize> {
     Ok(0)
 }
 
+pub fn do_mknod(path: *const i8, mode: u32, dev: u64) -> Result<isize> {
+    self::do_mknodat(AT_FDCWD, path, mode, dev)
+}
+
+pub fn do_mknodat(dirfd: i32, path: *const i8, mode: u32, dev: u64) -> Result<isize> {
+    let path = from_user::clone_cstring_safely(path)?
+        .to_string_lossy()
+        .into_owned();
+    let fs_path = FsPath::new(&path, dirfd, false)?;
+    file_ops::do_mknodat(&fs_path, mode, dev)?;
+    Ok(0)
+}
+
 pub fn do_rmdir(path: *const i8) -> Result<isize> {
     let path = from_user::clone_cstring_safely(path)?
         .to_string_lossy()

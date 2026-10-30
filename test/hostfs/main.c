@@ -1,8 +1,16 @@
 #include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <dirent.h>
 #include <stdbool.h>
+#include <poll.h>
+#include <pthread.h>
+#include <string.h>
+#include <time.h>
+#include <unistd.h>
+#include <sys/epoll.h>
+#include <sys/stat.h>
 #include "test_fs.h"
 
 // ============================================================================
@@ -245,6 +253,209 @@ static int test_mkdir_then_rmdir() {
 // Test suite main
 // ============================================================================
 
+// ============================================================================
+// Test cases for named pipes (FIFOs) of the host
+// ============================================================================
+
+#define FIFO_PATH "/host/hostfs_test.fifo"
+
+static int test_mkfifo_stat_unlink() {
+    unlink(FIFO_PATH);
+    if (mkfifo(FIFO_PATH, 0600) < 0) {
+        THROW_ERROR("mkfifo failed");
+    }
+    struct stat stat_buf;
+    if (stat(FIFO_PATH, &stat_buf) < 0 || !S_ISFIFO(stat_buf.st_mode)) {
+        THROW_ERROR("the file is not a named pipe");
+    }
+    if (mkfifo(FIFO_PATH, 0600) != -1 || errno != EEXIST) {
+        THROW_ERROR("the existing named pipe is created again");
+    }
+    // The directory lists it as a named pipe
+    DIR *dir = opendir("/host");
+    if (dir == NULL) {
+        THROW_ERROR("opendir failed");
+    }
+    int found = 0;
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        if (strcmp(entry->d_name, "hostfs_test.fifo") == 0) {
+            found = entry->d_type == DT_FIFO;
+        }
+    }
+    closedir(dir);
+    if (!found) {
+        THROW_ERROR("the directory does not list the named pipe with its type");
+    }
+    if (unlink(FIFO_PATH) < 0) {
+        THROW_ERROR("unlink failed");
+    }
+    if (stat(FIFO_PATH, &stat_buf) != -1 || errno != ENOENT) {
+        THROW_ERROR("the named pipe is still there");
+    }
+    return 0;
+}
+
+// What the control FIFO of a server does: the server opens it for reading and writing without blocking, and
+// reads it again and again
+static int test_fifo_read_write() {
+    unlink(FIFO_PATH);
+    if (mkfifo(FIFO_PATH, 0600) < 0) {
+        THROW_ERROR("mkfifo failed");
+    }
+    int ret = -1;
+    int reader = open(FIFO_PATH, O_RDWR | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
+    int writer = -1;
+    if (reader < 0) {
+        THROW_ERROR("open failed");
+    }
+    char buf[64];
+    if (read(reader, buf, sizeof(buf)) != -1 || errno != EAGAIN) {
+        printf("\t\tan empty named pipe does not give EAGAIN\n");
+        goto out;
+    }
+    // Another process writes to it
+    writer = open(FIFO_PATH, O_WRONLY | O_NONBLOCK);
+    if (writer < 0) {
+        printf("\t\tthe named pipe is not opened for writing\n");
+        goto out;
+    }
+    const char *message = "status\n";
+    if (write(writer, message, strlen(message)) != (ssize_t)strlen(message)) {
+        printf("\t\twrite failed\n");
+        goto out;
+    }
+    ssize_t len = read(reader, buf, sizeof(buf));
+    if (len != (ssize_t)strlen(message) || memcmp(buf, message, len) != 0) {
+        printf("\t\tthe bytes are not read as written\n");
+        goto out;
+    }
+    if (read(reader, buf, sizeof(buf)) != -1 || errno != EAGAIN) {
+        printf("\t\tthe named pipe is not empty again\n");
+        goto out;
+    }
+    ret = 0;
+out:
+    close(reader);
+    if (writer >= 0) {
+        close(writer);
+    }
+    unlink(FIFO_PATH);
+    return ret;
+}
+
+static void *delayed_writer(void *arg) {
+    int fd = *(int *)arg;
+    struct timespec ts = { 0, 300 * 1000 * 1000 };
+    nanosleep(&ts, NULL);
+    return (void *)(long)(write(fd, "late", 4) == 4 ? 0 : 1);
+}
+
+// A blocking read waits for the bytes that another thread writes
+static int test_fifo_blocking_read() {
+    unlink(FIFO_PATH);
+    if (mkfifo(FIFO_PATH, 0600) < 0) {
+        THROW_ERROR("mkfifo failed");
+    }
+    int fd = open(FIFO_PATH, O_RDWR);
+    if (fd < 0) {
+        THROW_ERROR("open failed");
+    }
+    pthread_t thread;
+    if (pthread_create(&thread, NULL, delayed_writer, &fd) != 0) {
+        THROW_ERROR("pthread_create failed");
+    }
+    char buf[16];
+    time_t begin = time(NULL);
+    ssize_t len = read(fd, buf, sizeof(buf));
+    void *thread_ret;
+    pthread_join(thread, &thread_ret);
+    close(fd);
+    unlink(FIFO_PATH);
+    if (len != 4 || memcmp(buf, "late", 4) != 0 || thread_ret != NULL) {
+        THROW_ERROR("the blocking read did not get the bytes (%ld)", (long)len);
+    }
+    if (time(NULL) - begin > 5) {
+        THROW_ERROR("the blocking read took too long");
+    }
+    return 0;
+}
+
+static int test_fifo_poll() {
+    unlink(FIFO_PATH);
+    if (mkfifo(FIFO_PATH, 0600) < 0) {
+        THROW_ERROR("mkfifo failed");
+    }
+    int fd = open(FIFO_PATH, O_RDWR | O_NONBLOCK);
+    if (fd < 0) {
+        THROW_ERROR("open failed");
+    }
+    int ret = -1;
+    struct pollfd pfd = { .fd = fd, .events = POLLIN };
+    if (poll(&pfd, 1, 0) != 0) {
+        printf("\t\tan empty named pipe is readable\n");
+        goto out;
+    }
+    if (write(fd, "x", 1) != 1) {
+        printf("\t\twrite failed\n");
+        goto out;
+    }
+    if (poll(&pfd, 1, 1000) != 1 || !(pfd.revents & POLLIN)) {
+        printf("\t\tthe named pipe is not readable after a write\n");
+        goto out;
+    }
+    char c;
+    if (read(fd, &c, 1) != 1) {
+        printf("\t\tread failed\n");
+        goto out;
+    }
+    // epoll
+    int epfd = epoll_create1(0);
+    struct epoll_event ev = { .events = EPOLLIN, .data.fd = fd };
+    if (epfd < 0 || epoll_ctl(epfd, EPOLL_CTL_ADD, fd, &ev) < 0) {
+        printf("\t\tepoll_ctl failed\n");
+        goto out;
+    }
+    struct epoll_event out_ev;
+    if (epoll_wait(epfd, &out_ev, 1, 0) != 0) {
+        printf("\t\tepoll reports an empty named pipe as readable\n");
+        close(epfd);
+        goto out;
+    }
+    write(fd, "y", 1);
+    if (epoll_wait(epfd, &out_ev, 1, 1000) != 1 || !(out_ev.events & EPOLLIN)) {
+        printf("\t\tepoll does not report the byte\n");
+        close(epfd);
+        goto out;
+    }
+    close(epfd);
+    ret = 0;
+out:
+    close(fd);
+    unlink(FIFO_PATH);
+    return ret;
+}
+
+// A file system of the enclave can not hold a named pipe, and a device can not be made
+static int test_mknod_types() {
+    if (mkfifo("/tmp/hostfs_test.fifo", 0600) != -1 || errno != EPERM) {
+        THROW_ERROR("a named pipe in the file system of the enclave is not refused with EPERM");
+    }
+    if (mknod("/host/hostfs_test.dev", S_IFCHR | 0600, makedev(1, 3)) != -1 || errno != EPERM) {
+        THROW_ERROR("a device is not refused with EPERM");
+    }
+    unlink("/host/hostfs_test.regular");
+    if (mknod("/host/hostfs_test.regular", S_IFREG | 0644, 0) < 0) {
+        THROW_ERROR("mknod of a regular file failed");
+    }
+    struct stat stat_buf;
+    if (stat("/host/hostfs_test.regular", &stat_buf) < 0 || !S_ISREG(stat_buf.st_mode)) {
+        THROW_ERROR("the file is not a regular file");
+    }
+    unlink("/host/hostfs_test.regular");
+    return 0;
+}
+
 static test_case_t test_cases[] = {
     TEST_CASE(test_write_read),
     TEST_CASE(test_write_fdatasync_read),
@@ -253,6 +464,11 @@ static test_case_t test_cases[] = {
     TEST_CASE(test_readdir),
     TEST_CASE(test_truncate),
     TEST_CASE(test_mkdir_then_rmdir),
+    TEST_CASE(test_mkfifo_stat_unlink),
+    TEST_CASE(test_fifo_read_write),
+    TEST_CASE(test_fifo_blocking_read),
+    TEST_CASE(test_fifo_poll),
+    TEST_CASE(test_mknod_types),
 };
 
 int main(int argc, const char *argv[]) {

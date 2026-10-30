@@ -120,6 +120,9 @@ impl FsView {
                 Err(e) => return Err(e),
             }
         };
+        if inode.metadata()?.type_ == FileType::NamedPipe {
+            return super::fifo::open_fifo(&inode, flags);
+        }
         let abs_path = self.convert_to_abs_path(&path);
         Ok(Arc::new(INodeFile::open(inode, &abs_path, flags)?))
     }

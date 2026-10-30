@@ -123,6 +123,10 @@ pub fn do_poll(pollfds: &mut [PollEvent], timeout: *mut timeval_t) -> Result<usi
             let fd = timerfd.host_fd() as FileDesc;
             index_host_pollfds.push(i);
             host_pollfds.push(PollEvent::new(fd, pollfd.events()));
+        } else if let Ok(fifo) = file_ref.as_host_fifo() {
+            let fd = fifo.host_fd().unwrap().to_raw();
+            index_host_pollfds.push(i);
+            host_pollfds.push(PollEvent::new(fd, pollfd.events()));
         } else {
             return_errno!(EBADF, "not a supported file type");
         }

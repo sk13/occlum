@@ -16,6 +16,7 @@ use crate::config::ConfigMount;
 
 pub use self::event_file::{AsEvent, EventCreationFlags, EventFile};
 pub use self::events::{AtomicIoEvents, IoEvents, IoNotifier};
+pub use self::fifo::{AsHostFifo, HostFifo};
 pub use self::file::{File, FileRef};
 pub use self::file_ops::{
     occlum_ocall_ioctl, utimbuf_t, AccessMode, BuiltinIoctlNum, CreationFlags, FallocateFlags,
@@ -45,6 +46,7 @@ mod event_file;
 mod events;
 mod file;
 mod file_ops;
+mod fifo;
 mod file_table;
 mod fs_ops;
 mod fs_view;
