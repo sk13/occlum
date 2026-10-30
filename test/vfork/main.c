@@ -295,6 +295,7 @@ int test_vfork_multiple_threads() {
 // A child whose execve fails exits with EXEC_FAILED, which the parent does not expect.
 
 #define ARG_EXIT        "--exit"
+#define ARG_SLEEP       "--sleep"
 #define ARG_EXEC_EXIT   "--exec-exit"
 #define ARG_WAIT_CHILD  "--wait-child"
 #define ARG_VICTIM      "--victim"
@@ -1470,6 +1471,50 @@ int test_vfork_nested_sys_exit_stop_child_thread() {
     return run_nested_stop_child_thread(LEAVE_SYS_EXIT);
 }
 
+// A thread that waits for a child process (wait4) is stopped by the vfork of another thread, too. Else the
+// thread that makes the vfork waits for it as long as the child lives, which can be for ever.
+static void *wait_for_sleeper(void *arg) {
+    int status = 0;
+    pid_t pid = (pid_t)(long)arg;
+    return (wait_for_child(pid, &status) == pid && EXITED_WITH(status, 0)) ? NULL : (void *)1;
+}
+
+int test_vfork_while_a_thread_waits_for_a_child() {
+    char *sleep_argv[] = { SELF_PATH, ARG_SLEEP, "1500", NULL };
+    pid_t sleeper;
+    if (posix_spawn(&sleeper, SELF_PATH, NULL, NULL, sleep_argv, NULL) != 0) {
+        THROW_ERROR("posix_spawn failed");
+    }
+    pthread_t thread;
+    if (pthread_create(&thread, NULL, wait_for_sleeper, (void *)(long)sleeper) != 0) {
+        THROW_ERROR("pthread_create failed");
+    }
+    // The thread is in its wait now
+    struct timespec ts = { 0, 300 * 1000 * 1000 };
+    nanosleep(&ts, NULL);
+
+    time_t begin = time(NULL);
+    pid_t child_pid = vfork();
+    if (child_pid == 0) {
+        exec_exit("5");
+        _exit(EXEC_FAILED);
+    }
+    int status = 0;
+    if (child_pid < 0 || wait_for_child(child_pid, &status) != child_pid || !EXITED_WITH(status, 5)) {
+        THROW_ERROR("wait child status error");
+    }
+    // The vfork did not have to wait for the sleeper, which lives for more than a second
+    if (time(NULL) - begin >= 1) {
+        THROW_ERROR("the vfork waited for the thread that waits for a child");
+    }
+    void *thread_ret = NULL;
+    pthread_join(thread, &thread_ret);
+    if (thread_ret != NULL) {
+        THROW_ERROR("the thread did not get the status of its child");
+    }
+    return 0;
+}
+
 static test_case_t test_cases[] = {
     TEST_CASE(test_vfork_exit_and_wait),
     TEST_CASE(test_multiple_vfork_execve),
@@ -1503,6 +1548,7 @@ static test_case_t test_cases[] = {
     TEST_CASE(test_vfork_sys_exit_thread_signal),
     TEST_CASE(test_vfork_sys_exit_robust_mutex),
     TEST_CASE(test_vfork_nested_sys_exit_stop_child_thread),
+    TEST_CASE(test_vfork_while_a_thread_waits_for_a_child),
 };
 
 // Without an argument, all the test cases are run. With an argument, only the test cases with this
@@ -1513,6 +1559,9 @@ int main(int argc, char *argv[]) {
     setvbuf(stdout, NULL, _IOLBF, 0);
     if (argc >= 3 && strcmp(argv[1], ARG_EXIT) == 0) {
         return atoi(argv[2]);
+    } else if (argc >= 3 && strcmp(argv[1], ARG_SLEEP) == 0) {
+        usleep(atoi(argv[2]) * 1000);
+        return 0;
     } else if (argc >= 3 && strcmp(argv[1], ARG_EXEC_EXIT) == 0) {
         exec_exit(argv[2]);
         return EXEC_FAILED;

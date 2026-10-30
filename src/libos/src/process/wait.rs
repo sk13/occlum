@@ -74,12 +74,17 @@ where
             if self.inner.lock().unwrap().is_woken {
                 return true;
             }
-            if process.is_forced_to_exit() || crate::signal::has_signal_to_deliver(&thread, process)
+            // A thread that another thread of its process has forced to stop (vfork) has to leave the wait, too:
+            // the thread that makes the vfork waits until all the others are stopped, and they stop when they
+            // return from their system call
+            if process.is_forced_to_exit()
+                || thread.is_forced_to_stop()
+                || crate::signal::has_signal_to_deliver(&thread, process)
             {
                 return false;
             }
             // The wait also returns when the host interrupts it with a signal, which
-            // it does for threads with a signal to deliver, see broadcast_interrupts
+            // it does for threads with a reason to leave it, see broadcast_interrupts
             wait_event(self.thread);
         }
     }
