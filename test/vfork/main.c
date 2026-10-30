@@ -1687,6 +1687,99 @@ int test_vfork_while_a_thread_waits_for_a_child() {
     return 0;
 }
 
+// The child of a vfork has its own signal handlers and signal mask. What it changes before its execve or _exit, e.g.,
+// the runtime of Go resets all handlers to the default action, is not seen by the parent: else the parent is killed
+// by its next SIGPIPE, or does not get the signal that it handles.
+static volatile sig_atomic_t g_usr1_count;
+
+static void usr1_handler(int signum) {
+    g_usr1_count++;
+}
+
+static int check_signal_state_of_parent(const sigset_t *mask_before, const char *what) {
+    sigset_t mask_after;
+    memset(&mask_after, 0, sizeof(mask_after));
+    pthread_sigmask(SIG_SETMASK, NULL, &mask_after);
+    // The system call fills in the first 8 bytes (64 signals) of the sigset_t of libc, which is larger
+    if (memcmp(mask_before, &mask_after, 8) != 0) {
+        THROW_ERROR("%s: the signal mask of the parent changed (%#lx, then %#lx)", what,
+                    *(const unsigned long *)mask_before, *(const unsigned long *)&mask_after);
+    }
+    g_usr1_count = 0;
+    raise(SIGUSR1);
+    if (g_usr1_count != 1) {
+        THROW_ERROR("%s: the handler of the parent does not run (count %d)", what, (int)g_usr1_count);
+    }
+    return 0;
+}
+
+int test_vfork_child_changes_signal_state() {
+    struct sigaction handler = { .sa_handler = usr1_handler };
+    sigemptyset(&handler.sa_mask);
+    if (sigaction(SIGUSR1, &handler, NULL) < 0) {
+        THROW_ERROR("sigaction failed");
+    }
+    sigset_t mask_before;
+    memset(&mask_before, 0, sizeof(mask_before));
+    pthread_sigmask(SIG_SETMASK, NULL, &mask_before);
+
+    for (int leave_with_execve = 0; leave_with_execve < 2; leave_with_execve++) {
+        pid_t child_pid = vfork();
+        if (child_pid == 0) {
+            struct sigaction default_action = { .sa_handler = SIG_DFL };
+            sigemptyset(&default_action.sa_mask);
+            sigaction(SIGUSR1, &default_action, NULL);
+            sigaction(SIGPIPE, &default_action, NULL);
+            sigset_t all;
+            sigfillset(&all);
+            sigprocmask(SIG_SETMASK, &all, NULL);
+            if (leave_with_execve) {
+                exec_exit("0");
+            }
+            _exit(0);
+        }
+        int status = 0;
+        if (child_pid < 0 || wait_for_child(child_pid, &status) != child_pid || !EXITED_WITH(status, 0)) {
+            THROW_ERROR("wait child status error");
+        }
+        if (check_signal_state_of_parent(&mask_before, leave_with_execve ? "execve" : "_exit") < 0) {
+            return -1;
+        }
+    }
+    // The next one of the parent sees the same
+    signal(SIGUSR1, SIG_DFL);
+    return 0;
+}
+
+int test_clone_vfork_child_changes_signal_state() {
+    struct sigaction handler = { .sa_handler = usr1_handler };
+    sigemptyset(&handler.sa_mask);
+    if (sigaction(SIGUSR1, &handler, NULL) < 0) {
+        THROW_ERROR("sigaction failed");
+    }
+    sigset_t mask_before;
+    memset(&mask_before, 0, sizeof(mask_before));
+    pthread_sigmask(SIG_SETMASK, NULL, &mask_before);
+
+    pid_t child_pid = clone_vfork();
+    if (child_pid == 0) {
+        struct sigaction default_action = { .sa_handler = SIG_DFL };
+        sigemptyset(&default_action.sa_mask);
+        sigaction(SIGUSR1, &default_action, NULL);
+        sigset_t all;
+        sigfillset(&all);
+        sigprocmask(SIG_SETMASK, &all, NULL);
+        _exit(0);
+    }
+    int status = 0;
+    if (child_pid < 0 || wait_for_child(child_pid, &status) != child_pid || !EXITED_WITH(status, 0)) {
+        THROW_ERROR("wait child status error");
+    }
+    int ret = check_signal_state_of_parent(&mask_before, "clone");
+    signal(SIGUSR1, SIG_DFL);
+    return ret;
+}
+
 static test_case_t test_cases[] = {
     TEST_CASE(test_vfork_exit_and_wait),
     TEST_CASE(test_multiple_vfork_execve),
@@ -1726,6 +1819,8 @@ static test_case_t test_cases[] = {
     TEST_CASE(test_clone_vfork_other_flags),
     TEST_CASE(test_clone_vfork_with_busy_threads),
     TEST_CASE(test_vfork_while_a_thread_waits_for_a_child),
+    TEST_CASE(test_vfork_child_changes_signal_state),
+    TEST_CASE(test_clone_vfork_child_changes_signal_state),
 };
 
 // Without an argument, all the test cases are run. With an argument, only the test cases with this

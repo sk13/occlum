@@ -4,6 +4,7 @@ use super::{ProcessFilter, ProcessRef, ProcessStatus, TermStatus, ThreadId, Thre
 use crate::fs::FileTable;
 use crate::interrupt::broadcast_interrupts;
 use crate::prelude::*;
+use crate::signal::{SigDispositions, SigSet};
 use crate::syscall::{BoxXsaveArea, CpuContext, ExtraContext};
 use std::collections::HashMap;
 use std::mem;
@@ -64,6 +65,12 @@ struct VforkLevel {
     parent_context: CpuContext,
     // The file table of the parent. It will be recovered when the child exits or has its own task.
     parent_file_table: FileTable,
+    // The signal handlers and the signal mask of the parent. The child has its own copies of them (as the child
+    // of a vfork has in Linux, which does not share its signal handlers with the parent), and changes them, e.g.,
+    // the runtime of Go resets all handlers to the default ones before the execve of the child: the parent gets
+    // the ones that it had, or it dies of its next SIGPIPE.
+    parent_sig_dispositions: Box<SigDispositions>,
+    parent_sig_mask: SigSet,
 }
 
 lazy_static! {
@@ -126,6 +133,10 @@ pub fn do_vfork(mut context: *mut CpuContext) -> Result<isize> {
     // Save parent's file table.
     let parent_file_table = vfork_save_file_table(&current);
 
+    // Save the signal handlers and the signal mask of the parent
+    let parent_sig_dispositions = Box::new(*current.process().sig_dispositions().read().unwrap());
+    let parent_sig_mask = *current.sig_mask().read().unwrap();
+
     // Save parent's context in TLS. This is done last, so that no error return can leave
     // the heap copy of its xsave area behind. Both are saved in the level of the child.
     let parent_context = save_parent_context(unsafe { &*context });
@@ -134,6 +145,8 @@ pub fn do_vfork(mut context: *mut CpuContext) -> Result<isize> {
             child_pid,
             parent_context,
             parent_file_table,
+            parent_sig_dispositions,
+            parent_sig_mask,
         });
     });
 
@@ -354,6 +367,10 @@ fn restore_parent_process(mut context: *mut CpuContext, current_ref: &ThreadRef)
         None => return_errno!(EFAULT, "couldn't find the vfork level to return from"),
     };
     let parent_file_table = level.parent_file_table;
+
+    // The parent has the signal handlers and the signal mask that it had
+    *current_ref.process().sig_dispositions().write().unwrap() = *level.parent_sig_dispositions;
+    *current_ref.sig_mask().write().unwrap() = level.parent_sig_mask;
 
     // Close all child opened files
     close_files_opened_by_child(current_ref, &parent_file_table);
