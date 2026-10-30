@@ -1471,6 +1471,176 @@ int test_vfork_nested_sys_exit_stop_child_thread() {
     return run_nested_stop_child_thread(LEAVE_SYS_EXIT);
 }
 
+// The vfork of a program that makes the system call itself, e.g., the exec of a Go program: clone with
+// CLONE_VM | CLONE_VFORK | SIGCHLD and no stack. The child runs on the stack of the parent, like the child of vfork.
+#define VFORK_CLONE_FLAGS (CLONE_VM | CLONE_VFORK | SIGCHLD)
+
+// The child returns from the helper, and calls functions, on the stack of the parent. So the helper must not
+// keep anything on the stack: like the runtime of Go does, it takes the return address into a register
+// before the system call and puts it back after, as the child and then the parent return with it.
+// (A call of syscall() would let the child overwrite the frame of syscall(), which the parent returns from.
+// The same holds for every function that the child returns from, so the code between the system call and the
+// _exit or execve of the child is inline in the function of the test.)
+long raw_vfork_clone(unsigned long flags);
+__asm__(
+    ".text\n"
+    ".type raw_vfork_clone, @function\n"
+    "raw_vfork_clone:\n"
+    "    xorl %esi, %esi\n"
+    "    xorl %edx, %edx\n"
+    "    xorl %r10d, %r10d\n"
+    "    xorl %r8d, %r8d\n"
+    "    movl $56, %eax\n"
+    "    popq %r9\n"
+    "    syscall\n"
+    "    pushq %r9\n"
+    "    ret\n"
+    ".size raw_vfork_clone, .-raw_vfork_clone\n");
+
+// Inline: the frame of a function that the child returns from would be overwritten by the calls of the child
+static inline __attribute__((always_inline)) pid_t clone_vfork(void) {
+    long ret = raw_vfork_clone(VFORK_CLONE_FLAGS);
+    if (ret < 0 && ret > -4096) {
+        errno = -ret;
+        return -1;
+    }
+    return (pid_t)ret;
+}
+
+int test_clone_vfork_exit_and_wait() {
+    pid_t child_pid = clone_vfork();
+    if (child_pid == 0) {
+        _exit(7);
+    }
+    if (child_pid < 0) {
+        THROW_ERROR("clone failed");
+    }
+    int status = 0;
+    if (wait_for_child(child_pid, &status) != child_pid || !EXITED_WITH(status, 7)) {
+        THROW_ERROR("wait child status error");
+    }
+    return 0;
+}
+
+int test_clone_vfork_execve() {
+    for (int i = 0; i < 3; i++) {
+        pid_t child_pid = clone_vfork();
+        if (child_pid == 0) {
+            char *argv[] = { SELF_PATH, ARG_EXIT, "5", NULL };
+            execve(SELF_PATH, argv, NULL);
+            _exit(EXEC_FAILED);
+        }
+        if (child_pid < 0) {
+            THROW_ERROR("clone failed");
+        }
+        int status = 0;
+        if (wait_for_child(child_pid, &status) != child_pid || !EXITED_WITH(status, 5)) {
+            THROW_ERROR("wait child status error");
+        }
+    }
+    return 0;
+}
+
+// The parent has its own file table again, and the registers of the parent are those from before the call
+int test_clone_vfork_parent_state() {
+    int fds[2];
+    if (pipe(fds) < 0) {
+        THROW_ERROR("pipe failed");
+    }
+    volatile int local = 1234;
+    pid_t child_pid = clone_vfork();
+    if (child_pid == 0) {
+        close(fds[1]);
+        _exit(0);
+    }
+    if (child_pid < 0) {
+        THROW_ERROR("clone failed");
+    }
+    if (local != 1234) {
+        THROW_ERROR("the local variable changed");
+    }
+    int status = 0;
+    wait_for_child(child_pid, &status);
+    // The child has closed the write end in its own file table only
+    if (write(fds[1], "x", 1) != 1) {
+        THROW_ERROR("the file of the parent is closed");
+    }
+    close(fds[0]);
+    close(fds[1]);
+    return 0;
+}
+
+// Any other use of CLONE_VFORK or of a stack is not the child of vfork: it is an error as before
+int test_clone_vfork_other_flags() {
+    char stack[4096] __attribute__((aligned(16)));
+    long ret = syscall(SYS_clone, VFORK_CLONE_FLAGS, stack + sizeof(stack), 0, 0, 0);
+    if (ret != -1 || (errno != EINVAL && errno != EFAULT)) {
+        THROW_ERROR("clone with a stack is not refused");
+    }
+    ret = syscall(SYS_clone, CLONE_VFORK | SIGCHLD, 0, 0, 0, 0);
+    if (ret != -1 || (errno != EINVAL && errno != EFAULT)) {
+        THROW_ERROR("clone without CLONE_VM is not refused");
+    }
+    return 0;
+}
+
+// Threads that run (and make system calls) while the process makes its children, as the runtime of Go does
+#define BUSY_THREADS 8
+#define BUSY_CHILDREN 40
+
+static volatile int g_busy_stop;
+
+static void *busy_thread(void *arg) {
+    long n = (long)arg;
+    while (!g_busy_stop) {
+        if (n % 2) {
+            getpid();
+        } else {
+            for (volatile int i = 0; i < 20000; i++) {}
+        }
+        if (n % 4 == 0) {
+            struct timespec ts = { 0, 100000 };
+            nanosleep(&ts, NULL);
+        }
+    }
+    return NULL;
+}
+
+int test_clone_vfork_with_busy_threads() {
+    pthread_t threads[BUSY_THREADS];
+    g_busy_stop = 0;
+    for (long i = 0; i < BUSY_THREADS; i++) {
+        if (pthread_create(&threads[i], NULL, busy_thread, (void *)i) != 0) {
+            THROW_ERROR("pthread_create failed");
+        }
+    }
+    int ret = 0;
+    for (int i = 0; i < BUSY_CHILDREN && ret == 0; i++) {
+        pid_t child_pid = clone_vfork();
+        if (child_pid == 0) {
+            if (i % 2) {
+                char *argv[] = { SELF_PATH, ARG_EXIT, "3", NULL };
+                execve(SELF_PATH, argv, NULL);
+                _exit(EXEC_FAILED);
+            }
+            _exit(3);
+        }
+        int status = 0;
+        if (child_pid < 0 || wait_for_child(child_pid, &status) != child_pid || !EXITED_WITH(status, 3)) {
+            printf("\t\tchild %d: pid %d status %d\n", i, child_pid, status);
+            ret = -1;
+        }
+    }
+    g_busy_stop = 1;
+    for (int i = 0; i < BUSY_THREADS; i++) {
+        pthread_join(threads[i], NULL);
+    }
+    if (ret != 0) {
+        THROW_ERROR("a child failed");
+    }
+    return 0;
+}
+
 // A thread that waits for a child process (wait4) is stopped by the vfork of another thread, too. Else the
 // thread that makes the vfork waits for it as long as the child lives, which can be for ever.
 static void *wait_for_sleeper(void *arg) {
@@ -1548,6 +1718,11 @@ static test_case_t test_cases[] = {
     TEST_CASE(test_vfork_sys_exit_thread_signal),
     TEST_CASE(test_vfork_sys_exit_robust_mutex),
     TEST_CASE(test_vfork_nested_sys_exit_stop_child_thread),
+    TEST_CASE(test_clone_vfork_exit_and_wait),
+    TEST_CASE(test_clone_vfork_execve),
+    TEST_CASE(test_clone_vfork_parent_state),
+    TEST_CASE(test_clone_vfork_other_flags),
+    TEST_CASE(test_clone_vfork_with_busy_threads),
     TEST_CASE(test_vfork_while_a_thread_waits_for_a_child),
 };
 

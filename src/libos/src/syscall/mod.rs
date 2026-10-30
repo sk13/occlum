@@ -158,7 +158,7 @@ macro_rules! process_syscall_table_with_callback {
             (Socketpair = 53) => do_socketpair(domain: c_int, socket_type: c_int, protocol: c_int, sv: *mut c_int),
             (Setsockopt = 54) => do_setsockopt(fd: c_int, level: c_int, optname: c_int, optval: *const c_void, optlen: libc::socklen_t),
             (Getsockopt = 55) => do_getsockopt(fd: c_int, level: c_int, optname: c_int, optval: *mut c_void, optlen: *mut libc::socklen_t),
-            (Clone = 56) => do_clone(flags: u32, stack_addr: usize, ptid: *mut pid_t, ctid: *mut pid_t, new_tls: usize),
+            (Clone = 56) => do_clone(flags: u32, stack_addr: usize, ptid: *mut pid_t, ctid: *mut pid_t, new_tls: usize, context: *mut CpuContext),
             (Fork = 57) => handle_unsupported(),
             (Vfork = 58) => do_vfork(context: *mut CpuContext),
             (Execve = 59) => do_execve(path: *const i8, argv: *const *const i8, envp: *const *const i8, context: *mut CpuContext),
@@ -658,6 +658,9 @@ fn do_syscall(user_context: &mut CpuContext) {
             syscall.args[0] = user_context as *mut _ as isize;
         } else if syscall_num == SyscallNum::Vfork {
             syscall.args[0] = user_context as *mut _ as isize;
+        } else if syscall_num == SyscallNum::Clone {
+            // syscall.args[0..5] == flags, stack, ptid, ctid, tls: the context is for a clone that is a vfork
+            syscall.args[5] = user_context as *mut _ as isize;
         } else if syscall_num == SyscallNum::Execve {
             // syscall.args[0] == path
             // syscall.args[1] == argv

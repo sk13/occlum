@@ -216,13 +216,29 @@ fn clone_file_actions_from_fa_safely(fa_ptr: *const SpawnFileActions) -> Result<
     Ok(file_actions)
 }
 
+// The flags of clone that are a vfork: the memory is shared, the parent waits, the child is a process (no
+// CLONE_THREAD) that ends with SIGCHLD. The ids and the stack of the child are not set.
+fn is_vfork_clone(flags: u32) -> bool {
+    const EXIT_SIGNAL_MASK: u32 = 0xff;
+    let signal = flags & EXIT_SIGNAL_MASK;
+    let other = flags & !EXIT_SIGNAL_MASK;
+    other == (CloneFlags::CLONE_VM | CloneFlags::CLONE_VFORK).bits() && signal == libc::SIGCHLD as u32
+}
+
 pub fn do_clone(
     flags: u32,
     stack_addr: usize,
     ptid: *mut pid_t,
     ctid: *mut pid_t,
     new_tls: usize,
+    context: *mut CpuContext,
 ) -> Result<isize> {
+    // clone(CLONE_VM | CLONE_VFORK | SIGCHLD, NULL), which is what vfork is in Linux (and what the exec of Go
+    // programs makes, with a raw system call): the child runs on the stack of the parent until it exits or calls
+    // execve. The other flags give threads, or are not supported.
+    if stack_addr == 0 && is_vfork_clone(flags) {
+        return super::do_vfork::do_vfork(context);
+    }
     let flags = CloneFlags::from_bits_truncate(flags);
     check_mut_ptr(stack_addr as *mut u64)?;
     let ptid = {
