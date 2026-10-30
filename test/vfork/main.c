@@ -1650,7 +1650,7 @@ static void *wait_for_sleeper(void *arg) {
 }
 
 int test_vfork_while_a_thread_waits_for_a_child() {
-    char *sleep_argv[] = { SELF_PATH, ARG_SLEEP, "1500", NULL };
+    char *sleep_argv[] = { SELF_PATH, ARG_SLEEP, "3000", NULL };
     pid_t sleeper;
     if (posix_spawn(&sleeper, SELF_PATH, NULL, NULL, sleep_argv, NULL) != 0) {
         THROW_ERROR("posix_spawn failed");
@@ -1663,7 +1663,8 @@ int test_vfork_while_a_thread_waits_for_a_child() {
     struct timespec ts = { 0, 300 * 1000 * 1000 };
     nanosleep(&ts, NULL);
 
-    time_t begin = time(NULL);
+    struct timespec begin, end;
+    clock_gettime(CLOCK_MONOTONIC, &begin);
     pid_t child_pid = vfork();
     if (child_pid == 0) {
         exec_exit("5");
@@ -1673,8 +1674,9 @@ int test_vfork_while_a_thread_waits_for_a_child() {
     if (child_pid < 0 || wait_for_child(child_pid, &status) != child_pid || !EXITED_WITH(status, 5)) {
         THROW_ERROR("wait child status error");
     }
-    // The vfork did not have to wait for the sleeper, which lives for more than a second
-    if (time(NULL) - begin >= 1) {
+    // The vfork did not have to wait for the sleeper, which lives for another 2.7 seconds
+    clock_gettime(CLOCK_MONOTONIC, &end);
+    if (end.tv_sec - begin.tv_sec >= 2) {
         THROW_ERROR("the vfork waited for the thread that waits for a child");
     }
     void *thread_ret = NULL;
