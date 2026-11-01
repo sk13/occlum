@@ -478,6 +478,32 @@ impl VMManager {
         Ok(())
     }
 
+    /// Commit the pages of the range that are not committed yet (EDMM commits the pages of an anonymous mapping when they are
+    /// first touched). A syscall calls this before its OCALL fills a buffer of the user: the SDK's libc wrappers of read and
+    /// pread (and the like) keep the data on the stack of the host until it is copied to the user's buffer, and a #PF in
+    /// that copy is delivered on the same host stack, over the data that is still to be copied.
+    pub fn commit_user_range(&self, addr: usize, size: usize) -> Result<()> {
+        if size == 0 {
+            return Ok(());
+        }
+        let start = align_down(addr, PAGE_SIZE);
+        let end = align_up(addr.checked_add(size).ok_or_else(|| errno!(EFAULT, "the range wraps around"))?, PAGE_SIZE);
+        let range = VMRange::new(start, end)?;
+        let chunks: Vec<ChunkRef> = {
+            let current = current!();
+            let process_mem_chunks = current.vm().mem_chunks().read().unwrap();
+            process_mem_chunks
+                .iter()
+                .filter(|chunk| chunk.range().overlap_with(&range))
+                .cloned()
+                .collect()
+        };
+        for chunk in chunks {
+            chunk.commit_range(&range, true)?;
+        }
+        Ok(())
+    }
+
     pub fn msync_by_file(&self, sync_file: &FileRef) {
         let current = current!();
         let process_mem_chunks = current.vm().mem_chunks().read().unwrap();
@@ -563,7 +589,7 @@ impl VMManager {
                 mmap_options.initializer(),
                 VMInitializer::CopyFrom { .. } | VMInitializer::CopyOldAndReadNew { .. }
             ) {
-                chunk.commit_range(&old_range)?;
+                chunk.commit_range(&old_range, false)?;
             }
         }
 

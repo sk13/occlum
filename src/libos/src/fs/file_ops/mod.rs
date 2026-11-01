@@ -64,3 +64,20 @@ mod truncate;
 mod unlink;
 mod utimes;
 mod write;
+
+/// The SDK's libc wrappers of the OCALLs that read or write (read, pread, readv, preadv, write, pwrite, writev, pwritev, ...)
+/// keep the data in a buffer on the stack of the host when the count is at most this (MAX_OCALL_ALLOC_SIZE of sgx_libc): a
+/// read copies it to the caller's buffer after the OCALL, a write fills it from the caller's buffer before. If a page of
+/// the caller's buffer is not committed yet (EDMM commits it on the first access), the #PF of that copy is delivered on the
+/// host stack too and overwrites the data of the buffer: a read returns garbage after the page boundary, a write puts
+/// garbage into the file. So a buffer this small is committed before the call. A larger one goes through a buffer on the
+/// heap of the enclave, which a #PF does not touch.
+const OCALL_STACK_BUFFER_MAX: usize = 0x4000;
+
+pub(super) fn commit_for_ocall(buf: &[u8]) {
+    if buf.is_empty() || buf.len() > OCALL_STACK_BUFFER_MAX {
+        return;
+    }
+    // Best effort: a buffer that is not mapped makes the read fail by itself.
+    let _ = current!().vm().commit_user_range(buf.as_ptr() as usize, buf.len());
+}

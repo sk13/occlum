@@ -458,7 +458,7 @@ impl ChunkManager {
     }
 
     // Commit the uncommitted pages of the current process's VMAs in the given range
-    pub fn commit_range(&mut self, range: &VMRange) -> Result<()> {
+    pub fn commit_range(&mut self, range: &VMRange, accessible_only: bool) -> Result<()> {
         let current_pid = current!().process().pid();
         let bound = range.start().max(self.range.start());
         let mut vmas_cursor = self.vmas.upper_bound_mut(Bound::Included(&bound));
@@ -474,7 +474,7 @@ impl ChunkManager {
             }
 
             let mut vma = vma.clone();
-            vma.commit_range(range)?;
+            vma.commit_range(range, accessible_only)?;
             vmas_cursor.replace_with(VMAObj::new_vma_obj(vma));
             vmas_cursor.move_next();
         }

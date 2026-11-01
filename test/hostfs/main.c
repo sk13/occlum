@@ -10,6 +10,7 @@
 #include <time.h>
 #include <unistd.h>
 #include <sys/epoll.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include "test_fs.h"
 
@@ -456,6 +457,131 @@ static int test_mknod_types() {
     return 0;
 }
 
+// ============================================================================
+// Test cases for buffers with pages that are not committed yet
+// ============================================================================
+
+// With EDMM the pages of an anonymous mapping above the memory the enclave starts with are committed when they are first
+// touched. A read into a page that was never touched, or a write from one, makes that first touch inside the syscall, in the
+// middle of the copy between the buffer of the user and the buffer of the host. The data of the call must come out intact.
+
+#define FRESH_FILE "/host/hostfs_fresh_pages.bin"
+
+static unsigned char fresh_pattern(size_t i) {
+    return (unsigned char)('a' + (i % 26));
+}
+
+// Six pages that nobody touched, a mapping of their own: the memory above the one the enclave starts with is committed
+// page by page, on the first access (a mapping that was touched is committed as a whole)
+static unsigned char *fresh_pages(void) {
+    static unsigned char *region = NULL;
+    static size_t next_page = 0;
+    const size_t region_size = 64UL << 20;
+    if (region == NULL) {
+        region = mmap(NULL, region_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (region == MAP_FAILED) {
+            region = NULL;
+            return NULL;
+        }
+        next_page = (region_size / 4096) / 2;
+    }
+    unsigned char *pages = mmap(region + next_page * 4096, 6 * 4096, PROT_READ | PROT_WRITE,
+                                MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+    if (pages == MAP_FAILED) {
+        return NULL;
+    }
+    // A guard page keeps the next mapping from being merged with this one
+    mprotect(region + (next_page + 6) * 4096, 4096, PROT_NONE);
+    next_page += 7;
+    return pages;
+}
+
+static const size_t fresh_lens[] = {792, 4000, 8000, 16000};
+static const size_t fresh_before[] = {1, 8, 512, 1500};   // bytes of the copy before the page boundary
+
+static int test_read_into_fresh_pages() {
+    static unsigned char content[16384];
+    for (size_t i = 0; i < sizeof(content); i++) {
+        content[i] = fresh_pattern(i);
+    }
+    int fd = open(FRESH_FILE, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0 || write(fd, content, sizeof(content)) != (ssize_t)sizeof(content)) {
+        THROW_ERROR("failed to create the file");
+    }
+    close(fd);
+
+    for (size_t li = 0; li < ARRAY_SIZE(fresh_lens); li++) {
+        for (size_t bi = 0; bi < ARRAY_SIZE(fresh_before); bi++) {
+            size_t len = fresh_lens[li], before = fresh_before[bi];
+            if (before >= len) {
+                continue;
+            }
+            unsigned char *pages = fresh_pages();
+            if (pages == NULL) {
+                THROW_ERROR("mmap failed");
+            }
+            pages[0] = 0;                                  // the page before the boundary is committed, the next one is not
+            unsigned char *buf = pages + 4096 - before;
+            fd = open(FRESH_FILE, O_RDONLY);
+            ssize_t ret = read(fd, buf, len);
+            close(fd);
+            if (ret != (ssize_t)len) {
+                THROW_ERROR("read returned %ld, not %lu", (long)ret, (unsigned long)len);
+            }
+            for (size_t i = 0; i < len; i++) {
+                if (buf[i] != fresh_pattern(i)) {
+                    THROW_ERROR("byte %lu of a read of %lu bytes (the page boundary is at %lu) is wrong",
+                                (unsigned long)i, (unsigned long)len, (unsigned long)before);
+                }
+            }
+        }
+    }
+    unlink(FRESH_FILE);
+    return 0;
+}
+
+static int test_write_from_fresh_pages() {
+    for (size_t li = 0; li < ARRAY_SIZE(fresh_lens); li++) {
+        for (size_t bi = 0; bi < ARRAY_SIZE(fresh_before); bi++) {
+            size_t len = fresh_lens[li], before = fresh_before[bi];
+            if (before >= len) {
+                continue;
+            }
+            unsigned char *pages = fresh_pages();
+            if (pages == NULL) {
+                THROW_ERROR("mmap failed");
+            }
+            memset(pages, 0x5a, 4096);                     // the page before the boundary is committed, the next one is not
+            unsigned char *buf = pages + 4096 - before;
+            int fd = open(FRESH_FILE, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            ssize_t ret = fd < 0 ? -1 : write(fd, buf, len);
+            if (fd >= 0) {
+                close(fd);
+            }
+            if (ret != (ssize_t)len) {
+                THROW_ERROR("write returned %ld, not %lu", (long)ret, (unsigned long)len);
+            }
+            static unsigned char back[16384];
+            fd = open(FRESH_FILE, O_RDONLY);
+            ret = fd < 0 ? -1 : read(fd, back, sizeof(back));
+            if (fd >= 0) {
+                close(fd);
+            }
+            if (ret != (ssize_t)len) {
+                THROW_ERROR("the file has %ld bytes, not %lu", (long)ret, (unsigned long)len);
+            }
+            for (size_t i = 0; i < len; i++) {
+                if (back[i] != (i < before ? 0x5a : 0x00)) {
+                    THROW_ERROR("byte %lu of a write of %lu bytes (the page boundary is at %lu) is wrong",
+                                (unsigned long)i, (unsigned long)len, (unsigned long)before);
+                }
+            }
+        }
+    }
+    unlink(FRESH_FILE);
+    return 0;
+}
+
 static test_case_t test_cases[] = {
     TEST_CASE(test_write_read),
     TEST_CASE(test_write_fdatasync_read),
@@ -469,6 +595,8 @@ static test_case_t test_cases[] = {
     TEST_CASE(test_fifo_blocking_read),
     TEST_CASE(test_fifo_poll),
     TEST_CASE(test_mknod_types),
+    TEST_CASE(test_read_into_fresh_pages),
+    TEST_CASE(test_write_from_fresh_pages),
 };
 
 int main(int argc, const char *argv[]) {

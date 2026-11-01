@@ -827,8 +827,12 @@ impl VMArea {
 
     // Commit the uncommitted pages of this VMA in the given range, the same way the
     // #PF handler does.
-    pub fn commit_range(&mut self, range: &VMRange) -> Result<()> {
+    pub fn commit_range(&mut self, range: &VMRange, accessible_only: bool) -> Result<()> {
         if self.is_fully_committed() {
+            return Ok(());
+        }
+        // A page of a mapping without any access is never committed by a #PF either (that is the user's intention)
+        if accessible_only && self.perms() == VMPerms::NONE {
             return Ok(());
         }
         let range = match self.range().intersect(range) {

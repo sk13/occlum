@@ -613,6 +613,10 @@ impl ProcessVM {
         USER_SPACE_VM_MANAGER.madvise_dontneed(addr, size)
     }
 
+    pub fn commit_user_range(&self, addr: usize, size: usize) -> Result<()> {
+        USER_SPACE_VM_MANAGER.commit_user_range(addr, size)
+    }
+
     // Return: a copy of the found region
     pub fn find_mmap_region(&self, addr: usize) -> Result<VMRange> {
         USER_SPACE_VM_MANAGER.find_mmap_region(addr)

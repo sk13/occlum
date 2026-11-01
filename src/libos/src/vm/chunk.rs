@@ -256,14 +256,14 @@ impl Chunk {
     }
 
     // Commit the uncommitted pages of the current process in the given range
-    pub fn commit_range(&self, range: &VMRange) -> Result<()> {
+    pub fn commit_range(&self, range: &VMRange, accessible_only: bool) -> Result<()> {
         match self.internal() {
-            ChunkType::SingleVMA(vma) => vma.lock().unwrap().commit_range(range),
+            ChunkType::SingleVMA(vma) => vma.lock().unwrap().commit_range(range, accessible_only),
             ChunkType::MultiVMA(internal_manager) => internal_manager
                 .lock()
                 .unwrap()
                 .chunk_manager
-                .commit_range(range),
+                .commit_range(range, accessible_only),
         }
     }
 
