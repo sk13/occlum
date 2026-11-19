@@ -97,7 +97,6 @@
 //! ```
 //!
 
-#![feature(allocator_api)]
 // Use no_std and alloc crate except when given std feature or during test.
 #![cfg_attr(not(any(feature = "std", test, doctest)), no_std)]
 extern crate alloc;

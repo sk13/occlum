@@ -31,4 +31,4 @@ index cd5e8eb..9eb2e1f 100644
 +++ b/sefs-cli/rust-toolchain
 @@ -1 +1 @@
 -nightly-2022-10-22
-+1.99.0
++1.100.0

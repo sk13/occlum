@@ -3,7 +3,6 @@
 #![crate_type = "staticlib"]
 #![cfg_attr(not(target_env = "sgx"), no_std)]
 #![cfg_attr(target_env = "sgx", feature(rustc_private))]
-#![feature(allocator_api)]
 #![feature(stmt_expr_attributes)]
 #![feature(trace_macros)]
 // for !Send in rw_lock
